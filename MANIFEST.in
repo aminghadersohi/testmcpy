@@ -1,0 +1,27 @@
+include README.md
+include LICENSE
+include pyproject.toml
+
+# Include UI files (for serve command to rebuild if needed)
+recursive-include testmcpy/ui/src *
+recursive-include testmcpy/ui/dist *
+include testmcpy/ui/*.html
+include testmcpy/ui/*.js
+include testmcpy/ui/*.json
+
+# Include server files
+recursive-include testmcpy/server *.py
+
+# Include evaluators
+recursive-include testmcpy/evals *.py
+
+# Include src files
+recursive-include testmcpy/src *.py
+
+# Include other Python files
+include testmcpy/*.py
+
+# Exclude development files
+global-exclude *.pyc
+global-exclude __pycache__
+prune testmcpy/ui/node_modules

@@ -1,0 +1,14 @@
+# Core dependencies for MCP Testing Framework
+aiohttp>=3.9.0
+asyncio>=3.4.3
+fastmcp>=2.12.3
+httpx>=0.25.0
+ollama>=0.1.7
+openai>=1.0.0  # For OpenAI-compatible local models
+pydantic>=2.5.0
+pytest-asyncio>=0.21.0
+pytest>=7.4.0
+python-dotenv>=1.0.0
+pyyaml>=6.0
+rich>=13.7.0
+typer>=0.9.0

@@ -1,2 +1,3 @@
-[] add evals to the interface of the chat so for each prompt i could maybe run some evals? woudl that also let me create a test case from each chat? 
-[] when start the cli can you show the steps you are taking to auth
+[] while in the ui and browsing tools  add a button to genreate tests for the selected tool. popup a configuration modal to help them configure how the tests will get generated. it should use the llm to suggest how to genrate tests give some options such as basic, mid, and compreheisive coverage with ability to type in a say "write a test to cover x y z scenario and or update/replace existing ones"
+[] improve the requst parameter view in mcp explorer in each tool. should look like an ide or better. usres like frontend engineers might wanna copy it various formats like json, yaml, whatever is good at that layer, do some research 
+[]

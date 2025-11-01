@@ -3,6 +3,7 @@ FastAPI server for testmcpy web UI.
 """
 
 import json
+from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -58,11 +59,37 @@ class EvalRunRequest(BaseModel):
     provider: str | None = None
 
 
+# Global state
+config = get_config()
+mcp_client: MCPClient | None = None
+active_websockets: list[WebSocket] = []
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Lifespan event handler for startup and shutdown."""
+    global mcp_client
+    # Startup
+    try:
+        mcp_client = MCPClient(config.mcp_url)
+        await mcp_client.initialize()
+        print(f"MCP client initialized at {config.mcp_url}")
+    except Exception as e:
+        print(f"Warning: Failed to initialize MCP client: {e}")
+
+    yield
+
+    # Shutdown
+    if mcp_client:
+        await mcp_client.close()
+
+
 # Initialize FastAPI app
 app = FastAPI(
     title="testmcpy Web UI",
     description="Web interface for testing MCP services with LLMs",
     version="1.0.0",
+    lifespan=lifespan,
 )
 
 # Enable CORS
@@ -73,31 +100,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# Global state
-config = get_config()
-mcp_client: MCPClient | None = None
-active_websockets: list[WebSocket] = []
-
-
-@app.on_event("startup")
-async def startup_event():
-    """Initialize MCP client on startup."""
-    global mcp_client
-    try:
-        mcp_client = MCPClient(config.mcp_url)
-        await mcp_client.initialize()
-        print(f"MCP client initialized at {config.mcp_url}")
-    except Exception as e:
-        print(f"Warning: Failed to initialize MCP client: {e}")
-
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    """Cleanup on shutdown."""
-    global mcp_client
-    if mcp_client:
-        await mcp_client.close()
 
 
 # API Routes

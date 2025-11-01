@@ -10,10 +10,24 @@ function Configuration() {
     loadConfig()
   }, [])
 
+  const fetchWithRetry = async (url, retries = 3, delay = 1000) => {
+    for (let i = 0; i < retries; i++) {
+      try {
+        const response = await fetch(url)
+        if (!response.ok) throw new Error(`HTTP ${response.status}`)
+        return response
+      } catch (error) {
+        if (i === retries - 1) throw error
+        console.log(`Retry ${i + 1}/${retries} for ${url}...`)
+        await new Promise(resolve => setTimeout(resolve, delay))
+      }
+    }
+  }
+
   const loadConfig = async () => {
     setLoading(true)
     try {
-      const res = await fetch('/api/config')
+      const res = await fetchWithRetry('/api/config')
       const data = await res.json()
       setConfig(data)
     } catch (error) {

@@ -16,13 +16,27 @@ function MCPExplorer() {
     loadData()
   }, [])
 
+  const fetchWithRetry = async (url, retries = 3, delay = 1000) => {
+    for (let i = 0; i < retries; i++) {
+      try {
+        const response = await fetch(url)
+        if (!response.ok) throw new Error(`HTTP ${response.status}`)
+        return response
+      } catch (error) {
+        if (i === retries - 1) throw error
+        console.log(`Retry ${i + 1}/${retries} for ${url}...`)
+        await new Promise(resolve => setTimeout(resolve, delay))
+      }
+    }
+  }
+
   const loadData = async () => {
     setLoading(true)
     try {
       const [toolsRes, resourcesRes, promptsRes] = await Promise.all([
-        fetch('/api/mcp/tools'),
-        fetch('/api/mcp/resources'),
-        fetch('/api/mcp/prompts'),
+        fetchWithRetry('/api/mcp/tools'),
+        fetchWithRetry('/api/mcp/resources'),
+        fetchWithRetry('/api/mcp/prompts'),
       ])
 
       setTools(await toolsRes.json())

@@ -1,12 +1,20 @@
-# testmcpy
+<p align="center">
+  <img src="docs/logos/logo.svg" alt="testmcpy logo" width="600">
+</p>
 
-**Test and benchmark LLMs with MCP tools in minutes.**
+<p align="center">
+  <strong>Test and benchmark LLMs with MCP tools in minutes.</strong>
+</p>
 
-A testing framework for validating how LLMs call tools via Model Context Protocol (MCP) - compare Claude, GPT-4, Llama, and other models' accuracy, cost, and performance.
+<p align="center">
+  A testing framework for validating how LLMs call tools via Model Context Protocol (MCP) - compare Claude, GPT-4, Llama, and other models' accuracy, cost, and performance.
+</p>
 
-[![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
-[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
-[![PyPI](https://img.shields.io/badge/pypi-testmcpy-blue)](https://pypi.org/project/testmcpy/)
+<p align="center">
+  <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.9+-blue.svg" alt="Python 3.9+"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="License"></a>
+  <a href="https://pypi.org/project/testmcpy/"><img src="https://img.shields.io/badge/pypi-testmcpy-blue" alt="PyPI"></a>
+</p>
 
 [Screenshot: CLI test runner with colorful progress bars and results]
 
@@ -65,6 +73,16 @@ Comprehensive validation out of the box:
 - **Rich terminal UI**: Progress bars, colored output, formatted tables
 - **Optional web interface**: Visual tool explorer and interactive chat
 - **Real-time feedback**: Watch tests execute with live updates
+
+When you start testmcpy, you're greeted with a beautiful terminal interface:
+
+```
+  ▀█▀ █▀▀ █▀ ▀█▀ █▀▄▀█ █▀▀ █▀█ █▄█
+   █  ██▄ ▄█  █  █ ▀ █ █▄▄ █▀▀  █
+
+  🧪 Test  •  📊 Benchmark  •  ✓ Validate
+  MCP Testing Framework
+```
 
 [Screenshot: Split view of CLI and Web UI running the same test]
 

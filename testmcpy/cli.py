@@ -40,10 +40,23 @@ app = typer.Typer(
 console = Console()
 
 
+def print_logo():
+    """Print testmcpy ASCII logo."""
+    logo = """
+  [bold cyan]▀█▀ █▀▀ █▀ ▀█▀ █▀▄▀█ █▀▀ █▀█ █▄█[/bold cyan]
+  [bold cyan] █  ██▄ ▄█  █  █ ▀ █ █▄▄ █▀▀  █ [/bold cyan]
+
+  [dim]🧪 Test  •  📊 Benchmark  •  ✓ Validate[/dim]
+  [dim]MCP Testing Framework[/dim]
+"""
+    console.print(logo)
+
+
 def version_callback(value: bool):
     """Display version and exit."""
     if value:
-        console.print(f"[bold cyan]testmcpy[/bold cyan] version [green]{__version__}[/green]")
+        print_logo()
+        console.print(f"\n  Version: [green]{__version__}[/green]")
         raise typer.Exit()
 
 
@@ -1263,6 +1276,9 @@ def serve(
     This command starts a FastAPI server that serves a beautiful React-based UI
     for inspecting MCP tools, interactive chat, and test management.
     """
+    # Show logo
+    print_logo()
+
     # Show authentication steps
     console.print("\n[bold cyan]Authentication Setup[/bold cyan]")
     console.print("[dim]━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[/dim]")
@@ -1397,10 +1413,25 @@ def serve(
     if not no_browser:
         import threading
         import webbrowser
+        import requests
 
         def open_browser():
-            time.sleep(1.5)  # Wait for server to start
-            webbrowser.open(f"http://{host}:{port}")
+            # Wait for server to be ready by checking health endpoint
+            url = f"http://{host}:{port}/"
+            max_attempts = 30
+            for i in range(max_attempts):
+                try:
+                    response = requests.get(url, timeout=1)
+                    if response.status_code == 200:
+                        # Server is ready
+                        webbrowser.open(url)
+                        return
+                except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
+                    pass
+                time.sleep(0.2)  # Wait 200ms between attempts
+
+            # If server didn't start after max attempts, open anyway
+            webbrowser.open(url)
 
         threading.Thread(target=open_browser, daemon=True).start()
 
@@ -1730,6 +1761,169 @@ def config_mcp(
     except Exception as e:
         console.print(f"[red]Error writing config file:[/red] {e}")
         return
+
+
+@app.command()
+def export(
+    tool_name: str | None = typer.Argument(None, help="Tool name to export (or use --all)"),
+    format: str = typer.Option("typescript", "--format", "-f", help="Export format"),
+    output: Path | None = typer.Option(None, "--output", "-o", help="Output file"),
+    all: bool = typer.Option(False, "--all", help="Export all tools"),
+    profile: str | None = typer.Option(None, "--profile", help="MCP profile"),
+    mcp_url: str | None = typer.Option(None, "--mcp-url", help="MCP service URL"),
+):
+    """
+    Export MCP tool schemas in various formats.
+
+    Supported formats: typescript, python, protobuf, thrift, graphql, curl, json, yaml
+
+    Examples:
+        # Export as TypeScript
+        testmcpy export get_chart_data --format typescript
+
+        # Export all tools as Python to file
+        testmcpy export --all --format python -o schemas.py
+
+        # Generate cURL command
+        testmcpy export list_datasets --format curl
+
+        # Use specific profile
+        testmcpy export search --format protobuf --profile production
+    """
+    from testmcpy.formatters import FORMATS
+
+    # Load config with profile if specified
+    if profile:
+        from testmcpy.config import Config
+
+        cfg = Config(profile=profile)
+        effective_mcp_url = mcp_url or cfg.mcp_url
+    else:
+        effective_mcp_url = mcp_url or DEFAULT_MCP_URL
+
+    # Validate format
+    if format not in FORMATS:
+        console.print(f"[red]Error: Unknown format '{format}'[/red]")
+        console.print(f"[yellow]Supported formats: {', '.join(FORMATS.keys())}[/yellow]")
+        raise typer.Exit(1)
+
+    # Validate that either tool_name or --all is provided
+    if not tool_name and not all:
+        console.print("[red]Error: Either specify a tool name or use --all flag[/red]")
+        console.print("[yellow]Example: testmcpy export my_tool --format typescript[/yellow]")
+        raise typer.Exit(1)
+
+    async def export_schemas():
+        from testmcpy.src.mcp_client import MCPClient
+
+        console.print(
+            Panel.fit(
+                f"[bold cyan]Export MCP Tool Schemas[/bold cyan]\n"
+                f"Format: {FORMATS[format]['label']} | Service: {effective_mcp_url}",
+                border_style="cyan",
+            )
+        )
+
+        try:
+            with console.status("[bold green]Connecting to MCP service...[/bold green]"):
+                async with MCPClient(effective_mcp_url) as client:
+                    tools = await client.list_tools()
+
+                    if not tools:
+                        console.print("[yellow]No tools found in MCP service[/yellow]")
+                        return
+
+                    # Filter tools if specific tool requested
+                    if not all:
+                        tools = [t for t in tools if t.name == tool_name]
+                        if not tools:
+                            console.print(f"[red]Error: Tool '{tool_name}' not found[/red]")
+                            console.print(
+                                f"[yellow]Available tools: {', '.join([t.name for t in await client.list_tools()])}[/yellow]"
+                            )
+                            return
+
+                    console.print(
+                        f"[green]✓ Found {len(tools)} tool(s) to export[/green]\n"
+                    )
+
+                    # Get the conversion function
+                    convert_func = FORMATS[format]["convert"]
+                    language = FORMATS[format]["language"]
+
+                    # Generate output
+                    output_lines = []
+
+                    for i, tool in enumerate(tools):
+                        # Add separator between tools when exporting all
+                        if all and i > 0:
+                            if format in ["typescript", "python"]:
+                                output_lines.append("\n\n")
+                            elif format in ["protobuf", "thrift", "graphql"]:
+                                output_lines.append("\n")
+                            elif format == "curl":
+                                output_lines.append("\n" + "=" * 80 + "\n\n")
+                            else:
+                                output_lines.append("\n---\n\n")
+
+                        # Add tool name comment for clarity when exporting all
+                        if all:
+                            if format in ["typescript", "python", "protobuf", "thrift", "graphql"]:
+                                output_lines.append(f"// Tool: {tool.name}\n")
+                            elif format == "yaml":
+                                output_lines.append(f"# Tool: {tool.name}\n")
+
+                        # Convert schema
+                        if format == "curl":
+                            converted = convert_func(tool.input_schema, tool.name)
+                        elif format in ["json", "yaml"]:
+                            # For JSON/YAML, include tool metadata
+                            schema_with_metadata = {
+                                "name": tool.name,
+                                "description": tool.description,
+                                "input_schema": tool.input_schema,
+                            }
+                            converted = convert_func(schema_with_metadata)
+                        else:
+                            # For code formats, use a nice name
+                            name = "".join(
+                                word.capitalize() for word in tool.name.replace("-", "_").split("_")
+                            )
+                            if format == "typescript":
+                                name = f"{name}Params"
+                            elif format == "python":
+                                name = f"{name}Params"
+                            elif format == "protobuf":
+                                name = f"{name}Request"
+                            elif format == "thrift":
+                                name = f"{name}Request"
+                            elif format == "graphql":
+                                name = f"{name}Input"
+
+                            converted = convert_func(tool.input_schema, name)
+
+                        output_lines.append(converted)
+
+                    output_text = "".join(output_lines)
+
+                    # Display or save output
+                    if output:
+                        output.write_text(output_text)
+                        console.print(f"[green]✓ Exported to {output}[/green]")
+                    else:
+                        # Display with syntax highlighting
+                        console.print(Syntax(output_text, language, theme="monokai"))
+
+        except Exception as e:
+            console.print(
+                Panel(
+                    f"[red]Error exporting schemas:[/red]\n{str(e)}",
+                    title="[red]Error[/red]",
+                    border_style="red",
+                )
+            )
+
+    asyncio.run(export_schemas())
 
 
 @app.command()

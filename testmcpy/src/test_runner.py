@@ -383,12 +383,23 @@ class TestRunner:
                     f"  Timing: {actual_duration:.2f}s execution + {wait_time:.2f}s wait = {total_duration:.2f}s total"
                 )
 
+            # Create detailed reason message
+            if all_passed:
+                reason = "All evaluators passed"
+            else:
+                failed_evals = [e for e in evaluations if not e["passed"]]
+                failed_names = [e["evaluator"] for e in failed_evals]
+                if len(failed_evals) == 1:
+                    reason = f"Failed: {failed_names[0]}"
+                else:
+                    reason = f"Failed: {', '.join(failed_names)}"
+
             return TestResult(
                 test_name=test_case.name,
                 passed=all_passed,
                 score=avg_score,
                 duration=actual_duration,
-                reason="All evaluators passed" if all_passed else "Some evaluators failed",
+                reason=reason,
                 tool_calls=llm_result.tool_calls,
                 tool_results=tool_results,
                 response=llm_result.response,

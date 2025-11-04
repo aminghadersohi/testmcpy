@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react'
-import { BrowserRouter as Router, Routes, Route, NavLink } from 'react-router-dom'
+import { BrowserRouter as Router, Routes, Route, NavLink, useNavigate, useLocation } from 'react-router-dom'
 import {
   Package,
   MessageSquare,
@@ -9,20 +9,28 @@ import {
   X,
   Server,
   Cpu,
-  CheckCircle2
+  CheckCircle2,
+  ChevronRight
 } from 'lucide-react'
 
 import MCPExplorer from './pages/MCPExplorer'
 import ChatInterface from './pages/ChatInterface'
 import TestManager from './pages/TestManager'
 import Configuration from './pages/Configuration'
+import MCPProfiles from './pages/MCPProfiles'
 
-function App() {
+function AppContent() {
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const [config, setConfig] = useState({})
+  const [selectedProfiles, setSelectedProfiles] = useState([])
+  const [profiles, setProfiles] = useState([])
+  const [showProfilesModal, setShowProfilesModal] = useState(false)
+  const navigate = useNavigate()
+  const location = useLocation()
 
   useEffect(() => {
     loadConfig()
+    loadProfiles()
   }, [])
 
   const loadConfig = async () => {
@@ -35,14 +43,76 @@ function App() {
     }
   }
 
-  const getMcpUrl = () => {
-    const url = config.MCP_URL?.value || 'Not configured'
-    // Shorten URL for display
-    if (url.length > 40 && sidebarOpen) {
-      const urlObj = new URL(url)
-      return `${urlObj.protocol}//${urlObj.hostname}/mcp`
+  const loadProfiles = async () => {
+    try {
+      const res = await fetch('/api/mcp/profiles')
+      const data = await res.json()
+      console.log('Loaded profiles from API:', data.profiles)
+      console.log('Default selection from API:', data.default_selection)
+      setProfiles(data.profiles || [])
+
+      // Check localStorage for saved selection
+      const savedProfiles = localStorage.getItem('selectedMCPProfiles')
+      console.log('Saved profiles in localStorage:', savedProfiles)
+
+      if (savedProfiles) {
+        // Use saved selection
+        try {
+          const parsed = JSON.parse(savedProfiles)
+          console.log('Using saved selection:', parsed)
+          setSelectedProfiles(parsed)
+        } catch (e) {
+          console.error('Failed to parse saved profiles:', e)
+          // If parsing fails and there's a default, use it
+          if (data.default_selection) {
+            console.log('Parse failed, using default:', data.default_selection)
+            const defaultSelection = [data.default_selection]
+            setSelectedProfiles(defaultSelection)
+            localStorage.setItem('selectedMCPProfiles', JSON.stringify(defaultSelection))
+          }
+        }
+      } else if (data.default_selection) {
+        // No saved selection, use default from API
+        console.log('No saved selection, using default:', data.default_selection)
+        const defaultSelection = [data.default_selection]
+        setSelectedProfiles(defaultSelection)
+        localStorage.setItem('selectedMCPProfiles', JSON.stringify(defaultSelection))
+      }
+    } catch (error) {
+      console.error('Failed to load profiles:', error)
     }
-    return url
+  }
+
+  const getSelectedMCPDisplay = () => {
+    if (selectedProfiles.length === 0) {
+      return { profile: 'No MCP Selected', server: 'Click to configure' }
+    }
+
+    // If profiles haven't loaded yet, show loading state
+    if (profiles.length === 0) {
+      return { profile: 'Loading...', server: 'Please wait' }
+    }
+
+    if (selectedProfiles.length === 1) {
+      const [profileId, mcpName] = selectedProfiles[0].split(':')
+      console.log('Looking for profile:', profileId, 'server:', mcpName)
+      console.log('Available profiles:', profiles.map(p => ({ id: p.id, name: p.name })))
+
+      const profile = profiles.find(p => p.id === profileId)
+      if (profile) {
+        const mcp = profile.mcps.find(m => m.name === mcpName)
+        if (mcp) {
+          return { profile: profile.name, server: mcp.name }
+        }
+      }
+      // Fallback if profile/server not found - clear invalid selection
+      console.warn('Invalid profile selection, clearing:', selectedProfiles[0])
+      localStorage.removeItem('selectedMCPProfiles')
+      setSelectedProfiles([])
+      return { profile: 'No MCP Selected', server: 'Click to configure' }
+    }
+
+    return { profile: `${selectedProfiles.length} Servers`, server: 'Multiple selected' }
   }
 
   const getModel = () => {
@@ -52,15 +122,14 @@ function App() {
   }
 
   const navItems = [
-    { path: '/', label: 'MCP Explorer', icon: Package },
-    { path: '/chat', label: 'Chat', icon: MessageSquare },
+    { path: '/', label: 'Explorer', icon: Package },
     { path: '/tests', label: 'Tests', icon: FileText },
+    { path: '/chat', label: 'Chat', icon: MessageSquare },
     { path: '/config', label: 'Config', icon: Settings },
   ]
 
   return (
-    <Router>
-      <div className="flex h-screen bg-background text-text-primary">
+    <div className="flex h-screen bg-background text-text-primary">
         {/* Sidebar */}
         <aside
           className={`${
@@ -68,8 +137,28 @@ function App() {
           } bg-surface-elevated border-r border-border transition-all duration-300 flex flex-col shadow-medium`}
         >
           <div className="p-3 flex items-center justify-between border-b border-border">
-            {sidebarOpen && (
-              <h1 className="text-xl font-bold text-primary">testmcpy</h1>
+            {sidebarOpen ? (
+              <div className="flex items-center gap-2">
+                <svg width="28" height="28" viewBox="0 0 28 28" xmlns="http://www.w3.org/2000/svg">
+                  <rect x="5" y="9" width="5" height="14" rx="1.5" fill="none" stroke="currentColor" strokeWidth="2" className="text-primary" />
+                  <rect x="7" y="16" width="3" height="7" fill="currentColor" className="text-primary" opacity="0.3" />
+                  <circle cx="9.5" cy="6" r="2.5" fill="none" stroke="currentColor" strokeWidth="1.5" className="text-primary" />
+                  <line x1="9.5" y1="6" x2="9.5" y2="9" stroke="currentColor" strokeWidth="1.5" className="text-primary" />
+                  <circle cx="20" cy="14" r="6" fill="none" stroke="currentColor" strokeWidth="2" className="text-success" />
+                  <path d="M 17 14 L 19 16 L 23 12" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="text-success" />
+                </svg>
+                <div>
+                  <h1 className="text-lg font-bold text-primary leading-tight">testmcpy</h1>
+                  <p className="text-[10px] text-text-tertiary leading-tight">MCP Testing</p>
+                </div>
+              </div>
+            ) : (
+              <svg width="24" height="24" viewBox="0 0 28 28" xmlns="http://www.w3.org/2000/svg" className="mx-auto">
+                <rect x="5" y="9" width="5" height="14" rx="1.5" fill="none" stroke="currentColor" strokeWidth="2" className="text-primary" />
+                <rect x="7" y="16" width="3" height="7" fill="currentColor" className="text-primary" opacity="0.3" />
+                <circle cx="9.5" cy="6" r="2.5" fill="none" stroke="currentColor" strokeWidth="1.5" className="text-primary" />
+                <line x1="9.5" y1="6" x2="9.5" y2="9" stroke="currentColor" strokeWidth="1.5" className="text-primary" />
+              </svg>
             )}
             <button
               onClick={() => setSidebarOpen(!sidebarOpen)}
@@ -101,22 +190,51 @@ function App() {
             })}
           </nav>
 
+          {/* MCP Selector Widget */}
+          <div className="px-3 py-3 border-t border-border">
+            <button
+              onClick={() => setShowProfilesModal(true)}
+              className="w-full flex items-center gap-2 px-3 py-2 rounded-lg transition-all duration-200 bg-surface-elevated border border-border hover:bg-surface-hover"
+            >
+              <Server size={16} className="text-primary flex-shrink-0" />
+              {sidebarOpen && (
+                <div className="flex-1 min-w-0 text-left">
+                  <div className="text-xs font-semibold text-text-primary truncate">
+                    {getSelectedMCPDisplay().profile}
+                  </div>
+                  <div className="text-[10px] text-text-tertiary truncate">
+                    {getSelectedMCPDisplay().server}
+                  </div>
+                </div>
+              )}
+              {sidebarOpen && <ChevronRight size={14} className="text-text-tertiary flex-shrink-0" />}
+            </button>
+          </div>
+
           {/* Connection Status */}
           <div className="px-3 pb-3 border-t border-border space-y-2">
             {sidebarOpen ? (
-              <div className="mt-2 bg-primary/10 border border-primary/30 rounded-lg p-2 space-y-1.5">
+              <div className={`mt-2 rounded-lg p-2 space-y-1.5 ${
+                selectedProfiles.length > 0
+                  ? 'bg-success/10 border border-success/30'
+                  : 'bg-surface border border-border'
+              }`}>
                 <div className="flex items-center gap-1.5">
-                  <CheckCircle2 size={14} className="text-success flex-shrink-0" />
-                  <div className="text-xs font-semibold text-success">Connected</div>
+                  <CheckCircle2 size={14} className={selectedProfiles.length > 0 ? 'text-success' : 'text-text-disabled'} />
+                  <div className={`text-xs font-semibold ${selectedProfiles.length > 0 ? 'text-success' : 'text-text-disabled'}`}>
+                    {selectedProfiles.length > 0 ? 'Connected' : 'Not Connected'}
+                  </div>
                 </div>
-                <div className="flex items-center gap-1.5 text-[10px] text-text-tertiary truncate">
-                  <Server size={10} className="flex-shrink-0" />
-                  <span className="truncate">{getModel().provider} · {getModel().model}</span>
-                </div>
+                {selectedProfiles.length > 0 && (
+                  <div className="flex items-center gap-1.5 text-[10px] text-text-tertiary truncate">
+                    <Server size={10} className="flex-shrink-0" />
+                    <span className="truncate">{getSelectedMCPDisplay().profile}</span>
+                  </div>
+                )}
               </div>
             ) : (
               <div className="mt-2 flex flex-col items-center gap-2 py-2">
-                <CheckCircle2 size={18} className="text-success" />
+                <CheckCircle2 size={18} className={selectedProfiles.length > 0 ? 'text-success' : 'text-text-disabled'} />
               </div>
             )}
           </div>
@@ -134,13 +252,56 @@ function App() {
         {/* Main Content */}
         <main className="flex-1 overflow-auto">
           <Routes>
-            <Route path="/" element={<MCPExplorer />} />
-            <Route path="/chat" element={<ChatInterface />} />
-            <Route path="/tests" element={<TestManager />} />
+            <Route path="/" element={<MCPExplorer selectedProfiles={selectedProfiles} />} />
+            <Route path="/chat" element={<ChatInterface selectedProfiles={selectedProfiles} />} />
+            <Route path="/tests" element={<TestManager selectedProfiles={selectedProfiles} />} />
             <Route path="/config" element={<Configuration />} />
           </Routes>
         </main>
+
+        {/* MCP Profiles Modal Overlay */}
+        {showProfilesModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
+            <div className="w-full h-full max-w-6xl max-h-[90vh] m-4 bg-surface-elevated rounded-xl shadow-2xl border border-border overflow-hidden flex flex-col">
+              {/* Modal Header */}
+              <div className="flex items-center justify-between p-4 border-b border-border bg-surface-elevated">
+                <div>
+                  <h2 className="text-xl font-bold text-text-primary">MCP Server Selection</h2>
+                  <p className="text-sm text-text-secondary mt-1">Select MCP servers to use across the application</p>
+                </div>
+                <button
+                  onClick={() => setShowProfilesModal(false)}
+                  className="p-2 hover:bg-surface-hover rounded-lg transition-colors text-text-secondary hover:text-text-primary"
+                >
+                  <X size={20} />
+                </button>
+              </div>
+
+              {/* Modal Content */}
+              <div className="flex-1 overflow-auto">
+                <MCPProfiles
+                  selectedProfiles={selectedProfiles}
+                  onSelectProfiles={(newProfiles) => {
+                    setSelectedProfiles(newProfiles)
+                    // Save to localStorage
+                    localStorage.setItem('selectedMCPProfiles', JSON.stringify(newProfiles))
+                    // Reload profiles to update the sidebar display
+                    loadProfiles()
+                  }}
+                  hideHeader={true}
+                />
+              </div>
+            </div>
+          </div>
+        )}
       </div>
+  )
+}
+
+function App() {
+  return (
+    <Router>
+      <AppContent />
     </Router>
   )
 }

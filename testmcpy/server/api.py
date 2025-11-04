@@ -3,6 +3,7 @@ FastAPI server for testmcpy web UI.
 """
 
 import json
+import re
 import warnings
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -10,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from fastapi import FastAPI, HTTPException, WebSocket
+from fastapi import FastAPI, HTTPException, WebSocket, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -24,6 +25,7 @@ warnings.filterwarnings(
 
 from testmcpy.config import get_config
 from testmcpy.evals.base_evaluators import create_evaluator
+from testmcpy.mcp_profiles import MCPProfile, MCPServer, load_profile
 from testmcpy.src.llm_integration import create_llm_provider
 from testmcpy.src.mcp_client import MCPClient, MCPToolCall
 from testmcpy.src.test_runner import TestCase, TestRunner
@@ -34,6 +36,8 @@ class ChatRequest(BaseModel):
     message: str
     model: str | None = None
     provider: str | None = None
+    profiles: list[str] | None = None  # List of MCP profile IDs to use
+    history: list[dict[str, Any]] | None = None  # Chat history for context
 
 
 class ChatResponse(BaseModel):
@@ -67,16 +71,471 @@ class EvalRunRequest(BaseModel):
     provider: str | None = None
 
 
+class GenerateTestsRequest(BaseModel):
+    tool_name: str
+    tool_description: str
+    tool_schema: dict[str, Any]
+    coverage_level: str  # "basic", "mid", "comprehensive"
+    custom_instructions: str | None = None
+    model: str | None = None
+    provider: str | None = None
+
+
+class FormatSchemaRequest(BaseModel):
+    schema: dict[str, Any]
+    tool_name: str
+    format: str  # e.g., "python_client", "javascript_client", "typescript_client"
+    mcp_url: str | None = None  # For curl format with actual values
+    auth_token: str | None = None  # For curl format with actual values
+
+
+class ProfileCreateRequest(BaseModel):
+    name: str
+    description: str
+    is_default: bool = False
+
+
+class ProfileUpdateRequest(BaseModel):
+    name: str | None = None
+    description: str | None = None
+    is_default: bool | None = None
+
+
+class MCPCreateRequest(BaseModel):
+    name: str
+    mcp_url: str
+    auth_type: str  # bearer, jwt, oauth, none
+    token: str | None = None
+    api_url: str | None = None
+    api_token: str | None = None
+    api_secret: str | None = None
+    client_id: str | None = None
+    client_secret: str | None = None
+    token_url: str | None = None
+    scopes: list[str] | None = None
+    timeout: int | None = None
+    rate_limit_rpm: int | None = None
+
+
+class MCPUpdateRequest(BaseModel):
+    name: str | None = None
+    mcp_url: str | None = None
+    auth_type: str | None = None
+    token: str | None = None
+    api_url: str | None = None
+    api_token: str | None = None
+    api_secret: str | None = None
+    client_id: str | None = None
+    client_secret: str | None = None
+    token_url: str | None = None
+    scopes: list[str] | None = None
+    timeout: int | None = None
+    rate_limit_rpm: int | None = None
+
+
+class MCPReorderRequest(BaseModel):
+    from_index: int
+    to_index: int
+
+
 # Global state
 config = get_config()
-mcp_client: MCPClient | None = None
+mcp_client: MCPClient | None = None  # Default MCP client (for backwards compat)
+mcp_clients: dict[str, MCPClient] = {}  # Cache of MCP clients by "{profile_id}:{mcp_name}"
 active_websockets: list[WebSocket] = []
+
+
+# Helper functions for YAML file manipulation
+
+
+def get_mcp_config_path() -> Path:
+    """Get path to .mcp_services.yaml file."""
+    # Look in current directory first
+    config_path = Path.cwd() / ".mcp_services.yaml"
+    if config_path.exists():
+        return config_path
+
+    # Check parent directories
+    current = Path.cwd()
+    for _ in range(5):
+        config_file = current / ".mcp_services.yaml"
+        if config_file.exists():
+            return config_file
+        if current.parent == current:
+            break
+        current = current.parent
+
+    # Default to current directory
+    return Path.cwd() / ".mcp_services.yaml"
+
+
+def load_mcp_yaml() -> dict[str, Any]:
+    """Load MCP configuration from YAML file with error handling."""
+    config_path = get_mcp_config_path()
+    if not config_path.exists():
+        return {"default": "local-dev", "profiles": {}}
+
+    try:
+        with open(config_path) as f:
+            data = yaml.safe_load(f)
+            return data or {"default": "local-dev", "profiles": {}}
+    except yaml.YAMLError as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to parse YAML configuration: {str(e)}"
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to load configuration file: {str(e)}"
+        )
+
+
+def validate_config(config_data: dict[str, Any]):
+    """
+    Validate MCP configuration before saving.
+
+    Raises:
+        ValueError: If validation fails with detailed error message
+    """
+    # Check required top-level fields
+    if "profiles" not in config_data:
+        raise ValueError("Config must have 'profiles' field")
+
+    if not isinstance(config_data["profiles"], dict):
+        raise ValueError("'profiles' must be a dictionary")
+
+    # Validate each profile
+    for profile_id, profile in config_data["profiles"].items():
+        if not isinstance(profile, dict):
+            raise ValueError(f"Profile '{profile_id}' must be a dictionary")
+
+        if "name" not in profile:
+            raise ValueError(f"Profile '{profile_id}' missing required 'name' field")
+
+        # Validate MCPs if present
+        if "mcps" in profile:
+            if not isinstance(profile["mcps"], list):
+                raise ValueError(f"Profile '{profile_id}' 'mcps' must be a list")
+
+            for idx, mcp in enumerate(profile["mcps"]):
+                if not isinstance(mcp, dict):
+                    raise ValueError(
+                        f"MCP #{idx} in profile '{profile_id}' must be a dictionary"
+                    )
+
+                # Check required MCP fields
+                if "name" not in mcp:
+                    raise ValueError(
+                        f"MCP #{idx} in profile '{profile_id}' missing 'name' field"
+                    )
+
+                if "mcp_url" not in mcp:
+                    raise ValueError(
+                        f"MCP '{mcp['name']}' in profile '{profile_id}' missing 'mcp_url' field"
+                    )
+
+                if "auth" not in mcp:
+                    raise ValueError(
+                        f"MCP '{mcp['name']}' in profile '{profile_id}' missing 'auth' field"
+                    )
+
+                # Validate auth configuration
+                auth = mcp["auth"]
+                if not isinstance(auth, dict):
+                    raise ValueError(
+                        f"MCP '{mcp['name']}' in profile '{profile_id}' 'auth' must be a dictionary"
+                    )
+
+                if "type" not in auth:
+                    raise ValueError(
+                        f"MCP '{mcp['name']}' in profile '{profile_id}' auth missing 'type' field"
+                    )
+
+                auth_type = auth["type"]
+
+                # Validate auth type-specific requirements
+                if auth_type == "bearer":
+                    # Bearer can have optional token
+                    pass
+                elif auth_type == "jwt":
+                    # JWT should have API credentials (optional, can use env vars)
+                    pass
+                elif auth_type == "oauth":
+                    # OAuth should have client credentials (optional, can use env vars)
+                    pass
+                elif auth_type == "none":
+                    # No auth required
+                    pass
+                else:
+                    raise ValueError(
+                        f"MCP '{mcp['name']}' in profile '{profile_id}' has invalid auth type: '{auth_type}'. "
+                        f"Must be one of: bearer, jwt, oauth, none"
+                    )
+
+
+def clean_config_for_yaml(config_data: dict[str, Any]) -> dict[str, Any]:
+    """
+    Clean config data for YAML serialization.
+
+    - Removes None values
+    - Preserves empty strings and empty lists
+    - Deep copies to avoid mutating original
+
+    Args:
+        config_data: Configuration dictionary to clean
+
+    Returns:
+        Cleaned configuration dictionary
+    """
+    import copy
+
+    def clean_value(value):
+        """Recursively clean a value."""
+        if value is None:
+            return None
+        elif isinstance(value, dict):
+            cleaned = {}
+            for k, v in value.items():
+                cleaned_v = clean_value(v)
+                # Only include if not None
+                if cleaned_v is not None:
+                    cleaned[k] = cleaned_v
+            return cleaned if cleaned else None
+        elif isinstance(value, list):
+            cleaned = [clean_value(item) for item in value]
+            # Filter out None values but keep empty strings
+            return [item for item in cleaned if item is not None]
+        else:
+            return value
+
+    # Deep copy to avoid mutating original
+    config_copy = copy.deepcopy(config_data)
+    cleaned = clean_value(config_copy)
+
+    # Ensure top-level structure is preserved
+    if cleaned is None:
+        return {"default": "local-dev", "profiles": {}}
+
+    return cleaned
+
+
+def save_mcp_yaml(config_data: dict[str, Any]):
+    """
+    Save MCP configuration to YAML file with robust error handling.
+
+    Features:
+    - Validates config before saving
+    - Creates backup before overwrite
+    - Uses atomic write (temp file + rename)
+    - Proper YAML formatting (no line wrapping, unicode support)
+    - Automatic rollback on failure
+    - Reloads profile config after save
+
+    Args:
+        config_data: Configuration dictionary to save
+
+    Raises:
+        HTTPException: If save fails with detailed error message
+    """
+    import shutil
+
+    config_path = get_mcp_config_path()
+    backup_path = config_path.with_suffix('.yaml.backup')
+    temp_path = config_path.with_suffix('.yaml.tmp')
+
+    try:
+        # Step 1: Validate config structure
+        validate_config(config_data)
+
+        # Step 2: Clean config (remove None values, etc.)
+        cleaned_config = clean_config_for_yaml(config_data)
+
+        # Step 3: Create backup of existing file
+        if config_path.exists():
+            try:
+                shutil.copy2(config_path, backup_path)
+            except Exception as e:
+                # Log warning but continue - backup is not critical
+                print(f"Warning: Failed to create backup: {e}")
+
+        # Step 4: Write to temporary file first (atomic operation pattern)
+        try:
+            with open(temp_path, 'w', encoding='utf-8') as f:
+                yaml.dump(
+                    cleaned_config,
+                    f,
+                    default_flow_style=False,
+                    sort_keys=False,
+                    indent=2,
+                    allow_unicode=True,
+                    width=float('inf'),  # Prevent line wrapping
+                )
+        except Exception as e:
+            # Clean up temp file if write failed
+            if temp_path.exists():
+                temp_path.unlink()
+            raise ValueError(f"Failed to write YAML: {str(e)}")
+
+        # Step 5: Validate the written YAML can be read back
+        try:
+            with open(temp_path, 'r', encoding='utf-8') as f:
+                yaml.safe_load(f)
+        except Exception as e:
+            # Clean up invalid temp file
+            if temp_path.exists():
+                temp_path.unlink()
+            raise ValueError(f"Generated invalid YAML: {str(e)}")
+
+        # Step 6: Atomic rename (replaces original file)
+        temp_path.replace(config_path)
+
+        # Step 7: Reload profile config to pick up changes
+        from testmcpy.mcp_profiles import reload_profile_config
+        reload_profile_config()
+
+    except ValueError as e:
+        # Validation or YAML errors - restore from backup
+        if backup_path.exists() and not config_path.exists():
+            try:
+                shutil.copy2(backup_path, config_path)
+            except Exception as restore_error:
+                print(f"Error restoring backup: {restore_error}")
+        raise HTTPException(status_code=400, detail=f"Invalid configuration: {str(e)}")
+
+    except Exception as e:
+        # Unexpected errors - try to restore from backup
+        if backup_path.exists():
+            try:
+                shutil.copy2(backup_path, config_path)
+                print(f"Restored configuration from backup after error: {e}")
+            except Exception as restore_error:
+                print(f"Failed to restore backup: {restore_error}")
+
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to save configuration: {str(e)}"
+        )
+
+    finally:
+        # Clean up temporary file if it still exists
+        if temp_path.exists():
+            try:
+                temp_path.unlink()
+            except Exception as e:
+                print(f"Warning: Failed to clean up temp file: {e}")
+
+
+def generate_profile_id(name: str, existing_ids: list[str]) -> str:
+    """Generate a unique profile ID from a name."""
+    # Convert to lowercase, replace spaces with hyphens
+    base_id = name.lower().replace(' ', '-').replace('_', '-')
+    # Remove non-alphanumeric characters except hyphens
+    base_id = ''.join(c for c in base_id if c.isalnum() or c == '-')
+
+    # Ensure uniqueness
+    profile_id = base_id
+    counter = 1
+    while profile_id in existing_ids:
+        profile_id = f"{base_id}-{counter}"
+        counter += 1
+
+    return profile_id
+
+
+async def get_mcp_clients_for_profile(profile_id: str) -> list[tuple[str, MCPClient]]:
+    """
+    Get or create MCP clients for all MCP servers in a profile.
+
+    Returns:
+        List of tuples (mcp_name, MCPClient) for all MCPs in the profile
+    """
+    global mcp_clients
+
+    # Load profile
+    profile = load_profile(profile_id)
+    if not profile:
+        raise ValueError(f"Profile '{profile_id}' not found in .mcp_services.yaml")
+
+    clients = []
+
+    # Handle case where profile has no MCPs (backward compatibility check)
+    if not profile.mcps:
+        raise ValueError(f"Profile '{profile_id}' has no MCP servers configured")
+
+    # Initialize a client for each MCP server in the profile
+    for mcp_server in profile.mcps:
+        cache_key = f"{profile_id}:{mcp_server.name}"
+
+        # Return cached client if exists
+        if cache_key in mcp_clients:
+            clients.append((mcp_server.name, mcp_clients[cache_key]))
+            continue
+
+        # Create client with auth configuration
+        auth_dict = mcp_server.auth.to_dict()
+        client = MCPClient(mcp_server.mcp_url, auth=auth_dict)
+        await client.initialize()
+
+        # Cache the client
+        mcp_clients[cache_key] = client
+        clients.append((mcp_server.name, client))
+        print(f"MCP client initialized for profile '{profile_id}', MCP '{mcp_server.name}' at {mcp_server.mcp_url}")
+
+    return clients
+
+
+async def get_mcp_client_for_server(profile_id: str, mcp_name: str) -> MCPClient | None:
+    """
+    Get or create MCP client for a specific MCP server in a profile.
+
+    Args:
+        profile_id: The profile ID
+        mcp_name: The name of the specific MCP server within the profile
+
+    Returns:
+        MCPClient instance or None if not found
+    """
+    global mcp_clients
+
+    # Load profile
+    profile = load_profile(profile_id)
+    if not profile:
+        print(f"Profile '{profile_id}' not found")
+        return None
+
+    # Find the specific MCP server
+    mcp_server = None
+    for server in profile.mcps:
+        if server.name == mcp_name:
+            mcp_server = server
+            break
+
+    if not mcp_server:
+        print(f"MCP server '{mcp_name}' not found in profile '{profile_id}'")
+        return None
+
+    # Check cache
+    cache_key = f"{profile_id}:{mcp_server.name}"
+    if cache_key in mcp_clients:
+        return mcp_clients[cache_key]
+
+    # Create client with auth configuration
+    auth_dict = mcp_server.auth.to_dict()
+    client = MCPClient(mcp_server.mcp_url, auth=auth_dict)
+    await client.initialize()
+
+    # Cache the client
+    mcp_clients[cache_key] = client
+    print(f"MCP client initialized for '{profile_id}:{mcp_server.name}' at {mcp_server.mcp_url}")
+
+    return client
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan event handler for startup and shutdown."""
-    global mcp_client
+    global mcp_client, mcp_clients
     # Startup
     try:
         mcp_client = MCPClient(config.mcp_url)
@@ -90,6 +549,14 @@ async def lifespan(app: FastAPI):
     # Shutdown
     if mcp_client:
         await mcp_client.close()
+
+    # Close all profile clients (cache keys are "{profile_id}:{mcp_name}")
+    for cache_key, client in mcp_clients.items():
+        try:
+            await client.close()
+            print(f"Closed MCP client '{cache_key}'")
+        except Exception as e:
+            print(f"Error closing client '{cache_key}': {e}")
 
 
 # Initialize FastAPI app
@@ -108,6 +575,29 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Add middleware to set CSP headers for ngrok compatibility
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import Response
+
+class CSPMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        response = await call_next(request)
+
+        # Set permissive CSP for development (allows ngrok)
+        # In production, you'd want to tighten this up
+        response.headers["Content-Security-Policy"] = (
+            "default-src * 'unsafe-inline' 'unsafe-eval' data: blob:; "
+            "script-src * 'unsafe-inline' 'unsafe-eval'; "
+            "style-src * 'unsafe-inline'; "
+            "img-src * data: blob:; "
+            "font-src * data:; "
+            "connect-src *; "
+        )
+
+        return response
+
+app.add_middleware(CSPMiddleware)
 
 
 # API Routes
@@ -152,6 +642,744 @@ async def get_configuration():
         masked_config[key] = {"value": masked_value, "source": source}
 
     return masked_config
+
+
+@app.post("/api/mcp/profiles/create-config")
+async def create_mcp_config():
+    """Create .mcp_services.yaml from the example file."""
+    try:
+        import shutil
+
+        example_file = Path(".mcp_services.yaml.example")
+        config_file = Path(".mcp_services.yaml")
+
+        # Check if config already exists
+        if config_file.exists():
+            return {
+                "success": False,
+                "error": "Configuration file already exists at .mcp_services.yaml"
+            }
+
+        # Check if example file exists
+        if not example_file.exists():
+            return {
+                "success": False,
+                "error": "Example file .mcp_services.yaml.example not found"
+            }
+
+        # Copy example to actual config
+        shutil.copy(example_file, config_file)
+
+        return {
+            "success": True,
+            "message": "Created .mcp_services.yaml from example template",
+            "path": str(config_file.absolute())
+        }
+
+    except Exception as e:
+        return {
+            "success": False,
+            "error": f"Failed to create configuration: {str(e)}"
+        }
+
+
+@app.get("/api/mcp/profiles")
+async def list_mcp_profiles():
+    """List available MCP profiles from .mcp_services.yaml."""
+    from testmcpy.mcp_profiles import get_profile_config
+
+    try:
+        profile_config = get_profile_config()
+        if not profile_config.has_profiles():
+            return {
+                "profiles": [],
+                "default": None,
+                "message": "No .mcp_services.yaml file found",
+            }
+
+        profiles_list = []
+        for profile_id in profile_config.list_profiles():
+            profile = profile_config.get_profile(profile_id)
+            if not profile:
+                continue
+
+            # Build list of MCPs with masked auth tokens
+            mcps_info = []
+            for mcp_server in profile.mcps:
+                auth_info = {
+                    "type": mcp_server.auth.auth_type,
+                }
+
+                # Bearer token
+                if mcp_server.auth.token:
+                    token = mcp_server.auth.token
+                    if token and not token.startswith("${"):
+                        auth_info["token"] = f"{token[:8]}..." if len(token) > 12 else "***"
+                    else:
+                        auth_info["token"] = token
+
+                # JWT fields
+                if mcp_server.auth.api_url:
+                    auth_info["api_url"] = mcp_server.auth.api_url
+
+                if mcp_server.auth.api_token:
+                    token = mcp_server.auth.api_token
+                    if token and not token.startswith("${"):
+                        auth_info["api_token"] = f"{token[:8]}..." if len(token) > 12 else "***"
+                    else:
+                        auth_info["api_token"] = token
+
+                if mcp_server.auth.api_secret:
+                    secret = mcp_server.auth.api_secret
+                    if secret and not secret.startswith("${"):
+                        auth_info["api_secret"] = "***"
+                    else:
+                        auth_info["api_secret"] = secret
+
+                # OAuth fields
+                if mcp_server.auth.client_id:
+                    auth_info["client_id"] = mcp_server.auth.client_id
+
+                if mcp_server.auth.client_secret:
+                    secret = mcp_server.auth.client_secret
+                    if secret and not secret.startswith("${"):
+                        auth_info["client_secret"] = "***"
+                    else:
+                        auth_info["client_secret"] = secret
+
+                if mcp_server.auth.token_url:
+                    auth_info["token_url"] = mcp_server.auth.token_url
+
+                if mcp_server.auth.scopes:
+                    auth_info["scopes"] = mcp_server.auth.scopes
+
+                mcps_info.append({
+                    "name": mcp_server.name,
+                    "mcp_url": mcp_server.mcp_url,
+                    "auth": auth_info,
+                    "timeout": mcp_server.timeout,
+                    "rate_limit_rpm": mcp_server.rate_limit_rpm,
+                })
+
+            profiles_list.append({
+                "id": profile.profile_id,
+                "name": profile.name,
+                "description": profile.description,
+                "mcps": mcps_info,
+                "timeout": profile.timeout,
+                "rate_limit_rpm": profile.rate_limit_rpm,
+                "is_default": profile.is_default,
+            })
+
+        # Get the default profile and server selection
+        default_selection = profile_config.get_default_profile_and_server()
+        default_selection_str = None
+        if default_selection:
+            profile_id, mcp_name = default_selection
+            default_selection_str = f"{profile_id}:{mcp_name}"
+
+        return {
+            "profiles": profiles_list,
+            "default": profile_config.default_profile,
+            "default_selection": default_selection_str,
+        }
+    except Exception as e:
+        return {
+            "profiles": [],
+            "default": None,
+            "error": str(e),
+        }
+
+
+@app.post("/api/mcp/profiles")
+async def create_mcp_profile(request: ProfileCreateRequest):
+    """Create a new MCP profile."""
+    try:
+        config_data = load_mcp_yaml()
+
+        # Generate unique profile ID
+        existing_ids = list(config_data.get("profiles", {}).keys())
+        profile_id = generate_profile_id(request.name, existing_ids)
+
+        # Create new profile
+        new_profile = {
+            "name": request.name,
+            "description": request.description,
+            "mcps": []
+        }
+
+        # Add to profiles
+        if "profiles" not in config_data:
+            config_data["profiles"] = {}
+
+        config_data["profiles"][profile_id] = new_profile
+
+        # Set as default if requested
+        if request.is_default:
+            config_data["default"] = profile_id
+
+        # Save to file
+        save_mcp_yaml(config_data)
+
+        return {
+            "success": True,
+            "profile_id": profile_id,
+            "message": f"Profile '{request.name}' created successfully"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to create profile: {str(e)}"
+        )
+
+
+@app.put("/api/mcp/profiles/{profile_id}")
+async def update_mcp_profile(profile_id: str, request: ProfileUpdateRequest):
+    """Update an existing MCP profile."""
+    try:
+        config_data = load_mcp_yaml()
+
+        if "profiles" not in config_data or profile_id not in config_data["profiles"]:
+            raise HTTPException(status_code=404, detail=f"Profile '{profile_id}' not found")
+
+        profile = config_data["profiles"][profile_id]
+
+        # Update fields
+        if request.name is not None:
+            profile["name"] = request.name
+
+        if request.description is not None:
+            profile["description"] = request.description
+
+        if request.is_default is not None and request.is_default:
+            config_data["default"] = profile_id
+
+        # Save to file
+        save_mcp_yaml(config_data)
+
+        return {
+            "success": True,
+            "message": f"Profile '{profile_id}' updated successfully"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to update profile '{profile_id}': {str(e)}"
+        )
+
+
+@app.delete("/api/mcp/profiles/{profile_id}")
+async def delete_mcp_profile(profile_id: str):
+    """Delete an MCP profile."""
+    try:
+        config_data = load_mcp_yaml()
+
+        if "profiles" not in config_data or profile_id not in config_data["profiles"]:
+            raise HTTPException(status_code=404, detail=f"Profile '{profile_id}' not found")
+
+        # Remove profile
+        del config_data["profiles"][profile_id]
+
+        # If this was the default, clear default or set to first available
+        if config_data.get("default") == profile_id:
+            remaining_profiles = list(config_data["profiles"].keys())
+            config_data["default"] = remaining_profiles[0] if remaining_profiles else None
+
+        # Save to file
+        save_mcp_yaml(config_data)
+
+        # Clear any cached clients for this profile
+        global mcp_clients
+        keys_to_remove = [key for key in mcp_clients.keys() if key.startswith(f"{profile_id}:")]
+        for key in keys_to_remove:
+            client = mcp_clients.pop(key, None)
+            if client:
+                try:
+                    await client.close()
+                except Exception as e:
+                    print(f"Warning: Failed to close MCP client '{key}': {e}")
+
+        return {
+            "success": True,
+            "message": f"Profile '{profile_id}' deleted successfully"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to delete profile '{profile_id}': {str(e)}"
+        )
+
+
+@app.post("/api/mcp/profiles/{profile_id}/duplicate")
+async def duplicate_mcp_profile(profile_id: str):
+    """Duplicate an existing MCP profile."""
+    try:
+        config_data = load_mcp_yaml()
+
+        if "profiles" not in config_data or profile_id not in config_data["profiles"]:
+            raise HTTPException(status_code=404, detail=f"Profile '{profile_id}' not found")
+
+        # Get source profile
+        source_profile = config_data["profiles"][profile_id]
+
+        # Generate new profile ID
+        existing_ids = list(config_data["profiles"].keys())
+        new_name = f"{source_profile.get('name', profile_id)} (Copy)"
+        new_profile_id = generate_profile_id(new_name, existing_ids)
+
+        # Create duplicate with deep copy
+        import copy
+        new_profile = copy.deepcopy(source_profile)
+        new_profile["name"] = new_name
+        new_profile["description"] = source_profile.get("description", "") + " (Copy)"
+
+        # Add to profiles
+        config_data["profiles"][new_profile_id] = new_profile
+
+        # Save to file
+        save_mcp_yaml(config_data)
+
+        return {
+            "success": True,
+            "profile_id": new_profile_id,
+            "message": f"Profile duplicated as '{new_name}'"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to duplicate profile '{profile_id}': {str(e)}"
+        )
+
+
+@app.put("/api/mcp/profiles/default/{profile_id}")
+async def set_default_profile(profile_id: str):
+    """Set a profile as the default."""
+    try:
+        config_data = load_mcp_yaml()
+
+        if "profiles" not in config_data or profile_id not in config_data["profiles"]:
+            raise HTTPException(status_code=404, detail=f"Profile '{profile_id}' not found")
+
+        config_data["default"] = profile_id
+
+        # Save to file
+        save_mcp_yaml(config_data)
+
+        return {
+            "success": True,
+            "message": f"Profile '{profile_id}' set as default"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to set default profile to '{profile_id}': {str(e)}"
+        )
+
+
+@app.post("/api/mcp/profiles/{profile_id}/mcps")
+async def add_mcp_to_profile(profile_id: str, request: MCPCreateRequest):
+    """Add an MCP server to a profile."""
+    try:
+        config_data = load_mcp_yaml()
+
+        if "profiles" not in config_data or profile_id not in config_data["profiles"]:
+            raise HTTPException(status_code=404, detail=f"Profile '{profile_id}' not found")
+
+        profile = config_data["profiles"][profile_id]
+
+        # Validate MCP name is unique within profile
+        existing_mcps = profile.get("mcps", [])
+        if any(mcp.get("name") == request.name for mcp in existing_mcps):
+            raise HTTPException(
+                status_code=400,
+                detail=f"MCP with name '{request.name}' already exists in profile '{profile_id}'"
+            )
+
+        # Build auth config
+        auth_config = {"type": request.auth_type}
+
+        if request.auth_type == "bearer" and request.token:
+            auth_config["token"] = request.token
+        elif request.auth_type == "jwt":
+            if request.api_url:
+                auth_config["api_url"] = request.api_url
+            if request.api_token:
+                auth_config["api_token"] = request.api_token
+            if request.api_secret:
+                auth_config["api_secret"] = request.api_secret
+        elif request.auth_type == "oauth":
+            if request.client_id:
+                auth_config["client_id"] = request.client_id
+            if request.client_secret:
+                auth_config["client_secret"] = request.client_secret
+            if request.token_url:
+                auth_config["token_url"] = request.token_url
+            if request.scopes:
+                auth_config["scopes"] = request.scopes
+
+        # Create new MCP
+        new_mcp = {
+            "name": request.name,
+            "mcp_url": request.mcp_url,
+            "auth": auth_config
+        }
+
+        if request.timeout is not None:
+            new_mcp["timeout"] = request.timeout
+
+        if request.rate_limit_rpm is not None:
+            new_mcp["rate_limit_rpm"] = request.rate_limit_rpm
+
+        # Add to profile
+        if "mcps" not in profile:
+            profile["mcps"] = []
+
+        profile["mcps"].append(new_mcp)
+
+        # Save to file
+        save_mcp_yaml(config_data)
+
+        return {
+            "success": True,
+            "message": f"MCP '{request.name}' added to profile '{profile_id}'"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to add MCP to profile '{profile_id}': {str(e)}"
+        )
+
+
+@app.put("/api/mcp/profiles/{profile_id}/mcps/{mcp_index}")
+async def update_mcp_in_profile(profile_id: str, mcp_index: int, request: MCPUpdateRequest):
+    """Update an MCP server in a profile."""
+    try:
+        config_data = load_mcp_yaml()
+
+        if "profiles" not in config_data or profile_id not in config_data["profiles"]:
+            raise HTTPException(status_code=404, detail=f"Profile '{profile_id}' not found")
+
+        profile = config_data["profiles"][profile_id]
+        mcps = profile.get("mcps", [])
+
+        if mcp_index < 0 or mcp_index >= len(mcps):
+            raise HTTPException(status_code=404, detail=f"MCP at index {mcp_index} not found")
+
+        mcp = mcps[mcp_index]
+        old_name = mcp.get("name", "")
+
+        # Update fields
+        if request.name is not None:
+            # Check for name conflicts (excluding current MCP)
+            for idx, existing_mcp in enumerate(mcps):
+                if idx != mcp_index and existing_mcp.get("name") == request.name:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"MCP with name '{request.name}' already exists in profile '{profile_id}'"
+                    )
+            mcp["name"] = request.name
+
+        if request.mcp_url is not None:
+            mcp["mcp_url"] = request.mcp_url
+
+        # Update auth
+        if request.auth_type is not None:
+            if "auth" not in mcp:
+                mcp["auth"] = {}
+            mcp["auth"]["type"] = request.auth_type
+
+            # Clear old auth fields and add new ones
+            if request.auth_type == "bearer":
+                mcp["auth"] = {"type": "bearer"}
+                if request.token is not None:
+                    mcp["auth"]["token"] = request.token
+            elif request.auth_type == "jwt":
+                mcp["auth"] = {"type": "jwt"}
+                if request.api_url is not None:
+                    mcp["auth"]["api_url"] = request.api_url
+                if request.api_token is not None:
+                    mcp["auth"]["api_token"] = request.api_token
+                if request.api_secret is not None:
+                    mcp["auth"]["api_secret"] = request.api_secret
+            elif request.auth_type == "oauth":
+                mcp["auth"] = {"type": "oauth"}
+                if request.client_id is not None:
+                    mcp["auth"]["client_id"] = request.client_id
+                if request.client_secret is not None:
+                    mcp["auth"]["client_secret"] = request.client_secret
+                if request.token_url is not None:
+                    mcp["auth"]["token_url"] = request.token_url
+                if request.scopes is not None:
+                    mcp["auth"]["scopes"] = request.scopes
+            elif request.auth_type == "none":
+                mcp["auth"] = {"type": "none"}
+
+        if request.timeout is not None:
+            mcp["timeout"] = request.timeout
+
+        if request.rate_limit_rpm is not None:
+            mcp["rate_limit_rpm"] = request.rate_limit_rpm
+
+        # Save to file
+        save_mcp_yaml(config_data)
+
+        # Clear cached client for this MCP (use both old and new names)
+        global mcp_clients
+        old_cache_key = f"{profile_id}:{old_name}"
+        new_cache_key = f"{profile_id}:{mcp.get('name', '')}"
+
+        for cache_key in [old_cache_key, new_cache_key]:
+            client = mcp_clients.pop(cache_key, None)
+            if client:
+                try:
+                    await client.close()
+                except Exception as e:
+                    print(f"Warning: Failed to close MCP client '{cache_key}': {e}")
+
+        return {
+            "success": True,
+            "message": f"MCP at index {mcp_index} updated successfully"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to update MCP at index {mcp_index} in profile '{profile_id}': {str(e)}"
+        )
+
+
+@app.delete("/api/mcp/profiles/{profile_id}/mcps/{mcp_index}")
+async def delete_mcp_from_profile(profile_id: str, mcp_index: int):
+    """Delete an MCP server from a profile."""
+    try:
+        config_data = load_mcp_yaml()
+
+        if "profiles" not in config_data or profile_id not in config_data["profiles"]:
+            raise HTTPException(status_code=404, detail=f"Profile '{profile_id}' not found")
+
+        profile = config_data["profiles"][profile_id]
+        mcps = profile.get("mcps", [])
+
+        if mcp_index < 0 or mcp_index >= len(mcps):
+            raise HTTPException(status_code=404, detail=f"MCP at index {mcp_index} not found")
+
+        # Get MCP name for cache clearing and response
+        mcp_name = mcps[mcp_index].get("name", "")
+
+        # Remove MCP
+        del mcps[mcp_index]
+
+        # Save to file
+        save_mcp_yaml(config_data)
+
+        # Clear cached client for this MCP
+        global mcp_clients
+        cache_key = f"{profile_id}:{mcp_name}"
+        client = mcp_clients.pop(cache_key, None)
+        if client:
+            try:
+                await client.close()
+            except Exception as e:
+                print(f"Warning: Failed to close MCP client '{cache_key}': {e}")
+
+        return {
+            "success": True,
+            "message": f"MCP '{mcp_name}' deleted successfully from profile '{profile_id}'"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to delete MCP at index {mcp_index} from profile '{profile_id}': {str(e)}"
+        )
+
+
+@app.put("/api/mcp/profiles/{profile_id}/mcps/reorder")
+async def reorder_mcps_in_profile(profile_id: str, request: MCPReorderRequest):
+    """Reorder MCPs in a profile."""
+    try:
+        config_data = load_mcp_yaml()
+
+        if "profiles" not in config_data or profile_id not in config_data["profiles"]:
+            raise HTTPException(status_code=404, detail=f"Profile '{profile_id}' not found")
+
+        profile = config_data["profiles"][profile_id]
+        mcps = profile.get("mcps", [])
+
+        if request.from_index < 0 or request.from_index >= len(mcps):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid from_index: {request.from_index}. Must be between 0 and {len(mcps)-1}"
+            )
+
+        if request.to_index < 0 or request.to_index >= len(mcps):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid to_index: {request.to_index}. Must be between 0 and {len(mcps)-1}"
+            )
+
+        # Reorder
+        mcp = mcps.pop(request.from_index)
+        mcps.insert(request.to_index, mcp)
+
+        # Save to file
+        save_mcp_yaml(config_data)
+
+        return {
+            "success": True,
+            "message": f"MCPs reordered successfully in profile '{profile_id}'"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to reorder MCPs in profile '{profile_id}': {str(e)}"
+        )
+
+
+@app.get("/api/mcp/profiles/{profile_id}/export")
+async def export_profile(profile_id: str):
+    """Export a profile as YAML."""
+    try:
+        config_data = load_mcp_yaml()
+
+        if "profiles" not in config_data or profile_id not in config_data["profiles"]:
+            raise HTTPException(status_code=404, detail=f"Profile '{profile_id}' not found")
+
+        profile = config_data["profiles"][profile_id]
+
+        # Create export structure
+        export_data = {
+            "profiles": {
+                profile_id: profile
+            }
+        }
+
+        # Clean and format for export
+        cleaned_data = clean_config_for_yaml(export_data)
+
+        yaml_content = yaml.dump(
+            cleaned_data,
+            default_flow_style=False,
+            sort_keys=False,
+            indent=2,
+            allow_unicode=True,
+            width=float('inf')
+        )
+
+        return {
+            "success": True,
+            "yaml": yaml_content,
+            "filename": f"{profile_id}.yaml"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to export profile '{profile_id}': {str(e)}"
+        )
+
+
+@app.post("/api/mcp/profiles/{profile_id}/test-connection/{mcp_index}")
+async def test_mcp_connection(profile_id: str, mcp_index: int):
+    """Test connection to an MCP server."""
+    try:
+        config_data = load_mcp_yaml()
+
+        if "profiles" not in config_data or profile_id not in config_data["profiles"]:
+            raise HTTPException(status_code=404, detail=f"Profile '{profile_id}' not found")
+
+        profile = config_data["profiles"][profile_id]
+        mcps = profile.get("mcps", [])
+
+        if mcp_index < 0 or mcp_index >= len(mcps):
+            raise HTTPException(status_code=404, detail=f"MCP at index {mcp_index} not found")
+
+        mcp_config = mcps[mcp_index]
+
+        # Try to connect
+        try:
+            # Parse auth config and convert to dict format
+            auth_data = mcp_config.get("auth", {})
+            auth_type = auth_data.get("type", "none")
+
+            auth_dict = None
+            if auth_type == "bearer" and auth_data.get("token"):
+                auth_dict = {
+                    "type": "bearer",
+                    "token": auth_data["token"]
+                }
+            elif auth_type == "jwt":
+                auth_dict = {
+                    "type": "jwt",
+                    "api_url": auth_data.get("api_url"),
+                    "api_token": auth_data.get("api_token"),
+                    "api_secret": auth_data.get("api_secret"),
+                }
+            elif auth_type == "oauth":
+                auth_dict = {
+                    "type": "oauth",
+                    "client_id": auth_data.get("client_id"),
+                    "client_secret": auth_data.get("client_secret"),
+                    "token_url": auth_data.get("token_url"),
+                    "scopes": auth_data.get("scopes", []),
+                }
+            elif auth_type == "none":
+                auth_dict = {"type": "none"}
+
+            # Create temporary client with auth
+            test_client = MCPClient(mcp_config["mcp_url"], auth=auth_dict)
+            await test_client.initialize()
+
+            # Try to list tools as a connection test
+            tools = await test_client.list_tools()
+
+            await test_client.close()
+
+            return {
+                "success": True,
+                "status": "connected",
+                "message": f"Successfully connected to {mcp_config['name']}",
+                "tool_count": len(tools)
+            }
+
+        except Exception as e:
+            return {
+                "success": False,
+                "status": "error",
+                "message": f"Connection failed: {str(e)}"
+            }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/api/models")
@@ -219,43 +1447,109 @@ async def list_models():
 
 
 @app.get("/api/mcp/tools")
-async def list_mcp_tools():
-    """List all MCP tools with their schemas."""
-    if not mcp_client:
-        raise HTTPException(status_code=503, detail="MCP client not initialized")
-
+async def list_mcp_tools(profiles: list[str] = Query(default=None)):
+    """List all MCP tools with their schemas. Supports optional ?profiles=xxx&profiles=yyy parameters."""
     try:
-        tools = await mcp_client.list_tools()
-        return [
-            {"name": tool.name, "description": tool.description, "input_schema": tool.input_schema}
-            for tool in tools
-        ]
+        all_tools = []
+
+        if profiles:
+            # Parse server IDs in format "profileId:mcpName"
+            for server_id in profiles:
+                if ':' in server_id:
+                    # New format: specific server selection
+                    profile_id, mcp_name = server_id.split(':', 1)
+                    client = await get_mcp_client_for_server(profile_id, mcp_name)
+                    if client:
+                        tools = await client.list_tools()
+                        for tool in tools:
+                            all_tools.append({
+                                "name": tool.name,
+                                "description": tool.description,
+                                "input_schema": tool.input_schema,
+                                "mcp_source": mcp_name,
+                            })
+                else:
+                    # Legacy format: entire profile (load all servers from profile)
+                    clients = await get_mcp_clients_for_profile(server_id)
+                    for mcp_name, client in clients:
+                        tools = await client.list_tools()
+                        for tool in tools:
+                            all_tools.append({
+                                "name": tool.name,
+                                "description": tool.description,
+                                "input_schema": tool.input_schema,
+                                "mcp_source": mcp_name,
+                            })
+
+        return all_tools
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/api/mcp/resources")
-async def list_mcp_resources():
-    """List all MCP resources."""
-    if not mcp_client:
-        raise HTTPException(status_code=503, detail="MCP client not initialized")
-
+async def list_mcp_resources(profiles: list[str] = Query(default=None)):
+    """List all MCP resources. Supports optional ?profiles=xxx&profiles=yyy parameters."""
     try:
-        resources = await mcp_client.list_resources()
-        return resources
+        all_resources = []
+
+        if profiles:
+            # Parse server IDs in format "profileId:mcpName"
+            for server_id in profiles:
+                if ':' in server_id:
+                    # New format: specific server selection
+                    profile_id, mcp_name = server_id.split(':', 1)
+                    client = await get_mcp_client_for_server(profile_id, mcp_name)
+                    if client:
+                        resources = await client.list_resources()
+                        for resource in resources:
+                            if isinstance(resource, dict):
+                                resource["mcp_source"] = mcp_name
+                            all_resources.append(resource)
+                else:
+                    # Legacy format: entire profile
+                    clients = await get_mcp_clients_for_profile(server_id)
+                    for mcp_name, client in clients:
+                        resources = await client.list_resources()
+                        for resource in resources:
+                            if isinstance(resource, dict):
+                                resource["mcp_source"] = mcp_name
+                            all_resources.append(resource)
+
+        return all_resources
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/api/mcp/prompts")
-async def list_mcp_prompts():
-    """List all MCP prompts."""
-    if not mcp_client:
-        raise HTTPException(status_code=503, detail="MCP client not initialized")
-
+async def list_mcp_prompts(profiles: list[str] = Query(default=None)):
+    """List all MCP prompts. Supports optional ?profiles=xxx&profiles=yyy parameters."""
     try:
-        prompts = await mcp_client.list_prompts()
-        return prompts
+        all_prompts = []
+
+        if profiles:
+            # Parse server IDs in format "profileId:mcpName"
+            for server_id in profiles:
+                if ':' in server_id:
+                    # New format: specific server selection
+                    profile_id, mcp_name = server_id.split(':', 1)
+                    client = await get_mcp_client_for_server(profile_id, mcp_name)
+                    if client:
+                        prompts = await client.list_prompts()
+                        for prompt in prompts:
+                            if isinstance(prompt, dict):
+                                prompt["mcp_source"] = mcp_name
+                            all_prompts.append(prompt)
+                else:
+                    # Legacy format: entire profile
+                    clients = await get_mcp_clients_for_profile(server_id)
+                    for mcp_name, client in clients:
+                        prompts = await client.list_prompts()
+                        for prompt in prompts:
+                            if isinstance(prompt, dict):
+                                prompt["mcp_source"] = mcp_name
+                            all_prompts.append(prompt)
+
+        return all_prompts
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -266,34 +1560,56 @@ async def list_mcp_prompts():
 @app.post("/api/chat")
 async def chat(request: ChatRequest) -> ChatResponse:
     """Send a message to the LLM with MCP tools."""
-    if not mcp_client:
-        raise HTTPException(status_code=503, detail="MCP client not initialized")
-
     model = request.model or config.default_model
     provider = request.provider or config.default_provider
 
     try:
-        # Get available tools
-        tools = await mcp_client.list_tools()
-        formatted_tools = [
-            {
-                "type": "function",
-                "function": {
-                    "name": tool.name,
-                    "description": tool.description,
-                    "parameters": tool.input_schema,
-                },
-            }
-            for tool in tools
-        ]
+        # Determine which MCP clients to use
+        clients_to_use = []  # List of (profile_id, mcp_name, client) tuples
+        if request.profiles:
+            # Parse server IDs in format "profileId:mcpName"
+            for server_id in request.profiles:
+                if ':' in server_id:
+                    # New format: specific server selection
+                    profile_id, mcp_name = server_id.split(':', 1)
+                    client = await get_mcp_client_for_server(profile_id, mcp_name)
+                    if client:
+                        clients_to_use.append((profile_id, mcp_name, client))
+                else:
+                    # Legacy format: entire profile (load all servers from profile)
+                    profile_clients = await get_mcp_clients_for_profile(server_id)
+                    for mcp_name, client in profile_clients:
+                        clients_to_use.append((server_id, mcp_name, client))
+
+        # Gather tools from all clients
+        all_tools = []
+        tool_to_client = {}  # Map tool name to (client, profile_id, mcp_name) for execution
+
+        for profile_id, mcp_name, client in clients_to_use:
+            tools = await client.list_tools()
+            for tool in tools:
+                # Track which client provides this tool (last wins if duplicate names)
+                tool_to_client[tool.name] = (client, profile_id, mcp_name)
+
+                # Add tool to list
+                all_tools.append(
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": tool.name,
+                            "description": tool.description,
+                            "parameters": tool.input_schema,
+                        },
+                    }
+                )
 
         # Initialize LLM provider
         llm_provider = create_llm_provider(provider, model)
         await llm_provider.initialize()
 
-        # Generate response
+        # Generate response with optional history
         result = await llm_provider.generate_with_tools(
-            prompt=request.message, tools=formatted_tools, timeout=30.0
+            prompt=request.message, tools=all_tools, timeout=30.0, messages=request.history
         )
 
         # Execute tool calls if any
@@ -305,7 +1621,27 @@ async def chat(request: ChatRequest) -> ChatResponse:
                     arguments=tool_call.get("arguments", {}),
                     id=tool_call.get("id", "unknown"),
                 )
-                tool_result = await mcp_client.call_tool(mcp_tool_call)
+
+                # Find the appropriate client for this tool
+                tool_info = tool_to_client.get(tool_call["name"])
+                if not tool_info:
+                    # Tool not found in any client
+                    tool_call_with_result = {
+                        "name": tool_call["name"],
+                        "arguments": tool_call.get("arguments", {}),
+                        "id": tool_call.get("id", "unknown"),
+                        "result": None,
+                        "error": f"Tool '{tool_call['name']}' not found in any MCP profile",
+                        "is_error": True,
+                    }
+                    tool_calls_with_results.append(tool_call_with_result)
+                    continue
+
+                # Extract client info
+                client_for_tool, profile_id, mcp_name = tool_info
+
+                # Execute tool call
+                tool_result = await client_for_tool.call_tool(mcp_tool_call)
 
                 # Add result to tool call
                 tool_call_with_result = {
@@ -360,13 +1696,16 @@ async def chat(request: ChatRequest) -> ChatResponse:
 
 @app.get("/api/tests")
 async def list_tests():
-    """List all test files in the tests directory."""
+    """List all test files in the tests directory, including subdirectories."""
     tests_dir = Path.cwd() / "tests"
     if not tests_dir.exists():
-        return []
+        return {"folders": {}, "files": []}
 
-    test_files = []
-    for file in tests_dir.glob("*.yaml"):
+    folders = {}  # folder_name -> list of files
+    root_files = []  # files in root tests/ directory
+
+    # Recursively search for YAML files
+    for file in tests_dir.rglob("*.yaml"):
         try:
             with open(file) as f:
                 content = f.read()
@@ -375,24 +1714,43 @@ async def list_tests():
                 # Count tests
                 test_count = len(data.get("tests", [])) if "tests" in data else 1
 
-                test_files.append(
-                    {
-                        "filename": file.name,
-                        "path": str(file),
-                        "test_count": test_count,
-                        "size": file.stat().st_size,
-                        "modified": file.stat().st_mtime,
-                    }
-                )
+                # Get relative path from tests dir
+                rel_path = file.relative_to(tests_dir)
+                folder_name = str(rel_path.parent) if rel_path.parent != Path(".") else None
+
+                file_info = {
+                    "filename": file.name,
+                    "relative_path": str(rel_path),
+                    "path": str(file),
+                    "test_count": test_count,
+                    "size": file.stat().st_size,
+                    "modified": file.stat().st_mtime,
+                }
+
+                if folder_name and folder_name != ".":
+                    # File is in a subfolder
+                    if folder_name not in folders:
+                        folders[folder_name] = []
+                    folders[folder_name].append(file_info)
+                else:
+                    # File is in root
+                    root_files.append(file_info)
+
         except Exception as e:
             print(f"Error reading {file}: {e}")
 
-    return sorted(test_files, key=lambda x: x["modified"], reverse=True)
+    # Sort files within each folder by modified time
+    for folder in folders:
+        folders[folder] = sorted(folders[folder], key=lambda x: x["modified"], reverse=True)
+
+    root_files = sorted(root_files, key=lambda x: x["modified"], reverse=True)
+
+    return {"folders": folders, "files": root_files}
 
 
-@app.get("/api/tests/{filename}")
+@app.get("/api/tests/{filename:path}")
 async def get_test_file(filename: str):
-    """Get content of a specific test file."""
+    """Get content of a specific test file (supports paths like 'folder/file.yaml')."""
     tests_dir = Path.cwd() / "tests"
     file_path = tests_dir / filename
 
@@ -438,9 +1796,9 @@ async def create_test_file(request: TestFileCreate):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.put("/api/tests/{filename}")
+@app.put("/api/tests/{filename:path}")
 async def update_test_file(filename: str, request: TestFileUpdate):
-    """Update an existing test file."""
+    """Update an existing test file (supports paths like 'folder/file.yaml')."""
     tests_dir = Path.cwd() / "tests"
     file_path = tests_dir / filename
 
@@ -466,9 +1824,9 @@ async def update_test_file(filename: str, request: TestFileUpdate):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.delete("/api/tests/{filename}")
+@app.delete("/api/tests/{filename:path}")
 async def delete_test_file(filename: str):
-    """Delete a test file."""
+    """Delete a test file (supports paths like 'folder/file.yaml')."""
     tests_dir = Path.cwd() / "tests"
     file_path = tests_dir / filename
 
@@ -534,6 +1892,85 @@ async def run_tests(request: TestRunRequest):
                 ),
             },
             "results": [r.to_dict() for r in results],
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/tests/run-tool/{tool_name}")
+async def run_tool_tests(tool_name: str, model: str | None = None, provider: str | None = None):
+    """Run all tests for a specific tool."""
+    # Sanitize tool name for folder lookup
+    safe_tool_name = "".join(c if c.isalnum() or c in ('_', '-') else '_' for c in tool_name)
+
+    tests_dir = Path.cwd() / "tests" / safe_tool_name
+
+    if not tests_dir.exists() or not tests_dir.is_dir():
+        raise HTTPException(
+            status_code=404,
+            detail=f"No test directory found for tool '{tool_name}' (looked for: {tests_dir})"
+        )
+
+    # Find all YAML test files in the tool directory
+    test_files = list(tests_dir.glob("*.yaml"))
+
+    if not test_files:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No test files found in directory: {tests_dir}"
+        )
+
+    model = model or config.default_model
+    provider = provider or config.default_provider
+
+    try:
+        all_results = []
+        total_summary = {
+            "total": 0,
+            "passed": 0,
+            "failed": 0,
+            "total_cost": 0.0,
+            "total_tokens": 0,
+        }
+
+        # Run each test file
+        for test_file in test_files:
+            with open(test_file) as f:
+                data = yaml.safe_load(f)
+
+            test_cases = []
+            if "tests" in data:
+                for test_data in data["tests"]:
+                    test_cases.append(TestCase.from_dict(test_data))
+            else:
+                test_cases.append(TestCase.from_dict(data))
+
+            # Run tests
+            runner = TestRunner(
+                model=model,
+                provider=provider,
+                mcp_url=config.mcp_url,
+                verbose=False,
+                hide_tool_output=True,
+            )
+
+            results = await runner.run_tests(test_cases)
+
+            # Aggregate results
+            all_results.extend(results)
+            total_summary["total"] += len(results)
+            total_summary["passed"] += sum(1 for r in results if r.passed)
+            total_summary["failed"] += sum(1 for r in results if not r.passed)
+            total_summary["total_cost"] += sum(r.cost for r in results)
+            total_summary["total_tokens"] += sum(
+                r.token_usage.get("total", 0) for r in results if r.token_usage
+            )
+
+        return {
+            "summary": total_summary,
+            "results": [r.to_dict() for r in all_results],
+            "files_tested": [str(f.name) for f in test_files],
         }
 
     except Exception as e:
@@ -661,6 +2098,229 @@ async def run_eval(request: EvalRunRequest):
             "score": avg_score,
             "reason": "All evaluators passed" if all_passed else "Some evaluators failed",
             "evaluations": evaluations,
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# Test generation endpoint
+
+
+@app.post("/api/tests/generate")
+async def generate_tests(request: GenerateTestsRequest):
+    """Generate tests for an MCP tool using LLM."""
+    model = request.model or config.default_model
+    provider = request.provider or config.default_provider
+
+    try:
+        # Initialize LLM provider
+        llm_provider = create_llm_provider(provider, model)
+        await llm_provider.initialize()
+
+        # Step 1: Analyze tool and suggest strategies
+        analysis_prompt = f"""You are a test engineer analyzing an MCP tool to suggest test strategies.
+
+Tool Name: {request.tool_name}
+Description: {request.tool_description}
+Schema: {json.dumps(request.tool_schema, indent=2)}
+
+Analyze this tool and suggest:
+1. What are the key scenarios to test? (e.g., valid inputs, edge cases, error conditions)
+2. What parameters should be varied in tests?
+3. What are potential failure modes?
+4. What outputs should be validated?
+
+Respond with a structured analysis in JSON format:
+{{
+  "test_scenarios": [
+    {{"name": "scenario name", "description": "what to test", "priority": "high|medium|low"}}
+  ],
+  "key_parameters": ["param1", "param2"],
+  "edge_cases": ["edge case 1", "edge case 2"],
+  "validation_points": ["what to check in output"]
+}}"""
+
+        analysis_result = await llm_provider.generate_with_tools(
+            prompt=analysis_prompt, tools=[], timeout=30.0
+        )
+
+        # Parse the analysis
+        try:
+            # Extract JSON from response
+            analysis_text = analysis_result.response
+            # Try to find JSON in the response
+            json_match = re.search(r"\{[\s\S]*\}", analysis_text)
+            if json_match:
+                analysis = json.loads(json_match.group())
+            else:
+                # Fallback to basic structure
+                analysis = {
+                    "test_scenarios": [
+                        {
+                            "name": "Basic functionality",
+                            "description": "Test basic tool execution",
+                            "priority": "high",
+                        }
+                    ],
+                    "key_parameters": [],
+                    "edge_cases": [],
+                    "validation_points": ["Tool executes successfully"],
+                }
+        except Exception as e:
+            print(f"Failed to parse analysis: {e}")
+            analysis = {
+                "test_scenarios": [
+                    {
+                        "name": "Basic functionality",
+                        "description": "Test basic tool execution",
+                        "priority": "high",
+                    }
+                ],
+                "key_parameters": [],
+                "edge_cases": [],
+                "validation_points": ["Tool executes successfully"],
+            }
+
+        # Step 2: Generate tests based on coverage level
+        coverage_config = {
+            "basic": {"count": 2, "include_edge_cases": False, "include_errors": False},
+            "mid": {"count": 5, "include_edge_cases": True, "include_errors": True},
+            "comprehensive": {"count": 12, "include_edge_cases": True, "include_errors": True},
+        }
+
+        config_for_level = coverage_config.get(
+            request.coverage_level, coverage_config["basic"]
+        )
+
+        # Build the test generation prompt
+        test_gen_prompt = f"""You are generating test cases for an MCP tool. Generate {config_for_level['count']} test cases in YAML format.
+
+Tool Name: {request.tool_name}
+Description: {request.tool_description}
+Schema: {json.dumps(request.tool_schema, indent=2)}
+
+Analysis: {json.dumps(analysis, indent=2)}
+
+{"Include edge cases and error scenarios." if config_for_level['include_edge_cases'] else "Focus on common use cases."}
+{f"Custom Instructions: {request.custom_instructions}" if request.custom_instructions else ""}
+
+Generate tests in this YAML format:
+```yaml
+version: "1.0"
+tests:
+  - name: test_basic_usage
+    prompt: "A natural language prompt that would trigger this tool"
+    evaluators:
+      - name: execution_successful
+      - name: was_mcp_tool_called
+        args:
+          tool_name: "{request.tool_name}"
+      - name: tool_called_with_parameters
+        args:
+          tool_name: "{request.tool_name}"
+          parameters:
+            param1: "expected_value"
+          partial_match: true
+```
+
+Important:
+1. Each test should have a descriptive name (e.g., test_search_by_id, test_invalid_input)
+2. The prompt should be natural language that would make the LLM call this tool
+3. Include appropriate evaluators for each test
+4. For parameter validation, only include the most important parameters
+5. Make prompts realistic and varied
+
+Generate {config_for_level['count']} tests now in YAML format:"""
+
+        test_gen_result = await llm_provider.generate_with_tools(
+            prompt=test_gen_prompt, tools=[], timeout=60.0
+        )
+
+        # Extract YAML from response
+        yaml_content = test_gen_result.response
+
+        # Try to extract YAML from code blocks
+        yaml_match = re.search(r"```(?:yaml)?\n([\s\S]*?)\n```", yaml_content)
+        if yaml_match:
+            yaml_content = yaml_match.group(1)
+
+        # Validate YAML
+        try:
+            yaml.safe_load(yaml_content)
+        except Exception as e:
+            raise HTTPException(
+                status_code=500, detail=f"Generated invalid YAML: {str(e)}\n\nGenerated content:\n{yaml_content}"
+            )
+
+        # Generate filename and folder structure
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        # Sanitize tool name for folder name (remove special chars)
+        safe_tool_name = "".join(c if c.isalnum() or c in ('_', '-') else '_' for c in request.tool_name)
+
+        # Create folder structure: tests/<tool_name>/
+        tests_dir = Path.cwd() / "tests"
+        tool_dir = tests_dir / safe_tool_name
+        tool_dir.mkdir(parents=True, exist_ok=True)
+
+        filename = f"{request.coverage_level}_{timestamp}.yaml"
+        file_path = tool_dir / filename
+        relative_path = f"{safe_tool_name}/{filename}"
+
+        with open(file_path, "w") as f:
+            f.write(yaml_content)
+
+        await llm_provider.close()
+
+        return {
+            "success": True,
+            "filename": relative_path,
+            "path": str(file_path),
+            "analysis": analysis,
+            "test_count": len(yaml.safe_load(yaml_content).get("tests", [])),
+            "cost": test_gen_result.cost + analysis_result.cost,
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/format")
+async def format_schema(request: FormatSchemaRequest):
+    """Convert a JSON schema to various formats including client code examples."""
+    try:
+        from testmcpy.formatters import FORMATS
+
+        format_config = FORMATS.get(request.format)
+        if not format_config:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported format: {request.format}. Available formats: {list(FORMATS.keys())}",
+            )
+
+        converter = format_config["convert"]
+
+        # For curl and client formats, pass mcp_url and auth_token
+        client_formats = ["curl", "python_client", "javascript_client", "typescript_client"]
+        if request.format in client_formats:
+            # Use provided values or fall back to config
+            mcp_url = request.mcp_url or config.mcp_url
+            auth_token = request.auth_token or config.mcp_auth_token
+
+            formatted = converter(
+                request.schema,
+                request.tool_name,
+                mcp_url=mcp_url,
+                auth_token=auth_token
+            )
+        else:
+            formatted = converter(request.schema, request.tool_name)
+
+        return {
+            "success": True,
+            "format": request.format,
+            "code": formatted,
+            "language": format_config["language"],
         }
 
     except Exception as e:

@@ -42,6 +42,7 @@ profiles:
 
   staging:
     name: "Staging Environment"
+    default: true  # Mark as default (auto-selected in web UI)
     mcp_url: "https://staging.example.com/mcp/"
     auth:
       type: "jwt"
@@ -58,6 +59,11 @@ profiles:
       api_token: "${PROD_API_TOKEN}"
       api_secret: "${PROD_API_SECRET}"
 ```
+
+**Default Selection:**
+- The top-level `default: local` sets the default profile for CLI commands
+- Adding `default: true` to a profile (like staging above) marks it as the default in the web UI
+- When users first open the web interface, the profile marked with `default: true` will be auto-selected
 
 ### 3. Set Environment Variables
 

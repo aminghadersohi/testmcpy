@@ -1,0 +1,4 @@
+[] while in the ui and browsing tools  add a button to genereate tests for the selected tool. popup a configuration modal to help them configure how the tests will get generated. it should use the llm to suggest how to genrate tests give some options such as basic, mid, and comprehensive coverage with ability to type in a say "write a test to cover x y z scenario and or update/replace existing ones"
+[] improve the request parameter view in mcp explorer in each tool. should look like an ide or better. users like frontend engineers might wanna copy it various formats like json, yaml, whatever is good at that layer, do some research 
+[] would it help if our chat/tests maintained some chat history for context and passed back to llm with each call? how does that work best? how should we implement ?
+[] for ollama provide better ui tooling to install vairous ollamas and make sure the server for it is running - if we dont have already or if we need, if not ingore this task

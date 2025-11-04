@@ -97,30 +97,54 @@ function TestResultPanel({ result, initialExpanded = false }) {
           )}
 
           {/* Evaluator Details */}
-          {result.evaluator_results && result.evaluator_results.length > 0 && (
+          {result.evaluations && result.evaluations.length > 0 && (
             <div>
               <h4 className="text-xs font-semibold text-text-secondary mb-1.5">
-                Evaluators ({result.evaluator_results.length})
+                Evaluators ({result.evaluations.length})
               </h4>
-              <div className="space-y-1.5">
-                {result.evaluator_results.map((evaluator, idx) => (
-                  <div
-                    key={idx}
-                    className="flex items-center justify-between p-2 bg-surface rounded border border-border"
-                  >
-                    <div className="flex items-center gap-2">
-                      {evaluator.passed ? (
-                        <CheckCircle size={14} className="text-success" />
-                      ) : (
-                        <XCircle size={14} className="text-error" />
-                      )}
-                      <span className="text-xs text-text-primary">{evaluator.name}</span>
+              <div className="space-y-2">
+                {result.evaluations.map((evaluation, idx) => {
+                  const failed = !evaluation.passed
+                  return (
+                    <div
+                      key={idx}
+                      className={`p-3 rounded-lg border ${
+                        failed
+                          ? 'bg-error/5 border-error/30'
+                          : 'bg-surface border-border'
+                      }`}
+                    >
+                      <div className="flex items-start gap-2">
+                        {evaluation.passed ? (
+                          <CheckCircle size={14} className="text-success mt-0.5 flex-shrink-0" />
+                        ) : (
+                          <XCircle size={14} className="text-error mt-0.5 flex-shrink-0" />
+                        )}
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center justify-between mb-1">
+                            <span className={`text-sm font-medium ${
+                              failed ? 'text-error' : 'text-text-primary'
+                            }`}>
+                              {evaluation.evaluator}
+                            </span>
+                            {evaluation.score !== undefined && (
+                              <span className="text-xs text-text-tertiary font-mono">
+                                Score: {(evaluation.score * 100).toFixed(0)}%
+                              </span>
+                            )}
+                          </div>
+                          {evaluation.reason && (
+                            <p className={`text-xs leading-relaxed ${
+                              failed ? 'text-error-light' : 'text-text-secondary'
+                            }`}>
+                              {evaluation.reason}
+                            </p>
+                          )}
+                        </div>
+                      </div>
                     </div>
-                    {evaluator.reason && (
-                      <span className="text-xs text-text-tertiary">{evaluator.reason}</span>
-                    )}
-                  </div>
-                ))}
+                  )
+                })}
               </div>
             </div>
           )}

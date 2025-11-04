@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react'
-import { Send, Loader, Wrench, DollarSign, ChevronDown, ChevronRight, CheckCircle, FileText, Plus } from 'lucide-react'
+import { Send, Loader, Wrench, DollarSign, ChevronDown, ChevronRight, CheckCircle, FileText, Plus, Server, Trash2 } from 'lucide-react'
 import ReactJson from '@microlink/react-json-view'
 
 // JSON viewer component with IDE-like collapsible tree
@@ -73,7 +73,7 @@ function JSONViewer({ data }) {
   )
 }
 
-function ChatInterface() {
+function ChatInterface({ selectedProfiles = [] }) {
   const [messages, setMessages] = useState([])
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
@@ -87,9 +87,16 @@ function ChatInterface() {
   const [runningEval, setRunningEval] = useState(null)
   const [collapsedToolCalls, setCollapsedToolCalls] = useState({})
   const textareaRef = useRef(null)
+  const [historySize, setHistorySize] = useState(10)  // Number of messages to keep in history
+
+  // For Chat, only use the first selected profile (single MCP at a time)
+  const activeProfile = selectedProfiles.length > 0 ? selectedProfiles[0] : null
+  const hasMultipleSelected = selectedProfiles.length > 1
 
   useEffect(() => {
     loadModels()
+    loadChatHistory()
+    checkForPrefillTool()
   }, [])
 
   useEffect(() => {
@@ -113,6 +120,90 @@ function ChatInterface() {
     }
   }
 
+  const loadChatHistory = () => {
+    try {
+      const saved = localStorage.getItem('chatHistory')
+      if (saved) {
+        setMessages(JSON.parse(saved))
+      }
+    } catch (error) {
+      console.error('Failed to load chat history:', error)
+    }
+  }
+
+  const checkForPrefillTool = () => {
+    try {
+      const prefillData = localStorage.getItem('prefillTool')
+      if (prefillData) {
+        const tool = JSON.parse(prefillData)
+        // Generate a sample prompt for this tool
+        const samplePrompt = generateSamplePrompt(tool)
+        setInput(samplePrompt)
+        // Clear the prefill data
+        localStorage.removeItem('prefillTool')
+        // Focus the input
+        setTimeout(() => {
+          textareaRef.current?.focus()
+        }, 100)
+      }
+    } catch (error) {
+      console.error('Failed to load prefill tool:', error)
+    }
+  }
+
+  const generateSamplePrompt = (tool) => {
+    // Generate a natural language prompt based on the tool's description and parameters
+    const params = tool.schema?.properties || {}
+    const requiredParams = tool.schema?.required || []
+
+    if (Object.keys(params).length === 0) {
+      return `Can you help me use the ${tool.name} tool?`
+    }
+
+    // Create a sample prompt with placeholder values
+    let prompt = `I'd like to use the ${tool.name} tool. `
+
+    const paramDescriptions = []
+    for (const [paramName, paramInfo] of Object.entries(params)) {
+      const isRequired = requiredParams.includes(paramName)
+      const type = paramInfo.type || 'any'
+
+      if (isRequired) {
+        let exampleValue = ''
+        if (type === 'string') {
+          exampleValue = paramInfo.enum ? paramInfo.enum[0] : 'example_value'
+        } else if (type === 'number' || type === 'integer') {
+          exampleValue = '123'
+        } else if (type === 'boolean') {
+          exampleValue = 'true'
+        } else if (type === 'array') {
+          exampleValue = '["item1", "item2"]'
+        }
+
+        paramDescriptions.push(`${paramName}: ${exampleValue}`)
+      }
+    }
+
+    if (paramDescriptions.length > 0) {
+      prompt += `Here are the parameters:\n${paramDescriptions.join('\n')}`
+    }
+
+    return prompt
+  }
+
+  const saveChatHistory = (messagesToSave) => {
+    try {
+      localStorage.setItem('chatHistory', JSON.stringify(messagesToSave))
+    } catch (error) {
+      console.error('Failed to save chat history:', error)
+    }
+  }
+
+  const clearChatHistory = () => {
+    setMessages([])
+    localStorage.removeItem('chatHistory')
+  }
+
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }
@@ -121,11 +212,18 @@ function ChatInterface() {
     if (!input.trim() || loading) return
 
     const userMessage = { role: 'user', content: input }
-    setMessages([...messages, userMessage])
+    const updatedMessages = [...messages, userMessage]
+    setMessages(updatedMessages)
     setInput('')
     setLoading(true)
 
     try {
+      // Build history for API - last N messages (excluding current one we just added)
+      const historyForAPI = messages.slice(-historySize).map(msg => ({
+        role: msg.role,
+        content: msg.content
+      }))
+
       const res = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -133,6 +231,8 @@ function ChatInterface() {
           message: input,
           model: selectedModel,
           provider: selectedProvider,
+          profiles: activeProfile ? [activeProfile] : null,
+          history: historyForAPI.length > 0 ? historyForAPI : null,
         }),
       })
 
@@ -147,17 +247,21 @@ function ChatInterface() {
         duration: data.duration,
       }
 
-      setMessages((prev) => [...prev, assistantMessage])
+      const finalMessages = [...updatedMessages, assistantMessage]
+      setMessages(finalMessages)
+      saveChatHistory(finalMessages)
     } catch (error) {
       console.error('Failed to send message:', error)
-      setMessages((prev) => [
-        ...prev,
+      const errorMessages = [
+        ...updatedMessages,
         {
           role: 'assistant',
           content: `Error: ${error.message}`,
           error: true,
         },
-      ])
+      ]
+      setMessages(errorMessages)
+      saveChatHistory(errorMessages)
     } finally {
       setLoading(false)
     }
@@ -356,14 +460,29 @@ ${evaluators}
     <div className="h-full flex flex-col">
       {/* Header */}
       <div className="p-4 border-b border-border bg-surface-elevated">
-        <div className="flex items-center justify-between">
+        <div className="flex items-center justify-between mb-3">
           <div>
             <h1 className="text-2xl font-bold">Chat Interface</h1>
             <p className="text-text-secondary mt-1 text-base">
               Interactive chat with LLM using MCP tools
+              {messages.length > 0 && (
+                <span className="ml-2 text-xs bg-primary/10 text-primary px-2 py-0.5 rounded border border-primary/20">
+                  {messages.length} message{messages.length !== 1 ? 's' : ''} in history
+                </span>
+              )}
             </p>
           </div>
           <div className="flex gap-3">
+            {messages.length > 0 && (
+              <button
+                onClick={clearChatHistory}
+                className="btn btn-secondary text-sm flex items-center gap-2"
+                title="Clear chat history"
+              >
+                <Trash2 size={16} />
+                <span>Clear History</span>
+              </button>
+            )}
             <select
               value={selectedProvider}
               onChange={(e) => {
@@ -395,7 +514,33 @@ ${evaluators}
             </select>
           </div>
         </div>
+
       </div>
+
+      {/* Active MCP Banner */}
+      {activeProfile && (
+        <div className="px-4 pt-4 bg-surface-elevated border-b border-border">
+          {hasMultipleSelected ? (
+            <div className="bg-warning/10 border border-warning/30 rounded-lg p-3 flex items-start gap-3 mb-4">
+              <div className="text-warning-light mt-0.5">⚠️</div>
+              <div className="flex-1 text-sm">
+                <p className="text-warning-light font-semibold mb-1">Multiple MCP Servers Selected</p>
+                <p className="text-text-secondary">
+                  Chat uses <strong className="text-text-primary">{activeProfile.split(':')[1] || activeProfile}</strong> only.
+                  Use the Tests page to work with multiple servers simultaneously.
+                </p>
+              </div>
+            </div>
+          ) : (
+            <div className="bg-info/10 border border-info/30 rounded-lg p-3 flex items-center gap-3 mb-4">
+              <div className="text-info-light">ℹ️</div>
+              <div className="text-sm text-text-secondary">
+                Using tools from <strong className="text-info-light">{activeProfile.split(':')[1] || activeProfile}</strong>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Messages */}
       <div className="flex-1 overflow-auto p-4 bg-background-subtle">

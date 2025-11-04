@@ -2616,13 +2616,28 @@ Be specific and actionable. Focus on making documentation crystal clear for LLMs
         try:
             analysis_data = None
 
+            # Debug logging
+            print(f"\n=== LLM Response Debug ===")
+            print(f"Tool calls count: {len(result.tool_calls) if result.tool_calls else 0}")
+            print(f"Response text length: {len(result.response)}")
+            print(f"Response preview: {result.response[:200]}")
+
             # First, check if the LLM made a tool call
             if result.tool_calls and len(result.tool_calls) > 0:
                 # LLM used the submit_analysis tool - perfect!
+                print(f"Tool calls: {result.tool_calls}")
                 tool_call = result.tool_calls[0]
+                print(f"Tool call name: {tool_call.get('name')}")
+                print(f"Tool call keys: {list(tool_call.keys())}")
+
                 if tool_call.get("name") == "submit_analysis":
-                    analysis_data = tool_call.get("input", {})
+                    # Anthropic uses "arguments" key, some providers use "input"
+                    analysis_data = tool_call.get("arguments") or tool_call.get("input", {})
                     print(f"✓ LLM used tool call for structured output")
+                    print(f"  Score: {analysis_data.get('clarity_score')}")
+                    print(f"  Issues found: {len(analysis_data.get('issues', []))}")
+                else:
+                    print(f"✗ Unexpected tool call: {tool_call.get('name')}")
 
             # If no tool call, try to parse JSON from response text
             if not analysis_data:

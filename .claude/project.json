@@ -1,43 +1,127 @@
 {
-  "name": "MCP Testing Framework",
-  "description": "A comprehensive testing framework for validating LLM tool calling capabilities with MCP (Model Context Protocol) services, specifically designed for testing Superset operations.",
-  "version": "1.0.0",
+  "name": "testmcpy",
+  "description": "A comprehensive testing framework for validating LLM tool calling capabilities with MCP (Model Context Protocol) services. Test, benchmark, and compare Claude, GPT-4, Llama, and other models' accuracy, cost, and performance when calling MCP tools.",
+  "version": "0.2.3",
   "type": "python",
-  "framework": "cli",
+  "framework": "cli-and-web",
+  "python_version": ">=3.10,<3.13",
   "dependencies": {
-    "python": ">=3.8",
-    "typer": "CLI framework",
-    "rich": "Terminal output formatting",
-    "pyyaml": "YAML parsing",
-    "requests": "HTTP client",
-    "aiohttp": "Async HTTP client"
+    "core": {
+      "python": "3.10-3.12",
+      "typer": "CLI framework",
+      "rich": "Terminal output formatting",
+      "pyyaml": "YAML parsing",
+      "httpx": "HTTP client",
+      "anthropic": "Anthropic Claude API",
+      "openai": "OpenAI API",
+      "pydantic": "Data validation"
+    },
+    "server": {
+      "fastapi": "Web API framework",
+      "uvicorn": "ASGI server",
+      "websockets": "WebSocket support"
+    },
+    "optional": {
+      "pytest": "Testing framework",
+      "black": "Code formatter",
+      "ruff": "Linter"
+    }
   },
   "structure": {
-    "src/": "Core framework modules",
-    "evals/": "Evaluation functions",
-    "tests/": "Test case definitions",
-    "reports/": "Generated test reports",
-    "my_mcp_tests/": "Example configurations",
-    "research/": "Research scripts",
-    "cli.py": "Main CLI interface"
+    "testmcpy/": "Main package directory",
+    "testmcpy/src/": "Core framework modules (mcp_client, llm_integration, test_runner)",
+    "testmcpy/evals/": "Evaluation functions and validators",
+    "testmcpy/server/": "FastAPI web server and REST API",
+    "testmcpy/ui/": "React-based web interface",
+    "tests/": "Test case definitions (YAML/JSON)",
+    "docs/": "Documentation and guides",
+    "examples/": "Example test suites and configurations",
+    "reports/": "Generated test reports"
   },
   "key_files": [
-    "cli.py",
-    "src/mcp_client.py",
-    "src/llm_integration.py",
-    "src/test_runner.py",
-    "evals/base_evaluators.py",
+    "testmcpy/cli.py",
+    "testmcpy/config.py",
+    "testmcpy/mcp_profiles.py",
+    "testmcpy/src/mcp_client.py",
+    "testmcpy/src/llm_integration.py",
+    "testmcpy/src/test_runner.py",
+    "testmcpy/evals/base_evaluators.py",
+    "testmcpy/server/api.py",
+    "docs/MCP_PROFILES.md",
+    "docs/EVALUATOR_REFERENCE.md",
+    "docs/CLIENT_USAGE_GUIDE.md",
+    "docs/OPTIMIZE_DOCS_QUICKSTART.md",
     "README.md",
-    "requirements.txt"
+    "pyproject.toml"
   ],
+  "entry_points": {
+    "cli": "testmcpy.cli:app",
+    "web_server": "testmcpy.server.api:app"
+  },
   "testing": {
-    "framework": "custom",
+    "framework": "custom-yaml-based",
     "test_files": "tests/*.yaml",
-    "run_command": "python cli.py run tests/"
+    "run_command": "testmcpy run tests/",
+    "evaluators": [
+      "was_mcp_tool_called",
+      "tool_called_with_parameter",
+      "tool_called_with_parameters",
+      "parameter_value_in_range",
+      "tool_call_sequence",
+      "execution_successful",
+      "final_answer_contains",
+      "within_time_limit",
+      "token_usage_reasonable"
+    ]
   },
   "development": {
-    "entry_point": "cli.py",
+    "entry_point": "testmcpy/cli.py",
+    "web_ui": "testmcpy serve (starts FastAPI + React UI)",
+    "config_file": ".mcp_services.yaml",
     "local_models": ["llama3.1:8b", "mistral-nemo", "qwen2.5:7b"],
-    "mcp_services": "http://localhost:5008/mcp"
+    "recommended_models": {
+      "anthropic": "claude-haiku-4-5 (best accuracy)",
+      "openai": "gpt-4-turbo",
+      "ollama": "llama3.1:8b (free, local)"
+    },
+    "default_mcp_url": "http://localhost:5008/mcp/"
+  },
+  "features": {
+    "llm_providers": ["anthropic", "openai", "ollama"],
+    "authentication": ["bearer", "jwt", "oauth"],
+    "interfaces": ["cli", "web-ui", "rest-api"],
+    "profile_management": true,
+    "multi_environment": true,
+    "token_tracking": true,
+    "cost_analysis": true,
+    "docs_optimization": true
+  },
+  "recent_additions": {
+    "llm_docs_optimization": {
+      "added": "2024-11",
+      "description": "AI-powered tool documentation improvement",
+      "endpoint": "/api/mcp/optimize-docs"
+    },
+    "mcp_profiles": {
+      "added": "2024-11",
+      "description": "Multi-environment configuration system",
+      "config_file": ".mcp_services.yaml"
+    },
+    "enhanced_test_results": {
+      "added": "2024-10",
+      "description": "Detailed evaluator results with failure reasons"
+    },
+    "web_ui_branding": {
+      "added": "2024-11",
+      "description": "Logo, single MCP selection, UX improvements"
+    },
+    "tool_call_sequence_evaluator": {
+      "added": "2024-10",
+      "description": "Multi-step workflow validation"
+    },
+    "deep_parameter_validation": {
+      "added": "2024-10",
+      "description": "Enhanced parameter checking evaluators"
+    }
   }
 }

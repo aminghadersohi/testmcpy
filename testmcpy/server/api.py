@@ -89,6 +89,22 @@ class FormatSchemaRequest(BaseModel):
     auth_token: str | None = None  # For curl format with actual values
 
 
+class OptimizeDocsRequest(BaseModel):
+    tool_name: str
+    description: str
+    input_schema: dict[str, Any]
+    model: str | None = None
+    provider: str | None = None
+
+
+class OptimizeDocsResponse(BaseModel):
+    analysis: dict[str, Any]
+    suggestions: dict[str, Any]
+    original: dict[str, Any]
+    cost: float
+    duration: float
+
+
 class ProfileCreateRequest(BaseModel):
     name: str
     description: str
@@ -2325,6 +2341,166 @@ async def format_schema(request: FormatSchemaRequest):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/mcp/optimize-docs")
+async def optimize_tool_docs(request: OptimizeDocsRequest) -> OptimizeDocsResponse:
+    """
+    Analyze tool documentation and suggest improvements.
+
+    Uses an LLM to evaluate tool documentation against best practices
+    for LLM tool calling and provides actionable suggestions.
+    """
+    model = request.model or config.default_model
+    provider = request.provider or config.default_provider
+
+    if not model or not provider:
+        raise HTTPException(
+            status_code=400,
+            detail="Model and provider must be configured. Set DEFAULT_MODEL and DEFAULT_PROVIDER in config."
+        )
+
+    try:
+        # Initialize LLM provider (use Haiku for cost efficiency)
+        llm_model = model
+        if provider == "anthropic" and "haiku" not in model.lower():
+            # Use Haiku for analysis to save costs
+            llm_model = "claude-haiku-4-5"
+
+        llm_provider = create_llm_provider(provider, llm_model)
+        await llm_provider.initialize()
+
+        # Format the input schema for better readability
+        schema_str = json.dumps(request.input_schema, indent=2)
+
+        # Build the analysis prompt
+        analysis_prompt = f"""You are an expert at writing tool documentation for LLMs (Large Language Models).
+Your task is to analyze MCP (Model Context Protocol) tool documentation and suggest improvements.
+
+Tool Name: {request.tool_name}
+Current Description: {request.description}
+Parameters Schema: {schema_str}
+
+Analyze the documentation for:
+1. **Clarity**: Is the purpose immediately clear? Would an LLM understand exactly what this tool does?
+2. **Completeness**: Are all parameters well-explained with clear types and constraints?
+3. **Actionability**: Would an LLM know exactly when to use this tool vs alternatives?
+4. **Examples**: Are there concrete usage examples or scenarios?
+5. **Constraints**: Are limitations, prerequisites, and error conditions clearly stated?
+
+Common issues to look for:
+- Vague descriptions (e.g., "manages data" instead of "creates a new dataset with specified columns")
+- Missing context (when to use this tool vs alternatives)
+- Unclear parameter purposes or types
+- No concrete examples
+- Technical jargon without explanation
+- Ambiguous language with multiple interpretations
+- Missing information about error conditions or constraints
+
+Provide your analysis in the following JSON format:
+{{
+  "clarity_score": <number 0-100>,
+  "issues": [
+    {{
+      "category": "clarity" | "completeness" | "actionability" | "examples" | "constraints",
+      "severity": "high" | "medium" | "low",
+      "issue": "Brief description of the issue",
+      "current": "The problematic part of current documentation",
+      "suggestion": "How to fix it"
+    }}
+  ],
+  "improved_description": "A complete rewrite of the tool description that addresses all issues. Should be 2-4 sentences that clearly explain: (1) what the tool does, (2) when to use it, (3) key parameters, and (4) any important constraints.",
+  "improvements": [
+    {{
+      "issue": "Brief issue description",
+      "before": "Current problematic text",
+      "after": "Improved version",
+      "explanation": "Why this is better"
+    }}
+  ]
+}}
+
+Be specific and actionable in your suggestions. Focus on making the documentation clear for an LLM that needs to decide when and how to call this tool."""
+
+        # Generate analysis
+        result = await llm_provider.generate_with_tools(
+            prompt=analysis_prompt,
+            tools=[],
+            timeout=45.0
+        )
+
+        # Parse the JSON response
+        try:
+            # Extract JSON from response (handle markdown code blocks)
+            response_text = result.response.strip()
+
+            # Try to find JSON in code blocks first
+            json_match = re.search(r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", response_text)
+            if json_match:
+                json_str = json_match.group(1)
+            else:
+                # Try to find raw JSON
+                json_match = re.search(r"\{[\s\S]*\}", response_text)
+                if json_match:
+                    json_str = json_match.group(0)
+                else:
+                    raise ValueError("No JSON found in response")
+
+            analysis_data = json.loads(json_str)
+
+            # Validate required fields
+            if "clarity_score" not in analysis_data:
+                analysis_data["clarity_score"] = 50
+            if "issues" not in analysis_data:
+                analysis_data["issues"] = []
+            if "improved_description" not in analysis_data:
+                analysis_data["improved_description"] = request.description
+            if "improvements" not in analysis_data:
+                analysis_data["improvements"] = []
+
+        except Exception as e:
+            # Fallback to basic response if parsing fails
+            print(f"Failed to parse LLM response as JSON: {e}")
+            print(f"Raw response: {result.response}")
+            analysis_data = {
+                "clarity_score": 50,
+                "issues": [{
+                    "category": "clarity",
+                    "severity": "medium",
+                    "issue": "Unable to perform detailed analysis",
+                    "current": request.description,
+                    "suggestion": "Consider making the description more specific and actionable"
+                }],
+                "improved_description": request.description,
+                "improvements": []
+            }
+
+        await llm_provider.close()
+
+        # Build response
+        return OptimizeDocsResponse(
+            analysis={
+                "score": analysis_data.get("clarity_score", 50),
+                "clarity": "good" if analysis_data.get("clarity_score", 50) >= 75 else ("fair" if analysis_data.get("clarity_score", 50) >= 50 else "poor"),
+                "issues": analysis_data.get("issues", [])
+            },
+            suggestions={
+                "improved_description": analysis_data.get("improved_description", request.description),
+                "improvements": analysis_data.get("improvements", [])
+            },
+            original={
+                "tool_name": request.tool_name,
+                "description": request.description,
+                "input_schema": request.input_schema
+            },
+            cost=result.cost,
+            duration=result.duration
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to optimize documentation: {str(e)}")
 
 
 # Catch-all route for React Router (must be before static files)

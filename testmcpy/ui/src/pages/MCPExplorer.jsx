@@ -4,6 +4,7 @@ import { useNavigate } from 'react-router-dom'
 import ParameterCard from '../components/ParameterCard'
 import TestGenerationModal from '../components/TestGenerationModal'
 import SchemaCodeViewer from '../components/SchemaCodeViewer'
+import OptimizeDocsModal from '../components/OptimizeDocsModal'
 
 function MCPExplorer({ selectedProfiles = [] }) {
   const navigate = useNavigate()
@@ -16,6 +17,7 @@ function MCPExplorer({ selectedProfiles = [] }) {
   const [activeTab, setActiveTab] = useState('tools')
   const [showCodeViewer, setShowCodeViewer] = useState(new Set())
   const [selectedToolForGeneration, setSelectedToolForGeneration] = useState(null)
+  const [selectedToolForOptimization, setSelectedToolForOptimization] = useState(null)
   const [searchQuery, setSearchQuery] = useState('')
   const [showShortcuts, setShowShortcuts] = useState(false)
   const [selectedTools, setSelectedTools] = useState(new Set())
@@ -62,6 +64,7 @@ function MCPExplorer({ selectedProfiles = [] }) {
         setShowShortcuts(false)
         setSearchQuery('')
         setSelectedToolForGeneration(null)
+        setSelectedToolForOptimization(null)
       }
 
       // "c" - Copy first visible tool
@@ -589,7 +592,7 @@ function MCPExplorer({ selectedProfiles = [] }) {
                       <button
                         onClick={(e) => {
                           e.stopPropagation()
-                          alert('LLM Docs optimization coming soon! This will analyze the tool description and suggest improvements to help the LLM call it correctly.')
+                          setSelectedToolForOptimization(tool)
                         }}
                         className="btn btn-secondary text-sm"
                         title="Optimize tool description for better LLM understanding"
@@ -864,6 +867,14 @@ function MCPExplorer({ selectedProfiles = [] }) {
           tool={selectedToolForGeneration}
           onClose={() => setSelectedToolForGeneration(null)}
           onSuccess={handleTestGenerationSuccess}
+        />
+      )}
+
+      {/* Optimize Docs Modal */}
+      {selectedToolForOptimization && (
+        <OptimizeDocsModal
+          tool={selectedToolForOptimization}
+          onClose={() => setSelectedToolForOptimization(null)}
         />
       )}
 

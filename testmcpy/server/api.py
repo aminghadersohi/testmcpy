@@ -2,9 +2,15 @@
 FastAPI server for testmcpy web UI.
 """
 
+import warnings
+
+# Suppress all deprecation warnings from websockets before any imports
+warnings.filterwarnings("ignore", category=DeprecationWarning, module="websockets")
+warnings.filterwarnings("ignore", category=DeprecationWarning, module="websockets.legacy")
+warnings.filterwarnings("ignore", category=DeprecationWarning, module="uvicorn")
+
 import json
 import re
-import warnings
 from contextlib import asynccontextmanager
 from datetime import datetime
 from enum import Enum
@@ -16,13 +22,6 @@ from fastapi import FastAPI, HTTPException, WebSocket, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, field_validator
-
-# Suppress websockets deprecation warnings from uvicorn (third-party code)
-# uvicorn hasn't updated to websockets 14.0 API yet
-warnings.filterwarnings("ignore", category=DeprecationWarning, module="websockets.legacy")
-warnings.filterwarnings(
-    "ignore", category=DeprecationWarning, module="uvicorn.protocols.websockets"
-)
 
 from testmcpy.auth_debugger import (
     AuthDebugger,

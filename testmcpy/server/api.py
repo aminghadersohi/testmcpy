@@ -71,7 +71,8 @@ class AuthConfig(BaseModel):
 class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1)
     model: str | None = None
-    provider: LLMProvider
+    provider: LLMProvider | None = None
+    llm_profile: str | None = None  # LLM profile ID to use
     profiles: list[str] | None = None  # List of MCP profile IDs to use
     history: list[dict[str, Any]] | None = None  # Chat history for context
 
@@ -2115,8 +2116,27 @@ async def set_default_test_profile(profile_id: str):
 @app.post("/api/chat")
 async def chat(request: ChatRequest) -> ChatResponse:
     """Send a message to the LLM with MCP tools."""
-    model = request.model or config.default_model
-    provider = request.provider or config.default_provider
+    # Get model and provider from LLM profile if specified
+    if request.llm_profile:
+        from testmcpy.llm_profiles import load_llm_profile
+        llm_profile = load_llm_profile(request.llm_profile)
+        if llm_profile:
+            default_provider_config = llm_profile.get_default_provider()
+            if default_provider_config:
+                model = request.model or default_provider_config.model
+                provider = request.provider or default_provider_config.provider
+            else:
+                model = request.model or config.default_model
+                provider = request.provider or config.default_provider
+        else:
+            model = request.model or config.default_model
+            provider = request.provider or config.default_provider
+    else:
+        model = request.model or config.default_model
+        provider = request.provider or config.default_provider
+
+    if not model or not provider:
+        raise HTTPException(status_code=400, detail="Model and provider must be specified or configured in LLM profile")
 
     try:
         # Determine which MCP clients to use
@@ -2467,7 +2487,7 @@ async def run_tests(request: TestRunRequest):
         runner = TestRunner(
             model=model,
             provider=provider,
-            mcp_url=config.mcp_url,
+            mcp_url=config.get_mcp_url(),
             verbose=False,
             hide_tool_output=True,
         )
@@ -2527,7 +2547,7 @@ async def run_specific_test(test_name: str, request: TestRunRequest | None = Non
         runner = TestRunner(
             model=model,
             provider=provider,
-            mcp_url=config.mcp_url,
+            mcp_url=config.get_mcp_url(),
             verbose=False,
             hide_tool_output=True,
         )
@@ -2594,7 +2614,7 @@ async def run_specific_test_case(test_name: str, case_index: int, request: TestR
         runner = TestRunner(
             model=model,
             provider=provider,
-            mcp_url=config.mcp_url,
+            mcp_url=config.get_mcp_url(),
             verbose=False,
             hide_tool_output=True,
         )
@@ -2669,7 +2689,7 @@ async def run_tool_tests(tool_name: str, model: str | None = None, provider: str
             runner = TestRunner(
                 model=model,
                 provider=provider,
-                mcp_url=config.mcp_url,
+                mcp_url=config.get_mcp_url(),
                 verbose=False,
                 hide_tool_output=True,
             )
@@ -3057,7 +3077,7 @@ async def format_schema(request: FormatSchemaRequest):
         client_formats = ["curl", "python_client", "javascript_client", "typescript_client"]
         if request.format in client_formats:
             # Use provided values or fall back to config
-            mcp_url = request.mcp_url or config.mcp_url
+            mcp_url = request.mcp_url or config.get_mcp_url()
             auth_token = request.auth_token or config.mcp_auth_token
 
             formatted = converter(
@@ -3572,7 +3592,7 @@ async def compare_tools(request: ToolCompareRequest):
 
             # Initialize client
             client = MCPClient(
-                mcp_url=mcp_config.mcp_url,
+                mcp_url=mcp_config.get_mcp_url(),
                 auth=mcp_config.auth
             )
             await client.initialize()
@@ -3681,7 +3701,7 @@ async def debug_tool(tool_name: str, request: ToolDebugRequest):
                     if profile_data and profile_data.mcps:
                         mcp_config = profile_data.mcps[0]
                         client = MCPClient(
-                            mcp_url=mcp_config.mcp_url,
+                            mcp_url=mcp_config.get_mcp_url(),
                             auth=mcp_config.auth
                         )
                         await client.initialize()

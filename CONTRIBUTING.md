@@ -798,7 +798,7 @@ Your contributions make testmcpy better for everyone. Thank you!
 
 - **fastmcp**: Fast MCP server implementation
 - **claude-agent-sdk**: Claude agent SDK
-- **Superset**: Apache Superset (what we're testing with MCP)
+- **MCP servers**: Various MCP server implementations
 
 ## Questions?
 

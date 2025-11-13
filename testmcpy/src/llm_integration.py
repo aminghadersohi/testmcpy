@@ -588,7 +588,7 @@ class AnthropicProvider(LLMProvider):
         self.client = httpx.AsyncClient(timeout=60.0)
         # Use MCP_URL from config if not provided
         if mcp_url is None:
-            mcp_url = config.mcp_url
+            mcp_url = config.get_mcp_url()
         self.tool_discovery = ToolDiscoveryService(mcp_url)
 
     async def initialize(self):
@@ -804,7 +804,7 @@ class ClaudeSDKProvider(LLMProvider):
         self.api_key = api_key or config.get("ANTHROPIC_API_KEY", "")
         # Use MCP_URL from config if not provided
         if mcp_url is None:
-            mcp_url = config.mcp_url
+            mcp_url = config.get_mcp_url()
         self.mcp_url = mcp_url
         self.tool_discovery = ToolDiscoveryService(mcp_url)
         self._sdk_tools: list[Any] = []
@@ -1035,7 +1035,7 @@ class ClaudeCodeProvider(LLMProvider):
         # Use MCP_URL from config if not provided
         config = get_config()
         if mcp_url is None:
-            mcp_url = config.mcp_url
+            mcp_url = config.get_mcp_url()
         self.tool_discovery = ToolDiscoveryService(mcp_url)
 
     def _find_claude_cli(self) -> str:

@@ -315,7 +315,7 @@ class TestManagerScreen(Screen):
             runner = TestRunner(
                 model=config.default_model or "claude-haiku-4-5",
                 provider=config.default_provider or "anthropic",
-                mcp_url=config.mcp_url,
+                mcp_url=config.get_mcp_url(),
                 verbose=False,
             )
             

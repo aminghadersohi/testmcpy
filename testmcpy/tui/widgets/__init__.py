@@ -1,5 +1,6 @@
 """Reusable TUI widgets."""
 
+from .auth_flow_widget import AuthFlowStep, AuthFlowWidget
 from .error_modal import (
     ConfirmModal,
     ConnectionErrorModal,
@@ -27,6 +28,9 @@ from .search_modal import GlobalSearchModal, SearchResult, SearchResultItem
 from .status_bar import SimpleStatusBar, StatusBar
 
 __all__ = [
+    # Auth widgets
+    "AuthFlowStep",
+    "AuthFlowWidget",
     # Error modals
     "ConfirmModal",
     "ConnectionErrorModal",

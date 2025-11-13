@@ -102,13 +102,13 @@ profiles:
   production:
     name: "Production"
     mcps:
-      - name: "Preset Cloud"
-        mcp_url: "https://workspace.preset.io/mcp"
+      - name: "Production Workspace"
+        mcp_url: "https://workspace.example.com/mcp"
         auth:
           type: "jwt"
-          api_url: "https://api.app.preset.io/v1/auth/"
-          api_token: "${PRESET_API_TOKEN}"
-          api_secret: "${PRESET_API_SECRET}"
+          api_url: "https://api.example.com/v1/auth/"
+          api_token: "${API_TOKEN}"
+          api_secret: "${API_SECRET}"
 ```
 
 ## Architecture

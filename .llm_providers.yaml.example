@@ -1,0 +1,110 @@
+# LLM Provider Configuration Profiles
+# Copy to .llm_providers.yaml and customize for your providers
+#
+# This replaces DEFAULT_MODEL and DEFAULT_PROVIDER from .env
+# Configure your LLM models and providers here instead
+#
+# This allows you to define different LLM setups for different scenarios:
+# - Development (fast models for quick iteration)
+# - Testing (specific model versions for reproducibility)
+# - Production (powerful cloud models for best results)
+# - Cost-optimized (cheaper models to reduce costs)
+# - Local (no API costs, uses local models like Ollama)
+
+# Default profile (used when no --llm-profile specified)
+default: prod
+
+# Profile definitions
+profiles:
+  # Development profile - fast iteration
+  dev:
+    name: "Development"
+    description: "Fast local models for development"
+    providers:
+      - name: "Claude Haiku"
+        provider: "anthropic"
+        model: "claude-3-5-haiku-20241022"
+        api_key: "your-anthropic-api-key-here"  # Or use api_key_env: "ANTHROPIC_API_KEY"
+        timeout: 30
+        default: true
+
+      - name: "Local Ollama"
+        provider: "ollama"
+        model: "llama3.2"
+        base_url: "http://localhost:11434"
+        timeout: 60
+
+  # Production profile - best quality (DEFAULT)
+  prod:
+    name: "Production"
+    description: "High-quality models for production use"
+    providers:
+      - name: "Claude Sonnet 4.5"
+        provider: "anthropic"
+        model: "claude-sonnet-4-5"
+        api_key: "your-anthropic-api-key-here"  # Or use api_key_env: "ANTHROPIC_API_KEY" to read from env
+        timeout: 60
+        default: true
+
+      - name: "GPT-4"
+        provider: "openai"
+        model: "gpt-4-turbo-preview"
+        api_key: "your-openai-api-key-here"  # Or use api_key_env: "OPENAI_API_KEY"
+        timeout: 60
+
+  # Testing profile - consistent versions
+  testing:
+    name: "Testing"
+    description: "Specific model versions for reproducible tests"
+    providers:
+      - name: "Claude Haiku Fixed"
+        provider: "anthropic"
+        model: "claude-3-5-haiku-20241022"
+        api_key: "your-anthropic-api-key-here"
+        timeout: 30
+        default: true
+
+  # Cost-optimized profile
+  budget:
+    name: "Budget"
+    description: "Cost-effective models"
+    providers:
+      - name: "Claude Haiku"
+        provider: "anthropic"
+        model: "claude-3-5-haiku-20241022"
+        api_key: "your-anthropic-api-key-here"
+        timeout: 30
+        default: true
+
+      - name: "GPT-3.5"
+        provider: "openai"
+        model: "gpt-3.5-turbo"
+        api_key: "your-openai-api-key-here"
+        timeout: 30
+
+  # Local-only profile (no API costs)
+  local:
+    name: "Local Only"
+    description: "All local models, no cloud APIs"
+    providers:
+      - name: "Ollama Llama"
+        provider: "ollama"
+        model: "llama3.2"
+        base_url: "http://localhost:11434"
+        timeout: 120
+        default: true
+
+      - name: "Ollama Mistral"
+        provider: "ollama"
+        model: "mistral"
+        base_url: "http://localhost:11434"
+        timeout: 120
+
+# Optional: Global settings for all profiles
+global:
+  # Default timeout if not specified in provider
+  default_timeout: 60
+
+  # Retry settings
+  max_retries: 3
+  retry_delay: 1

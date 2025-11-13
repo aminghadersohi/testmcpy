@@ -1,0 +1,560 @@
+"""
+Authentication flow debugger with rich console output.
+
+This module provides detailed logging and visualization for OAuth, JWT,
+and other authentication flows to help debug authentication issues.
+"""
+
+import json
+import time
+from pathlib import Path
+from typing import Any, Literal
+
+import httpx
+from rich.console import Console
+from rich.panel import Panel
+from rich.syntax import Syntax
+from rich.tree import Tree
+
+
+class AuthDebugger:
+    """Debug authentication flows with detailed logging."""
+
+    def __init__(self, enabled: bool = False, recorder=None):
+        """Initialize the auth debugger.
+
+        Args:
+            enabled: Whether debugging is enabled
+            recorder: Optional AuthFlowRecorder instance for recording flows
+        """
+        self.enabled = enabled
+        self.console = Console()
+        self.steps: list[dict[str, Any]] = []
+        self.start_time = time.time()
+        self.recorder = recorder
+        self._current_flow_name: str | None = None
+        self._current_auth_type: Literal["oauth", "jwt", "bearer"] | None = None
+
+    def start_flow_recording(
+        self,
+        flow_name: str,
+        auth_type: Literal["oauth", "jwt", "bearer"],
+        protocol_version: str | None = None,
+    ) -> None:
+        """Start recording an authentication flow.
+
+        Args:
+            flow_name: Name/description of the flow
+            auth_type: Type of authentication
+            protocol_version: Version of the auth protocol
+        """
+        self._current_flow_name = flow_name
+        self._current_auth_type = auth_type
+        if self.recorder:
+            self.recorder.start_recording(
+                flow_name=flow_name,
+                auth_type=auth_type,
+                protocol_version=protocol_version,
+            )
+
+    def log_step(
+        self,
+        step_name: str,
+        data: dict[str, Any],
+        success: bool = True,
+        step_type: Literal[
+            "request", "response", "validation", "extraction", "error"
+        ] = "validation",
+    ):
+        """Log a step in the auth flow.
+
+        Args:
+            step_name: Name of the authentication step
+            data: Data associated with the step
+            success: Whether the step was successful
+            step_type: Type of step (for recorder)
+        """
+        if not self.enabled:
+            return
+
+        timestamp = time.time() - self.start_time
+
+        self.steps.append({
+            "step": step_name,
+            "data": data,
+            "success": success,
+            "timestamp": timestamp
+        })
+
+        # Record to recorder if available
+        if self.recorder and self.recorder.current_recording:
+            self.recorder.record_step(
+                step_name=step_name,
+                step_type=step_type,
+                data=data.copy(),
+                success=success,
+            )
+
+        # Pretty print the step
+        color = "green" if success else "red"
+        icon = "✓" if success else "✗"
+
+        self.console.print(f"\n[{color}]{icon} {step_name}[/{color}]")
+
+        # Sanitize sensitive data for display
+        display_data = self._sanitize_data(data)
+
+        self.console.print(
+            Panel(
+                Syntax(json.dumps(display_data, indent=2), "json"),
+                title=f"{step_name} Details",
+                border_style=color,
+            )
+        )
+
+    def _sanitize_data(self, data: dict[str, Any]) -> dict[str, Any]:
+        """Sanitize sensitive data for display.
+
+        Args:
+            data: Data to sanitize
+
+        Returns:
+            Sanitized data dictionary
+        """
+        sanitized = {}
+        sensitive_keys = ["client_secret", "api_secret", "password"]
+        # Don't sanitize token_length or token_preview keys, only "token" and "access_token"
+        sensitive_token_keys = ["token", "access_token"]
+
+        for key, value in data.items():
+            key_lower = key.lower()
+
+            # Check if it's a sensitive key (but not token_length or token_preview)
+            is_sensitive = any(sensitive in key_lower for sensitive in sensitive_keys)
+            is_token = any(token_key == key_lower for token_key in sensitive_token_keys)
+
+            if is_sensitive or is_token:
+                # Show only first 8 characters for secrets
+                if isinstance(value, str) and len(value) > 8:
+                    sanitized[key] = value[:8] + "..."
+                elif isinstance(value, str):
+                    sanitized[key] = "***"
+                else:
+                    sanitized[key] = value
+            elif isinstance(value, dict):
+                sanitized[key] = self._sanitize_data(value)
+            else:
+                sanitized[key] = value
+
+        return sanitized
+
+    def log_oauth_flow(self, flow_type: str, steps: dict[str, dict[str, Any]]):
+        """Log complete OAuth flow with tree visualization.
+
+        Args:
+            flow_type: Type of OAuth flow (e.g., "Client Credentials")
+            steps: Dictionary of steps and their data
+        """
+        if not self.enabled:
+            return
+
+        tree = Tree(f"[cyan]OAuth {flow_type} Flow[/cyan]")
+
+        for step_name, step_data in steps.items():
+            branch = tree.add(f"[green]{step_name}[/green]")
+            sanitized_data = self._sanitize_data(step_data)
+            for key, value in sanitized_data.items():
+                branch.add(f"{key}: {value}")
+
+        self.console.print(tree)
+
+    def summarize(self) -> dict[str, Any]:
+        """Print summary of all auth steps and return summary data.
+
+        Returns:
+            Summary dictionary with flow statistics
+        """
+        if not self.enabled or not self.steps:
+            return {}
+
+        total_time = time.time() - self.start_time
+        success_count = sum(1 for step in self.steps if step["success"])
+        failure_count = len(self.steps) - success_count
+
+        self.console.print("\n[cyan]Authentication Flow Summary[/cyan]")
+        for i, step in enumerate(self.steps, 1):
+            icon = "✓" if step["success"] else "✗"
+            color = "green" if step["success"] else "red"
+            self.console.print(f"  [{color}]{i}. {icon} {step['step']}[/{color}]")
+
+        self.console.print(f"\n[dim]Total time: {total_time:.2f}s[/dim]")
+
+        if failure_count == 0:
+            self.console.print("\n[bold green]Authentication successful![/bold green]")
+        else:
+            self.console.print(f"\n[bold red]Authentication failed ({failure_count} error(s))[/bold red]")
+
+        return {
+            "total_steps": len(self.steps),
+            "successful_steps": success_count,
+            "failed_steps": failure_count,
+            "total_time": total_time,
+            "steps": self.steps
+        }
+
+    def get_trace(self) -> dict[str, Any]:
+        """Get the complete debug trace.
+
+        Returns:
+            Dictionary containing all debug information
+        """
+        return {
+            "enabled": self.enabled,
+            "steps": self.steps,
+            "total_time": time.time() - self.start_time if self.steps else 0
+        }
+
+    def clear(self) -> None:
+        """Clear all logged steps.
+
+        Useful for resetting the debugger state between different authentication
+        attempts or test runs.
+
+        Example:
+            ```python
+            debugger = AuthDebugger(enabled=True)
+            # ... log some steps ...
+            debugger.summarize()
+            debugger.clear()  # Reset for next authentication flow
+            ```
+        """
+        self.steps = []
+        self.start_time = time.time()
+
+    def get_steps(self) -> list[dict[str, Any]]:
+        """Get all logged steps.
+
+        Returns:
+            List of step dictionaries, each containing 'step', 'data', 'success', and 'timestamp' keys.
+
+        Example:
+            ```python
+            debugger = AuthDebugger(enabled=True)
+            # ... log some steps ...
+            steps = debugger.get_steps()
+            assert len(steps) == 4
+            assert steps[0]['success'] is True
+            ```
+        """
+        return self.steps.copy()
+
+    def has_failures(self) -> bool:
+        """Check if any logged step failed.
+
+        Returns:
+            True if any step has success=False, False otherwise.
+
+        Example:
+            ```python
+            debugger = AuthDebugger(enabled=True)
+            debugger.log_step("Token Fetch", {"error": "timeout"}, success=False)
+            assert debugger.has_failures() is True
+            ```
+        """
+        return any(not step["success"] for step in self.steps)
+
+    def get_failure_steps(self) -> list[dict[str, Any]]:
+        """Get all steps that failed.
+
+        Returns:
+            List of step dictionaries where success=False.
+
+        Example:
+            ```python
+            debugger = AuthDebugger(enabled=True)
+            # ... log some steps ...
+            failures = debugger.get_failure_steps()
+            for failure in failures:
+                print(f"Failed: {failure['step']}")
+            ```
+        """
+        return [step for step in self.steps if not step["success"]]
+
+    def export_trace(self, filepath: str) -> None:
+        """Export the complete debug trace to a JSON file.
+
+        Args:
+            filepath: Path to the output JSON file
+
+        Example:
+            ```python
+            debugger = AuthDebugger(enabled=True)
+            # ... log some steps ...
+            debugger.export_trace("auth-trace.json")
+            ```
+        """
+        import json
+        from pathlib import Path
+
+        trace = self.get_trace()
+        Path(filepath).write_text(json.dumps(trace, indent=2))
+
+        if self.enabled:
+            self.console.print(f"\n[dim]Debug trace saved to: {filepath}[/dim]")
+
+    def save_flow_recording(self, success: bool = True, error: str | None = None, filename: str | None = None) -> Path | None:
+        """Save the current flow recording.
+
+        Args:
+            success: Whether the overall flow was successful
+            error: Error message if flow failed
+            filename: Optional custom filename
+
+        Returns:
+            Path to the saved recording file, or None if no recorder is active
+
+        Example:
+            ```python
+            debugger = AuthDebugger(enabled=True, recorder=recorder)
+            debugger.start_flow_recording("OAuth Login", "oauth")
+            # ... log some steps ...
+            filepath = debugger.save_flow_recording(success=True)
+            ```
+        """
+        if not self.recorder or not self.recorder.current_recording:
+            return None
+
+        recording = self.recorder.stop_recording(
+            success=success,
+            error=error,
+            auto_save=False
+        )
+        filepath = self.recorder.save_recording(recording, filename=filename)
+
+        if self.enabled:
+            self.console.print(f"\n[green]Flow recording saved to: {filepath}[/green]")
+
+        return filepath
+
+
+async def debug_oauth_flow(
+    client_id: str,
+    client_secret: str,
+    token_url: str,
+    scopes: list[str] | None = None,
+    debugger: AuthDebugger | None = None
+) -> str:
+    """Debug OAuth client credentials flow.
+
+    Args:
+        client_id: OAuth client ID
+        client_secret: OAuth client secret
+        token_url: OAuth token endpoint URL
+        scopes: Optional list of OAuth scopes
+        debugger: Optional AuthDebugger instance
+
+    Returns:
+        OAuth access token
+
+    Raises:
+        Exception: If token fetch fails
+    """
+    if debugger is None:
+        debugger = AuthDebugger(enabled=False)
+
+    # Step 1: Prepare request
+    request_data = {
+        "grant_type": "client_credentials",
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "scope": " ".join(scopes) if scopes else "",
+    }
+    debugger.log_step("1. OAuth Request Prepared", request_data)
+
+    try:
+        async with httpx.AsyncClient() as client:
+            # Step 2: Send request
+            debugger.log_step("2. Sending POST to Token Endpoint", {
+                "url": token_url,
+                "headers": {"Content-Type": "application/x-www-form-urlencoded"}
+            })
+
+            response = await client.post(
+                token_url,
+                data={
+                    "grant_type": "client_credentials",
+                    "client_id": client_id,
+                    "client_secret": client_secret,
+                    "scope": " ".join(scopes) if scopes else "",
+                },
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                timeout=10.0,
+            )
+
+            # Step 3: Response received
+            debugger.log_step("3. Response Received", {
+                "status_code": response.status_code,
+                "headers": dict(response.headers)
+            })
+
+            response.raise_for_status()
+            data = response.json()
+
+            # Step 4: Token extracted
+            if "access_token" not in data:
+                debugger.log_step("4. Token Extraction Failed", {
+                    "error": "No access_token found in response",
+                    "response_keys": list(data.keys())
+                }, success=False)
+                raise Exception("No access_token found in OAuth response")
+
+            token = data["access_token"]
+            debugger.log_step("4. Token Extracted", {
+                "token_length": len(token),
+                "token_preview": token[:20] + "..." if len(token) > 20 else token,
+                "expires_in": data.get("expires_in", "unknown"),
+                "scope": data.get("scope", "unknown"),
+                "token_type": data.get("token_type", "unknown")
+            }, success=True)
+
+            return token
+
+    except httpx.HTTPError as e:
+        error_data = {
+            "error": str(e),
+            "error_type": type(e).__name__,
+        }
+        if hasattr(e, "response"):
+            error_data["status_code"] = e.response.status_code
+            error_data["response_body"] = e.response.text[:500]  # Limit response size
+
+        debugger.log_step("ERROR: HTTP Request Failed", error_data, success=False)
+        raise
+    except Exception as e:
+        debugger.log_step("ERROR: Unexpected Error", {
+            "error": str(e),
+            "error_type": type(e).__name__
+        }, success=False)
+        raise
+
+
+async def debug_jwt_flow(
+    api_url: str,
+    api_token: str,
+    api_secret: str,
+    debugger: AuthDebugger | None = None
+) -> str:
+    """Debug JWT dynamic token fetch flow.
+
+    Args:
+        api_url: JWT API endpoint URL
+        api_token: API token for authentication
+        api_secret: API secret for authentication
+        debugger: Optional AuthDebugger instance
+
+    Returns:
+        JWT access token
+
+    Raises:
+        Exception: If token fetch fails
+    """
+    if debugger is None:
+        debugger = AuthDebugger(enabled=False)
+
+    # Step 1: Prepare request
+    request_data = {
+        "name": api_token,
+        "secret": api_secret,
+    }
+    debugger.log_step("1. JWT Request Prepared", request_data)
+
+    try:
+        async with httpx.AsyncClient() as client:
+            # Step 2: Send request
+            debugger.log_step("2. Sending POST to JWT Endpoint", {
+                "url": api_url,
+                "headers": {
+                    "Content-Type": "application/json",
+                    "Accept": "application/json"
+                }
+            })
+
+            response = await client.post(
+                api_url,
+                headers={
+                    "Content-Type": "application/json",
+                    "Accept": "application/json"
+                },
+                json=request_data,
+                timeout=10.0,
+            )
+
+            # Step 3: Response received
+            debugger.log_step("3. Response Received", {
+                "status_code": response.status_code,
+                "headers": dict(response.headers)
+            })
+
+            response.raise_for_status()
+            data = response.json()
+
+            # Step 4: Token extracted
+            # Supports both {"payload": {"access_token": "..."}} and {"access_token": "..."}
+            token = None
+            if "payload" in data and "access_token" in data["payload"]:
+                token = data["payload"]["access_token"]
+            elif "access_token" in data:
+                token = data["access_token"]
+
+            if not token:
+                debugger.log_step("4. Token Extraction Failed", {
+                    "error": "No access_token found in response",
+                    "response_keys": list(data.keys())
+                }, success=False)
+                raise Exception("No access_token found in JWT response")
+
+            debugger.log_step("4. Token Extracted", {
+                "token_length": len(token),
+                "token_preview": token[:20] + "..." if len(token) > 20 else token,
+            }, success=True)
+
+            return token
+
+    except httpx.HTTPError as e:
+        error_data = {
+            "error": str(e),
+            "error_type": type(e).__name__,
+        }
+        if hasattr(e, "response"):
+            error_data["status_code"] = e.response.status_code
+            error_data["response_body"] = e.response.text[:500]  # Limit response size
+
+        debugger.log_step("ERROR: HTTP Request Failed", error_data, success=False)
+        raise
+    except Exception as e:
+        debugger.log_step("ERROR: Unexpected Error", {
+            "error": str(e),
+            "error_type": type(e).__name__
+        }, success=False)
+        raise
+
+
+def debug_bearer_token(token: str, debugger: AuthDebugger | None = None) -> str:
+    """Debug bearer token authentication.
+
+    Args:
+        token: Bearer token
+        debugger: Optional AuthDebugger instance
+
+    Returns:
+        The bearer token
+    """
+    if debugger is None:
+        debugger = AuthDebugger(enabled=False)
+
+    debugger.log_step("1. Bearer Token Validated", {
+        "token_length": len(token),
+        "token_preview": token[:20] + "..." if len(token) > 20 else token,
+    }, success=True)
+
+    return token

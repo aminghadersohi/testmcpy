@@ -1,9 +1,11 @@
 import React, { useState, useEffect } from 'react'
-import { Server, ChevronDown, CheckCircle2, ChevronRight } from 'lucide-react'
+import { Server, ChevronDown, CheckCircle2, ChevronRight, AlertCircle } from 'lucide-react'
+import { ProfileSelectorSkeleton, ProfileListSkeleton } from './SkeletonLoader'
 
 const MCPProfileSelector = ({ selectedProfiles = [], onChange, multiple = false }) => {
   const [profiles, setProfiles] = useState([])
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState(null)
   const [isOpen, setIsOpen] = useState(false)
   const [expandedProfiles, setExpandedProfiles] = useState(new Set())
 
@@ -12,14 +14,33 @@ const MCPProfileSelector = ({ selectedProfiles = [], onChange, multiple = false 
   }, [])
 
   const loadProfiles = async () => {
-    try {
-      const res = await fetch('/api/mcp/profiles')
-      const data = await res.json()
-      setProfiles(data.profiles || [])
-    } catch (error) {
-      console.error('Failed to load profiles:', error)
-    } finally {
-      setLoading(false)
+    setLoading(true)
+    setError(null)
+
+    // Retry logic with exponential backoff
+    const maxRetries = 3
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+      try {
+        const res = await fetch('/api/mcp/profiles')
+        if (!res.ok) {
+          throw new Error(`HTTP ${res.status}: ${res.statusText}`)
+        }
+        const data = await res.json()
+        setProfiles(data.profiles || [])
+        setLoading(false)
+        return
+      } catch (err) {
+        const isLastAttempt = attempt === maxRetries - 1
+        if (isLastAttempt) {
+          console.error('Failed to load profiles:', err)
+          setError(err.message)
+          setLoading(false)
+        } else {
+          const delay = 1000 * Math.pow(2, attempt)
+          console.log(`Retry ${attempt + 1}/${maxRetries} for profiles in ${delay}ms...`)
+          await new Promise(resolve => setTimeout(resolve, delay))
+        }
+      }
     }
   }
 
@@ -72,10 +93,23 @@ const MCPProfileSelector = ({ selectedProfiles = [], onChange, multiple = false 
   }
 
   if (loading) {
+    return <ProfileSelectorSkeleton />
+  }
+
+  if (error) {
     return (
-      <div className="flex items-center gap-2 px-3 py-2 bg-surface-elevated border border-border rounded-lg">
-        <Server size={16} className="text-text-secondary" />
-        <span className="text-sm text-text-secondary">Loading profiles...</span>
+      <div className="flex items-center gap-2 px-3 py-2 bg-error/10 border border-error/30 rounded-lg">
+        <AlertCircle size={16} className="text-error" />
+        <div className="flex-1 min-w-0">
+          <div className="text-sm text-error font-medium">Failed to load profiles</div>
+          <div className="text-xs text-error/80 truncate">{error}</div>
+        </div>
+        <button
+          onClick={loadProfiles}
+          className="text-xs text-error hover:text-error-light underline"
+        >
+          Retry
+        </button>
       </div>
     )
   }

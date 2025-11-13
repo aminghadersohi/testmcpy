@@ -852,19 +852,19 @@ class ToolCallSequence(BaseEvaluator):
             )
 
 
-# Superset-specific evaluators
+# Chart creation evaluators
 
 
-class WasSupersetChartCreated(BaseEvaluator):
-    """Check if a Superset chart was created."""
+class WasChartCreated(BaseEvaluator):
+    """Check if a chart was created."""
 
     @property
     def name(self) -> str:
-        return "was_superset_chart_created"
+        return "was_chart_created"
 
     @property
     def description(self) -> str:
-        return "Checks if a Superset chart was successfully created"
+        return "Checks if a chart was successfully created"
 
     def evaluate(self, context: dict[str, Any]) -> EvalResult:
         tool_calls = context.get("tool_calls", [])
@@ -1005,7 +1005,27 @@ class CompositeEvaluator(BaseEvaluator):
 
 
 def create_evaluator(name: str, **kwargs) -> BaseEvaluator:
-    """Factory function to create evaluators by name."""
+    """
+    Factory function to create evaluators by name.
+
+    Args:
+        name: Name of the evaluator to create
+        **kwargs: Arguments to pass to the evaluator constructor
+
+    Returns:
+        Instance of the requested evaluator
+
+    Raises:
+        ValueError: If evaluator name is unknown
+    """
+    # Import auth evaluators here to avoid circular imports
+    from testmcpy.evals.auth_evaluators import (
+        AuthErrorHandlingEvaluator,
+        AuthSuccessfulEvaluator,
+        OAuth2FlowEvaluator,
+        TokenValidEvaluator,
+    )
+
     evaluators = {
         # Basic evaluators
         "was_mcp_tool_called": WasMCPToolCalled,
@@ -1020,9 +1040,15 @@ def create_evaluator(name: str, **kwargs) -> BaseEvaluator:
         "parameter_value_in_range": ParameterValueInRange,
         "tool_call_count": ToolCallCount,
         "tool_call_sequence": ToolCallSequence,
-        # Superset-specific evaluators
-        "was_superset_chart_created": WasSupersetChartCreated,
+        # Chart creation evaluators
+        "was_chart_created": WasChartCreated,
+        "was_superset_chart_created": WasChartCreated,  # Backward compatibility alias
         "sql_query_valid": SQLQueryValid,
+        # Auth evaluators
+        "auth_successful": AuthSuccessfulEvaluator,
+        "token_valid": TokenValidEvaluator,
+        "oauth2_flow_complete": OAuth2FlowEvaluator,
+        "auth_error_handling": AuthErrorHandlingEvaluator,
     }
 
     if name not in evaluators:

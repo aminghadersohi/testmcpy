@@ -121,11 +121,6 @@ class TestRunner:
     ):
         self.model = model
         self.provider = provider
-        # Use MCP_URL from environment if not provided
-        if mcp_url is None:
-            import os
-
-            mcp_url = os.environ.get("MCP_URL", "http://localhost:5008/mcp/")
         self.mcp_url = mcp_url
         self.verbose = verbose
         self.hide_tool_output = hide_tool_output
@@ -508,11 +503,6 @@ class BatchTestRunner:
     """Run multiple test suites with different models."""
 
     def __init__(self, mcp_url: str | None = None):
-        # Use MCP_URL from environment if not provided
-        if mcp_url is None:
-            import os
-
-            mcp_url = os.environ.get("MCP_URL", "http://localhost:5008/mcp/")
         self.mcp_url = mcp_url
         self.results: dict[str, list[TestResult]] = {}
 

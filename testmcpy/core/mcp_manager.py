@@ -94,8 +94,14 @@ class MCPManager:
 
         # Find the MCP server
         if mcp_name is None:
-            # Use first MCP server
-            mcp_server = profile.mcps[0]
+            # Use default MCP server (marked default or first one)
+            mcp_server = None
+            for server in profile.mcps:
+                if server.default:
+                    mcp_server = server
+                    break
+            if not mcp_server:
+                mcp_server = profile.mcps[0]
         else:
             # Find specific MCP server
             mcp_server = None
@@ -250,12 +256,20 @@ class MCPManager:
         Returns:
             Connected MCPClient instance
         """
-        # If no mcp_name provided, load profile and use first MCP
+        # If no mcp_name provided, load profile and use default MCP
         if mcp_name is None:
             profile = load_profile(profile_id)
             if not profile or not profile.mcps:
                 raise ValueError(f"Profile '{profile_id}' has no MCP servers")
-            mcp_name = profile.mcps[0].name
+            # Get default MCP server (marked default or first one)
+            default_mcp = None
+            for mcp in profile.mcps:
+                if mcp.default:
+                    default_mcp = mcp
+                    break
+            if not default_mcp:
+                default_mcp = profile.mcps[0]
+            mcp_name = default_mcp.name
 
         # Try to get existing client
         client = await self.get_client(profile_id, mcp_name)

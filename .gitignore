@@ -137,6 +137,14 @@ secrets.json
 .mcp_services.yaml
 !.mcp_services.yaml.example
 
+# LLM provider profiles (may contain API keys/sensitive data)
+.llm_providers.yaml
+!.llm_providers.yaml.example
+
+# Test profiles (may contain sensitive test data)
+.test_profiles.yaml
+!.test_profiles.yaml.example
+
 # Large test output files
 test_output.txt
 *.log
@@ -147,3 +155,13 @@ node_modules/
 # Build artifacts
 dist/
 build/
+
+# Backup files with potential credentials
+*.backup
+.mcp_services.yaml.backup
+.llm_providers.yaml.backup
+.test_profiles.yaml.backup
+
+# Conversation logs and debugging artifacts
+*conversation*.txt
+*-20[0-9][0-9]-[0-9][0-9]-*.txt

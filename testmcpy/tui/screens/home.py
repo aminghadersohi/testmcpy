@@ -148,8 +148,14 @@ class HomeScreen(Screen):
             if not profile or not profile.mcps:
                 continue
 
-            # For now, show first MCP server in profile
-            mcp = profile.mcps[0]
+            # Show default MCP server in profile (marked default or first one)
+            mcp = None
+            for m in profile.mcps:
+                if m.default:
+                    mcp = m
+                    break
+            if not mcp:
+                mcp = profile.mcps[0]
 
             yield MCPStatus(
                 profile_name=profile.name,

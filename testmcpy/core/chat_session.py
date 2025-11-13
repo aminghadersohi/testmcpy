@@ -90,7 +90,12 @@ class ChatSession:
         # LLM provider setup
         self.provider_name = provider or self.config.default_provider or "anthropic"
         self.model = model or self.config.default_model or "claude-haiku-4-5"
-        self.mcp_url = mcp_url or self.config.mcp_url
+        # Get MCP URL from profile if available
+        if not mcp_url:
+            default_mcp = self.config.get_default_mcp_server()
+            if default_mcp:
+                mcp_url = default_mcp.mcp_url
+        self.mcp_url = mcp_url
 
         # Initialize clients (will be done in async initialize)
         self.llm_provider: LLMProvider | None = None

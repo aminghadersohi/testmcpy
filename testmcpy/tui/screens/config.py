@@ -2,6 +2,12 @@
 Configuration screen for testmcpy TUI.
 
 Allows editing of LLM settings, MCP profiles, and advanced settings.
+
+NOTE: This TUI config screen is deprecated and will be removed in a future version.
+Please use the CLI commands or web UI to configure:
+- testmcpy setup  # Interactive setup wizard
+- testmcpy serve  # Web UI with profile management
+- Edit .llm_providers.yaml, .mcp_services.yaml, and .test_profiles.yaml directly
 """
 
 from pathlib import Path
@@ -19,6 +25,7 @@ from testmcpy.mcp_profiles import (
     AuthConfig,
     MCPConfig,
     MCPProfile,
+    get_profile_config,
     list_available_profiles,
     load_profile,
     save_profile,
@@ -91,9 +98,10 @@ class LLMSettingsSection(ConfigSection):
 class MCPProfilesSection(ConfigSection):
     """MCP profiles management."""
 
-    def __init__(self, profiles: list[MCPProfile]):
+    def __init__(self, profiles: list[MCPProfile], default_profile: str | None = None):
         super().__init__()
         self.profiles = profiles
+        self.default_profile = default_profile
         self.border_title = "MCP Profiles"
 
     def compose(self) -> ComposeResult:
@@ -109,7 +117,8 @@ class MCPProfilesSection(ConfigSection):
                 with Container(classes="profile-item"):
                     # Profile header
                     with Horizontal():
-                        status = "●" if profile.is_default else "○"
+                        # Check if this profile is the default
+                        status = "●" if profile.profile_id == self.default_profile else "○"
                         yield Label(f"{status} {profile.profile_id}")
                         yield Button("Edit", id=f"edit_profile_{i}", variant="default")
                         yield Button("Delete", id=f"delete_profile_{i}", variant="error")
@@ -122,9 +131,16 @@ class MCPProfilesSection(ConfigSection):
                     )
 
                     if profile.mcps:
-                        first_mcp = profile.mcps[0]
-                        yield Label(f"  URL: {first_mcp.mcp_url}", classes="dim")
-                        yield Label(f"  Auth: {first_mcp.auth.auth_type}", classes="dim")
+                        # Get default MCP server (marked default or first one)
+                        default_mcp = None
+                        for mcp in profile.mcps:
+                            if mcp.default:
+                                default_mcp = mcp
+                                break
+                        if not default_mcp:
+                            default_mcp = profile.mcps[0]
+                        yield Label(f"  URL: {default_mcp.mcp_url}", classes="dim")
+                        yield Label(f"  Auth: {default_mcp.auth.auth_type}", classes="dim")
 
             # Add new profile button
             yield Button("+ Add Profile", id="add_profile_btn", variant="success")
@@ -211,6 +227,7 @@ class ConfigScreen(Screen):
     def __init__(self, name: str | None = None):
         super().__init__(name=name)
         self.config = Config()
+        self.profile_config = get_profile_config()
         self.profiles = list_available_profiles()
         self.has_changes = False
 
@@ -219,7 +236,7 @@ class ConfigScreen(Screen):
         yield Header()
         with VerticalScroll(id="config_container"):
             yield LLMSettingsSection(self.config)
-            yield MCPProfilesSection(self.profiles)
+            yield MCPProfilesSection(self.profiles, self.profile_config.default_profile)
             yield AdvancedSettingsSection()
         yield Footer()
 
@@ -535,13 +552,15 @@ class AddProfileModal(Screen):
             )
 
             profile = MCPProfile(
+                name=profile_name,
                 profile_id=profile_name,
-                is_default=set_default,
+                description="",
                 mcps=[mcp_config],
             )
 
             # Save profile to .mcp_services.yaml
-            save_profile(profile)
+            # Note: set_default is handled separately by save_profile function
+            save_profile(profile, set_as_default=set_default)
 
             self.app.pop_screen()
             self.notify(f"Profile '{profile_name}' created successfully", severity="information")

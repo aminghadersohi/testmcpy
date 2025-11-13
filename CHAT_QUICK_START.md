@@ -37,7 +37,7 @@ testmcpy chat
    config: {...}
 
 ✓ Success (2.1s)
-  Chart: https://preset.io/charts/123
+  Chart: https://example.com/charts/123
 ```
 
 ## Status Bar

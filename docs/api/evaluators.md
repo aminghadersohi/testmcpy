@@ -321,18 +321,18 @@ Validates that token usage and cost remain within acceptable limits.
 
 ## Domain-Specific Evaluators
 
-### Superset/Preset Evaluators
+### Chart Creation Evaluators
 
-#### `was_superset_chart_created`
+#### `was_chart_created`
 
-Checks if a Superset chart was successfully created.
+Checks if a chart was successfully created.
 
 **Parameters:** None
 
 **Example:**
 
 ```yaml
-- name: "was_superset_chart_created"
+- name: "was_chart_created"
 ```
 
 #### `sql_query_valid`

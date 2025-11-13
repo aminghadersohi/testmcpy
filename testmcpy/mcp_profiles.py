@@ -72,6 +72,7 @@ class MCPServer:
     auth: AuthConfig
     timeout: int = 30
     rate_limit_rpm: int = 60
+    default: bool = False  # Mark this MCP server as default in the profile
 
 
 @dataclass
@@ -84,7 +85,6 @@ class MCPProfile:
     mcps: list[MCPServer]
     timeout: int = 30
     rate_limit_rpm: int = 60
-    is_default: bool = False
 
 
 class MCPProfileConfig:
@@ -115,7 +115,8 @@ class MCPProfileConfig:
         1. Provided config_path
         2. .mcp_services.yaml in current directory
         3. .mcp_services.yaml in parent directories (up to 5 levels)
-        4. ~/.mcp_services.yaml (user home)
+
+        Note: User home directory (~/.mcp_services.yaml) is NOT searched.
         """
         if config_path:
             path = Path(config_path)
@@ -132,11 +133,6 @@ class MCPProfileConfig:
             if current.parent == current:
                 break
             current = current.parent
-
-        # Check user home
-        home_config = Path.home() / ".mcp_services.yaml"
-        if home_config.exists():
-            return home_config
 
         return None
 
@@ -239,6 +235,7 @@ class MCPProfileConfig:
                     auth=self._parse_auth(data.get("auth", {})),
                     timeout=timeout,
                     rate_limit_rpm=rate_limit_rpm,
+                    default=True,  # Single MCP is always default
                 )
                 mcps.append(mcp_server)
         else:
@@ -250,6 +247,7 @@ class MCPProfileConfig:
                     auth=self._parse_auth(mcp_data.get("auth", {})),
                     timeout=mcp_data.get("timeout", timeout),
                     rate_limit_rpm=mcp_data.get("rate_limit_rpm", rate_limit_rpm),
+                    default=mcp_data.get("default", False),  # Check for default flag
                 )
                 mcps.append(mcp_server)
 
@@ -260,7 +258,6 @@ class MCPProfileConfig:
             mcps=mcps,
             timeout=timeout,
             rate_limit_rpm=rate_limit_rpm,
-            is_default=data.get("default", False),
         )
 
     def get_profile(self, profile_id: str | None = None) -> MCPProfile | None:
@@ -292,19 +289,21 @@ class MCPProfileConfig:
 
         Returns:
             Tuple of (profile_id, mcp_name) if default found, None otherwise.
-            Checks for profile-level default: true flag first, then top-level default.
+            Uses the top-level default profile setting.
         """
-        # First check for profile-level default: true flag
-        for profile_id, profile in self.profiles.items():
-            if profile.is_default and len(profile.mcps) > 0:
-                # Return first MCP server in the default profile
-                return (profile_id, profile.mcps[0].name)
-
-        # Fall back to top-level default profile
+        # Use top-level default profile
         if self.default_profile:
             profile = self.get_profile(self.default_profile)
             if profile and len(profile.mcps) > 0:
-                return (self.default_profile, profile.mcps[0].name)
+                # Get the default MCP server (marked default or first one)
+                default_mcp = None
+                for mcp in profile.mcps:
+                    if mcp.default:
+                        default_mcp = mcp
+                        break
+                if not default_mcp:
+                    default_mcp = profile.mcps[0]
+                return (self.default_profile, default_mcp.name)
 
         return None
 

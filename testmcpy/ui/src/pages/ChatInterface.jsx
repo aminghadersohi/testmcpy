@@ -239,6 +239,7 @@ function ChatInterface({ selectedProfiles = [], selectedLlmProfile, llmProfiles 
           message: input,
           model: llmConfig.model,
           provider: llmConfig.provider,
+          llm_profile: selectedLlmProfile,
           profiles: activeProfile ? [activeProfile] : null,
           history: historyForAPI.length > 0 ? historyForAPI : null,
         }),
@@ -554,35 +555,43 @@ ${evaluators}
                   }`}
                 >
                   {message.role === 'assistant' ? (
-                    <div className="prose prose-invert prose-sm max-w-none leading-relaxed prose-p:my-2 prose-pre:bg-black/50 prose-pre:border prose-pre:border-white/10 prose-code:text-primary-light prose-a:text-primary-light prose-a:no-underline hover:prose-a:underline prose-strong:text-white prose-headings:text-white">
-                      <ReactMarkdown
-                        remarkPlugins={[remarkGfm]}
-                        components={{
-                          // Custom code block styling
-                          code({node, inline, className, children, ...props}) {
-                            return inline ? (
-                              <code className="bg-black/50 px-1.5 py-0.5 rounded text-primary-light" {...props}>
-                                {children}
-                              </code>
-                            ) : (
-                              <code className={className} {...props}>
-                                {children}
-                              </code>
-                            )
-                          },
-                          // Custom link styling to open in new tab
-                          a({node, children, href, ...props}) {
-                            return (
-                              <a href={href} target="_blank" rel="noopener noreferrer" {...props}>
-                                {children}
-                              </a>
-                            )
-                          }
-                        }}
-                      >
-                        {message.content}
-                      </ReactMarkdown>
-                    </div>
+                    <>
+                      {message.tool_calls && message.tool_calls.length > 0 && (
+                        <div className="mb-3 p-2 bg-primary/10 border border-primary/30 rounded-lg text-xs text-white/70">
+                          <span className="font-semibold text-primary-light">Note:</span> The LLM's interpretation may be inaccurate.
+                          For actual tool results, see "Raw Tool Output" in the tool calls section below.
+                        </div>
+                      )}
+                      <div className="prose prose-invert prose-sm max-w-none leading-relaxed prose-p:my-2 prose-pre:bg-black/50 prose-pre:border prose-pre:border-white/10 prose-code:text-primary-light prose-a:text-primary-light prose-a:no-underline hover:prose-a:underline prose-strong:text-white prose-headings:text-white">
+                        <ReactMarkdown
+                          remarkPlugins={[remarkGfm]}
+                          components={{
+                            // Custom code block styling
+                            code({node, inline, className, children, ...props}) {
+                              return inline ? (
+                                <code className="bg-black/50 px-1.5 py-0.5 rounded text-primary-light" {...props}>
+                                  {children}
+                                </code>
+                              ) : (
+                                <code className={className} {...props}>
+                                  {children}
+                                </code>
+                              )
+                            },
+                            // Custom link styling to open in new tab
+                            a({node, children, href, ...props}) {
+                              return (
+                                <a href={href} target="_blank" rel="noopener noreferrer" {...props}>
+                                  {children}
+                                </a>
+                              )
+                            }
+                          }}
+                        >
+                          {message.content}
+                        </ReactMarkdown>
+                      </div>
+                    </>
                   ) : (
                     <div className="whitespace-pre-wrap leading-relaxed">{message.content}</div>
                   )}
@@ -758,9 +767,65 @@ ${evaluators}
                               </div>
                             )}
 
-                            {/* Result */}
+                            {/* Result - always show, with clear label */}
                             {call.result && (
-                              <JSONViewer data={call.result} />
+                              <div className="mt-3">
+                                <div className="text-xs text-white/60 mb-2 font-semibold">Raw Tool Output:</div>
+                                <div className="bg-black/40 rounded-lg p-3 border border-white/10 overflow-x-auto">
+                                  <ReactJson
+                                    src={(() => {
+                                      // Parse JSON strings recursively
+                                      const parseJsonStrings = (obj) => {
+                                        if (obj === null || obj === undefined) return obj
+                                        if (typeof obj === 'string') {
+                                          if ((obj.trim().startsWith('{') && obj.trim().endsWith('}')) ||
+                                              (obj.trim().startsWith('[') && obj.trim().endsWith(']'))) {
+                                            try {
+                                              return parseJsonStrings(JSON.parse(obj))
+                                            } catch (e) {
+                                              return obj
+                                            }
+                                          }
+                                          return obj
+                                        }
+                                        if (Array.isArray(obj)) {
+                                          return obj.map(parseJsonStrings)
+                                        }
+                                        if (typeof obj === 'object') {
+                                          const parsed = {}
+                                          for (const [key, value] of Object.entries(obj)) {
+                                            parsed[key] = parseJsonStrings(value)
+                                          }
+                                          return parsed
+                                        }
+                                        return obj
+                                      }
+                                      return parseJsonStrings(call.result)
+                                    })()}
+                                    theme="monokai"
+                                    collapsed={false}
+                                    displayDataTypes={false}
+                                    displayObjectSize={true}
+                                    enableClipboard={true}
+                                    name={false}
+                                    indentWidth={2}
+                                    iconStyle="triangle"
+                                    style={{
+                                      backgroundColor: 'transparent',
+                                      fontSize: '12px',
+                                      fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace'
+                                    }}
+                                  />
+                                </div>
+                              </div>
+                            )}
+
+                            {/* Error display */}
+                            {call.error && (
+                              <div className="mt-3 p-3 bg-error/10 border border-error/30 rounded-lg">
+                                <div className="text-xs font-semibold text-error mb-1">Error:</div>
+                                <div className="text-xs text-white/80 font-mono">{call.error}</div>
+                              </div>
                             )}
                             </div>
                           ))}

@@ -37,7 +37,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   4. Environment variables
   5. Built-in defaults (lowest)
 
-- **Dynamic JWT token generation** for Preset/Superset MCP:
+- **Dynamic JWT token generation** for MCP services:
   - Configure `MCP_AUTH_API_URL`, `MCP_AUTH_API_TOKEN`, `MCP_AUTH_API_SECRET`
   - Automatically fetches and caches JWT tokens for 50 minutes
   - Eliminates need to manually manage short-lived JWT tokens

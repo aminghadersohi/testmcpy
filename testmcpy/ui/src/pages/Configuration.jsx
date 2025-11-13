@@ -67,10 +67,8 @@ function Configuration() {
 
   const configGroups = {
     'MCP Settings': ['MCP_URL', 'MCP_AUTH_TOKEN', 'MCP_AUTH_API_URL', 'MCP_AUTH_API_TOKEN', 'MCP_AUTH_API_SECRET'],
-    'LLM Provider': ['DEFAULT_PROVIDER', 'DEFAULT_MODEL'],
-    'Anthropic': ['ANTHROPIC_API_KEY', 'ANTHROPIC_MODEL'],
-    'OpenAI': ['OPENAI_API_KEY', 'OPENAI_BASE_URL'],
-    'Ollama': ['OLLAMA_BASE_URL'],
+    'API Keys': ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY'],
+    'Provider URLs': ['OLLAMA_BASE_URL', 'OPENAI_BASE_URL'],
   }
 
   if (loading) {
@@ -357,7 +355,7 @@ function Configuration() {
               </li>
               <li className="flex items-start gap-3">
                 <span className="text-primary mt-0.5">•</span>
-                <span><strong>Model Selection:</strong> Use command-line flags like <code className="bg-background-subtle px-2 py-0.5 rounded font-mono text-xs text-primary-light">--model</code> or set <code className="bg-background-subtle px-2 py-0.5 rounded font-mono text-xs text-primary-light">DEFAULT_MODEL</code> env var</span>
+                <span><strong>LLM Models:</strong> Configure via the LLM Profile selector in the sidebar or edit <code className="bg-background-subtle px-2 py-0.5 rounded font-mono text-xs text-primary-light">.llm_providers.yaml</code></span>
               </li>
             </ul>
           </div>

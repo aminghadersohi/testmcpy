@@ -6,6 +6,11 @@ This CLI provides commands for testing LLM tool calling capabilities with MCP se
 running evaluation suites, and generating reports.
 """
 
+import warnings
+
+# Suppress deprecation warnings before any other imports
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+
 import asyncio
 import json
 import logging

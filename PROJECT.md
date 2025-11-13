@@ -63,12 +63,12 @@ testmcpy dash --auto-refresh     # Auto-refresh connection status
 ╠═══════════════════════════════════════════════════════════════════════════╣
 ║ MCP Profiles                                        [p] Profiles [c] Chat  ║
 ╟─────────────────────────────────────────────────────────────────────────────╢
-║  ● prod:Preset prod 2cad                 🟢 Connected                      ║
-║    https://2cad1810.us1a.app.preset.io/mcp                                 ║
+║  ● prod:Production Workspace             🟢 Connected                      ║
+║    https://workspace.example.com/mcp                                       ║
 ║    Tools: 15 │ Resources: 3 │ Prompts: 2                                   ║
 ║                                                                             ║
-║  ○ sandbox:Preset Sandbox 66d22a6f       🔴 Not connected                  ║
-║    https://66d22a6f.us1a.app-sdx.preset.io/mcp                             ║
+║  ○ sandbox:Sandbox Environment           🔴 Not connected                  ║
+║    https://sandbox.example.com/mcp                                         ║
 ║    [Space] Connect                                                          ║
 ╠═══════════════════════════════════════════════════════════════════════════╣
 ║ Quick Actions                          [t] Tests [e] Explorer [?] Help     ║
@@ -90,7 +90,7 @@ testmcpy dash --auto-refresh     # Auto-refresh connection status
 #### **2. MCP Explorer View** (`e` or `testmcpy explore`)
 ```
 ╔═══════════════════════════════════════════════════════════════════════════╗
-║ MCP Explorer - prod:Preset prod 2cad                    [h] Home [/] Search║
+║ MCP Explorer - prod:Production Workspace                [h] Home [/] Search║
 ╠═══════════════════════════════════════════════════════════════════════════╣
 ║ Tools (15)                   │ generate_chart                              ║
 ╟──────────────────────────────┼─────────────────────────────────────────────╢
@@ -144,7 +144,7 @@ testmcpy dash --auto-refresh     # Auto-refresh connection status
 #### **4. Chat Mode** (`c` or `testmcpy chat`)
 ```
 ╔═══════════════════════════════════════════════════════════════════════════╗
-║ Chat - prod:Preset prod 2cad              claude-haiku-4-5 │ Cost: $0.0523 ║
+║ Chat - prod:Production Workspace         claude-haiku-4-5 │ Cost: $0.0523 ║
 ╠═══════════════════════════════════════════════════════════════════════════╣
 ║ You: Create a chart showing revenue by month                               ║
 ║                                                                             ║
@@ -184,12 +184,12 @@ testmcpy dash --auto-refresh     # Auto-refresh connection status
 ║                                                                             ║
 ║ MCP Profiles                                              [+] Add Profile  ║
 ╟─────────────────────────────────────────────────────────────────────────────╢
-║  ● prod:Preset prod 2cad                                     [✓] Default   ║
-║     URL: https://2cad1810.us1a.app.preset.io/mcp                           ║
+║  ● prod:Production Workspace                                 [✓] Default   ║
+║     URL: https://workspace.example.com/mcp                                 ║
 ║     Auth: JWT Dynamic                                                       ║
 ║                                                                             ║
-║  ○ sandbox:Preset Sandbox 66d22a6f                                         ║
-║     URL: https://66d22a6f.us1a.app-sdx.preset.io/mcp                       ║
+║  ○ sandbox:Sandbox Environment                                             ║
+║     URL: https://sandbox.example.com/mcp                                   ║
 ║     Auth: JWT Dynamic                                                       ║
 ║                                                                             ║
 ║ Advanced Settings                                                           ║

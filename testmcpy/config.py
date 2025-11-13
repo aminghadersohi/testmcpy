@@ -2,8 +2,8 @@
 Configuration management for testmcpy.
 
 Priority order (highest to lowest):
-1. Command-line options (--profile, --mcp-url, etc.)
-2. MCP Profile from .mcp_services.yaml
+1. Command-line options (--profile, --llm-profile, --test-profile, etc.)
+2. Profiles from .mcp_services.yaml, .llm_providers.yaml, .test_profiles.yaml
 3. .env file in current directory
 4. ~/.testmcpy (user config file)
 5. Environment variables
@@ -11,11 +11,8 @@ Priority order (highest to lowest):
 """
 
 import os
-import time
 from pathlib import Path
 from typing import Any
-
-import httpx
 
 # Import profile configuration
 try:
@@ -30,17 +27,40 @@ except ImportError:
 
     MCPProfile = None
 
+# Import LLM profile configuration
+try:
+    from .llm_profiles import LLMProfile, list_available_llm_profiles, load_llm_profile
+except ImportError:
+    # Fallback if llm_profiles not available
+    def load_llm_profile(profile_id=None):
+        return None
+
+    def list_available_llm_profiles():
+        return []
+
+    LLMProfile = None
+
+# Import Test profile configuration
+try:
+    from .test_profiles import TestProfile, list_available_test_profiles, load_test_profile
+except ImportError:
+    # Fallback if test_profiles not available
+    def load_test_profile(profile_id=None):
+        return None
+
+    def list_available_test_profiles():
+        return []
+
+    TestProfile = None
+
 
 class Config:
     """Manages testmcpy configuration from multiple sources."""
 
     # Default values
-    # Note: We don't set DEFAULT_MODEL or DEFAULT_PROVIDER by default
-    # to avoid assuming any particular setup. Users should configure
-    # their preferred provider in ~/.testmcpy or via environment variables.
-    DEFAULTS = {
-        "MCP_URL": "http://localhost:5008/mcp/",
-    }
+    # Note: DEFAULT_MODEL and DEFAULT_PROVIDER are deprecated.
+    # Use .llm_providers.yaml to configure LLM models and providers instead.
+    DEFAULTS = {}
 
     # Generic keys that should fall back to environment variables
     GENERIC_KEYS = {
@@ -49,26 +69,26 @@ class Config:
         "OLLAMA_BASE_URL",
     }
 
-    # testmcpy-specific keys
+    # testmcpy-specific keys (deprecated, use LLM profiles instead)
     TESTMCPY_KEYS = {
-        "MCP_URL",
-        "MCP_AUTH_TOKEN",
-        "SUPERSET_MCP_TOKEN",  # Legacy, kept for compatibility
-        "DEFAULT_MODEL",
-        "DEFAULT_PROVIDER",
-        # Dynamic token generation config
-        "MCP_AUTH_API_URL",
-        "MCP_AUTH_API_TOKEN",
-        "MCP_AUTH_API_SECRET",
+        "DEFAULT_MODEL",  # Deprecated: Use .llm_providers.yaml
+        "DEFAULT_PROVIDER",  # Deprecated: Use .llm_providers.yaml
     }
 
-    def __init__(self, profile: str | None = None):
+    def __init__(
+        self,
+        profile: str | None = None,
+        llm_profile: str | None = None,
+        test_profile: str | None = None,
+    ):
         self._config: dict[str, Any] = {}
         self._sources: dict[str, str] = {}
-        self._cached_token: str | None = None
-        self._token_expiry: float | None = None
         self._profile: MCPProfile | None = None
         self._profile_id: str | None = profile
+        self._llm_profile: LLMProfile | None = None
+        self._llm_profile_id: str | None = llm_profile
+        self._test_profile: TestProfile | None = None
+        self._test_profile_id: str | None = test_profile
         self._load_config()
 
     def _load_config(self):
@@ -91,11 +111,17 @@ class Config:
         if cwd_env_file.exists():
             self._load_env_file(cwd_env_file, ".env (current dir)")
 
-        # 4. Load from MCP profile (.mcp_services.yaml) if specified
-        if self._profile_id is not None or load_profile() is not None:
-            self._load_profile(self._profile_id)
+        # 4. Load from MCP profile (.mcp_services.yaml)
+        # Always try to load - if profile_id is None, it loads the default profile
+        self._load_profile(self._profile_id)
 
-        # 5. Apply defaults for missing values
+        # 5. Load from LLM profile (.llm_providers.yaml)
+        self._load_llm_profile(self._llm_profile_id)
+
+        # 6. Load from Test profile (.test_profiles.yaml)
+        self._load_test_profile(self._test_profile_id)
+
+        # 7. Apply defaults for missing values
         for key, default_value in self.DEFAULTS.items():
             if key not in self._config:
                 self._config[key] = default_value
@@ -104,8 +130,8 @@ class Config:
     def _load_profile(self, profile_id: str | None = None):
         """Load configuration from MCP profile.
 
-        For backward compatibility with single-MCP configs, if a profile has only one MCP,
-        we'll use that MCP's URL and auth as the default MCP_URL and auth settings.
+        Note: MCP profiles are loaded directly from .mcp_services.yaml
+        This method just stores the profile reference for use by other components.
         """
         try:
             profile = load_profile(profile_id)
@@ -114,42 +140,56 @@ class Config:
 
             self._profile = profile
 
-            # For backward compatibility: if profile has exactly one MCP, use it as default
-            if profile.mcps and len(profile.mcps) == 1:
-                first_mcp = profile.mcps[0]
-
-                # Set MCP URL
-                self._config["MCP_URL"] = first_mcp.mcp_url
-                self._sources["MCP_URL"] = f"Profile ({profile.profile_id})"
-
-                # Set auth configuration based on auth type
-                if first_mcp.auth.auth_type == "bearer" and first_mcp.auth.token:
-                    self._config["MCP_AUTH_TOKEN"] = first_mcp.auth.token
-                    self._sources["MCP_AUTH_TOKEN"] = f"Profile ({profile.profile_id})"
-
-                elif first_mcp.auth.auth_type == "jwt":
-                    if first_mcp.auth.api_url:
-                        self._config["MCP_AUTH_API_URL"] = first_mcp.auth.api_url
-                        self._sources["MCP_AUTH_API_URL"] = f"Profile ({profile.profile_id})"
-                    if first_mcp.auth.api_token:
-                        self._config["MCP_AUTH_API_TOKEN"] = first_mcp.auth.api_token
-                        self._sources["MCP_AUTH_API_TOKEN"] = f"Profile ({profile.profile_id})"
-                    if first_mcp.auth.api_secret:
-                        self._config["MCP_AUTH_API_SECRET"] = first_mcp.auth.api_secret
-                        self._sources["MCP_AUTH_API_SECRET"] = f"Profile ({profile.profile_id})"
-
-                # OAuth not yet implemented in auth flow, but store for future use
-                elif first_mcp.auth.auth_type == "oauth":
-                    # Store OAuth config for future use
-                    pass
-
-            # If profile has multiple MCPs, don't set default MCP_URL/auth
-            # The API will handle loading all MCPs from the profile
-
         except Exception as e:
             import warnings
 
             warnings.warn(f"Failed to load MCP profile '{profile_id}': {e}", stacklevel=2)
+
+    def _load_llm_profile(self, profile_id: str | None = None):
+        """Load configuration from LLM profile.
+
+        Note: LLM profiles are loaded directly from .llm_providers.yaml
+        This method just stores the profile reference for use by other components.
+        """
+        try:
+            profile = load_llm_profile(profile_id)
+            if not profile:
+                return
+
+            self._llm_profile = profile
+
+            # If profile has a default provider, update config
+            default_provider = profile.get_default_provider()
+            if default_provider:
+                if "DEFAULT_MODEL" not in self._config:
+                    self._config["DEFAULT_MODEL"] = default_provider.model
+                    self._sources["DEFAULT_MODEL"] = f"LLM Profile ({profile.name})"
+                if "DEFAULT_PROVIDER" not in self._config:
+                    self._config["DEFAULT_PROVIDER"] = default_provider.provider
+                    self._sources["DEFAULT_PROVIDER"] = f"LLM Profile ({profile.name})"
+
+        except Exception as e:
+            import warnings
+
+            warnings.warn(f"Failed to load LLM profile '{profile_id}': {e}", stacklevel=2)
+
+    def _load_test_profile(self, profile_id: str | None = None):
+        """Load configuration from Test profile.
+
+        Note: Test profiles are loaded directly from .test_profiles.yaml
+        This method just stores the profile reference for use by other components.
+        """
+        try:
+            profile = load_test_profile(profile_id)
+            if not profile:
+                return
+
+            self._test_profile = profile
+
+        except Exception as e:
+            import warnings
+
+            warnings.warn(f"Failed to load Test profile '{profile_id}': {e}", stacklevel=2)
 
     def _load_env_file(self, file_path: Path, source_name: str):
         """Load configuration from an env file."""
@@ -210,88 +250,6 @@ class Config:
             result[key] = (self._config[key], self._sources.get(key, "Unknown"))
         return result
 
-    @property
-    def mcp_url(self) -> str:
-        """Get MCP URL."""
-        return self.get("MCP_URL", self.DEFAULTS["MCP_URL"])
-
-    def _fetch_jwt_token(self) -> str | None:
-        """Fetch JWT token from MCP auth API."""
-        api_url = self.get("MCP_AUTH_API_URL")
-        api_token = self.get("MCP_AUTH_API_TOKEN")
-        api_secret = self.get("MCP_AUTH_API_SECRET")
-
-        if not all([api_url, api_token, api_secret]):
-            return None
-
-        try:
-            response = httpx.post(
-                api_url,
-                headers={"Content-Type": "application/json", "Accept": "application/json"},
-                json={"name": api_token, "secret": api_secret},
-                timeout=10.0,
-            )
-            response.raise_for_status()
-            data = response.json()
-
-            # Extract access token from response
-            # Preset API returns {"payload": {"access_token": "..."}}
-            if "payload" in data and "access_token" in data["payload"]:
-                token = data["payload"]["access_token"]
-                # Cache token for 50 minutes (JWT typically expires in 1 hour)
-                self._cached_token = token
-                self._token_expiry = time.time() + 3000  # 50 minutes
-                return token
-            elif "access_token" in data:
-                token = data["access_token"]
-                self._cached_token = token
-                self._token_expiry = time.time() + 3000
-                return token
-
-        except Exception as e:
-            # Log error but don't fail - fall back to static token
-            import warnings
-
-            warnings.warn(f"Failed to fetch JWT token: {e}", stacklevel=2)
-            return None
-
-    @property
-    def mcp_auth_token(self) -> str | None:
-        """
-        Get MCP auth token with the following priority:
-        1. Dynamically generated JWT from MCP_AUTH_API_URL if configured
-        2. Static MCP_AUTH_TOKEN or SUPERSET_MCP_TOKEN
-
-        For dynamic tokens, caches the JWT for 50 minutes to avoid excessive API calls.
-        """
-        # Check if dynamic JWT credentials are configured
-        has_dynamic_config = all(
-            [
-                self.get("MCP_AUTH_API_URL"),
-                self.get("MCP_AUTH_API_TOKEN"),
-                self.get("MCP_AUTH_API_SECRET"),
-            ]
-        )
-
-        # If dynamic JWT is configured, use it (with caching)
-        if has_dynamic_config:
-            # Check if we have a valid cached token
-            if self._cached_token and self._token_expiry:
-                if time.time() < self._token_expiry:
-                    return self._cached_token
-
-            # Try to fetch a new JWT token
-            jwt_token = self._fetch_jwt_token()
-            if jwt_token:
-                return jwt_token
-            # If fetch fails, fall through to static token
-
-        # Fall back to static token
-        static_token = self.get("MCP_AUTH_TOKEN") or self.get("SUPERSET_MCP_TOKEN")
-        if static_token:
-            return static_token
-
-        return None
 
     @property
     def default_model(self) -> str | None:
@@ -312,6 +270,60 @@ class Config:
     def openai_api_key(self) -> str | None:
         """Get OpenAI API key."""
         return self.get("OPENAI_API_KEY")
+
+    def get_default_mcp_server(self):
+        """
+        Get the default MCP server from the loaded profile.
+
+        Returns the MCPServer object that is marked as default, or the first one if none marked.
+        Returns None if no profile or no MCP servers.
+        """
+        if not self._profile or not self._profile.mcps:
+            return None
+
+        # Check if any MCP server is marked as default
+        for mcp in self._profile.mcps:
+            if mcp.default:
+                return mcp
+
+        # No default marked, return first one
+        return self._profile.mcps[0]
+
+    def get_mcp_url(self) -> str | None:
+        """
+        Get MCP URL from the loaded profile.
+
+        Returns the MCP URL from:
+        1. The MCP server marked with default: true in the profile
+        2. The first MCP server if no default is marked
+        3. None if no profile or no MCP servers
+        """
+        mcp = self.get_default_mcp_server()
+        return mcp.mcp_url if mcp else None
+
+    def get_default_llm_provider(self):
+        """
+        Get the default LLM provider from the loaded profile.
+
+        Returns the LLMProviderConfig object that is marked as default, or the first one if none marked.
+        Returns None if no profile or no LLM providers.
+        """
+        if not self._llm_profile:
+            return None
+
+        return self._llm_profile.get_default_provider()
+
+    def get_default_test_config(self):
+        """
+        Get the default test config from the loaded profile.
+
+        Returns the TestConfig object that is marked as default, or the first one if none marked.
+        Returns None if no profile or no test configs.
+        """
+        if not self._test_profile:
+            return None
+
+        return self._test_profile.get_default_config()
 
 
 # Global config instance

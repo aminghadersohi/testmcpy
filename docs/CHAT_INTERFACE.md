@@ -85,7 +85,7 @@ testmcpy chat --mcp-url https://your-mcp-service.com/mcp
 ║      y: [{name: "revenue", aggregate: "SUM"}]            ║
 ║                                                           ║
 ║ ✓ Success (2.3s)                                         ║
-║   Chart created: https://preset.io/charts/3628           ║
+║   Chart created: https://example.com/charts/3628         ║
 ║                                                           ║
 ║ Here's your revenue chart! You can view it at the link.  ║
 ║                                                           ║
@@ -137,7 +137,7 @@ When an LLM calls a tool, you'll see:
      kind: "bar"
 
 ✓ Success (2.3s)
-  Chart created: https://preset.io/charts/3628
+  Chart created: https://example.com/charts/3628
   Preview: [View in browser]
 ```
 

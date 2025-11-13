@@ -72,6 +72,7 @@ class TestCase:
     metadata: dict[str, Any] = field(default_factory=dict)
     expected_tools: list[str] | None = None
     timeout: float = 30.0
+    auth: dict[str, Any] | None = None
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "TestCase":
@@ -83,6 +84,7 @@ class TestCase:
             metadata=data.get("metadata", {}),
             expected_tools=data.get("expected_tools"),
             timeout=data.get("timeout", 30.0),
+            auth=data.get("auth"),
         )
 
 
@@ -102,6 +104,11 @@ class TestResult:
     cost: float = 0.0
     token_usage: dict[str, int] | None = None
     error: str | None = None
+    auth_success: bool | None = None
+    auth_token: str | None = None
+    auth_error: str | None = None
+    auth_error_message: str | None = None
+    auth_flow_steps: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary."""
@@ -121,11 +128,6 @@ class TestRunner:
     ):
         self.model = model
         self.provider = provider
-        # Use MCP_URL from environment if not provided
-        if mcp_url is None:
-            import os
-
-            mcp_url = os.environ.get("MCP_URL", "http://localhost:5008/mcp/")
         self.mcp_url = mcp_url
         self.verbose = verbose
         self.hide_tool_output = hide_tool_output
@@ -231,12 +233,67 @@ class TestRunner:
         """Run a single test case."""
         start_time = time.time()
 
+        # Track auth metadata
+        auth_success = None
+        auth_token = None
+        auth_error = None
+        auth_error_message = None
+        auth_flow_steps = []
+
         try:
             # Ensure initialized
             await self.initialize()
 
+            # If test has auth config, create a temporary MCP client with that auth
+            test_mcp_client = self.mcp_client
+            if test_case.auth:
+                if self.verbose:
+                    print(f"  Using test-specific auth configuration: {test_case.auth.get('type', 'unknown')}")
+
+                # Create a new MCP client with the test's auth config
+                test_mcp_client = MCPClient(self.mcp_url, auth=test_case.auth)
+
+                try:
+                    # Initialize and capture auth info
+                    await test_mcp_client.initialize()
+
+                    # Auth succeeded if we got here
+                    auth_success = True
+
+                    # Try to get the token from the client's auth object
+                    if test_mcp_client.auth and hasattr(test_mcp_client.auth, 'token'):
+                        auth_token = test_mcp_client.auth.token
+
+                    # Get auth flow steps from the client's debugger if available
+                    # Note: We'd need to modify MCPClient to expose its debugger
+                    # For now, we'll infer steps from successful auth
+                    auth_type = test_case.auth.get('type', 'unknown')
+                    if auth_type == 'oauth':
+                        auth_flow_steps = [
+                            "request_prepared",
+                            "token_endpoint_called",
+                            "response_received",
+                            "token_extracted"
+                        ]
+                    elif auth_type == 'jwt':
+                        auth_flow_steps = [
+                            "request_prepared",
+                            "jwt_endpoint_called",
+                            "response_received",
+                            "token_extracted"
+                        ]
+                    elif auth_type == 'bearer':
+                        auth_flow_steps = ["token_validated"]
+
+                except Exception as auth_exc:
+                    auth_success = False
+                    auth_error = str(auth_exc)
+                    auth_error_message = str(auth_exc)
+                    if self.verbose:
+                        print(f"  Authentication failed: {auth_error}")
+
             # Get available MCP tools
-            mcp_tools = await self.mcp_client.list_tools()
+            mcp_tools = await test_mcp_client.list_tools()
 
             # Format tools for LLM
             formatted_tools = [
@@ -287,10 +344,10 @@ class TestRunner:
                     mcp_tool_call = MCPToolCall(
                         name=tool_call["name"], arguments=tool_call.get("arguments", {})
                     )
-                    result = await self.mcp_client.call_tool(mcp_tool_call)
+                    result = await test_mcp_client.call_tool(mcp_tool_call)
                     tool_results.append(result)
 
-            # Prepare context for evaluators
+            # Prepare context for evaluators (include auth metadata)
             context = {
                 "prompt": test_case.prompt,
                 "response": llm_result.response,
@@ -303,6 +360,11 @@ class TestRunner:
                     if llm_result.token_usage
                     else 0,
                     "cost": llm_result.cost,
+                    "auth_success": auth_success,
+                    "auth_token": auth_token,
+                    "auth_error": auth_error,
+                    "auth_error_message": auth_error_message,
+                    "auth_flow_steps": auth_flow_steps,
                 },
             }
 
@@ -406,6 +468,11 @@ class TestRunner:
                 evaluations=evaluations,
                 cost=llm_result.cost,
                 token_usage=llm_result.token_usage,
+                auth_success=auth_success,
+                auth_token=auth_token,
+                auth_error=auth_error,
+                auth_error_message=auth_error_message,
+                auth_flow_steps=auth_flow_steps,
             )
 
         except Exception as e:
@@ -424,7 +491,20 @@ class TestRunner:
                 duration=actual_duration,
                 reason=f"Test failed with error: {str(e)}",
                 error=str(e),
+                auth_success=auth_success,
+                auth_token=auth_token,
+                auth_error=auth_error,
+                auth_error_message=auth_error_message,
+                auth_flow_steps=auth_flow_steps,
             )
+
+        finally:
+            # Clean up test-specific MCP client if one was created
+            if test_case.auth and 'test_mcp_client' in locals() and test_mcp_client != self.mcp_client:
+                try:
+                    await test_mcp_client.close()
+                except Exception:
+                    pass  # Ignore cleanup errors
 
     async def run_tests(self, test_cases: list[TestCase]) -> list[TestResult]:
         """Run multiple test cases."""
@@ -519,11 +599,6 @@ class BatchTestRunner:
     """Run multiple test suites with different models."""
 
     def __init__(self, mcp_url: str | None = None):
-        # Use MCP_URL from environment if not provided
-        if mcp_url is None:
-            import os
-
-            mcp_url = os.environ.get("MCP_URL", "http://localhost:5008/mcp/")
         self.mcp_url = mcp_url
         self.results: dict[str, list[TestResult]] = {}
 

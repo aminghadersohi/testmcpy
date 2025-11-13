@@ -214,26 +214,62 @@ pip install 'testmcpy[all]'
 
 ### 1. Configuration
 
-Run the interactive setup wizard:
+Run the interactive setup wizard to create configuration files:
 
 ```bash
 testmcpy setup
 ```
 
-Or manually create `~/.testmcpy`:
+This will guide you through:
+- **LLM Provider setup**: Choose between Claude (Anthropic), GPT-4 (OpenAI), or local Ollama models
+- **MCP Service setup**: Configure your MCP server URL and authentication
+- **API Key management**: Detects keys from environment and saves them to `.llm_providers.yaml`
 
-```bash
-# MCP Service
-MCP_URL=http://localhost:5008/mcp/
-MCP_AUTH_TOKEN=your_bearer_token
+The setup command creates two files in your current directory:
 
-# LLM Provider (choose one)
-DEFAULT_PROVIDER=anthropic
-DEFAULT_MODEL=claude-haiku-4-5
-ANTHROPIC_API_KEY=sk-ant-...
+**`.llm_providers.yaml`** - LLM configuration with API keys:
+
+```yaml
+default: prod
+
+profiles:
+  prod:
+    name: "Production"
+    description: "High-quality models for production use"
+    providers:
+      - name: "Claude claude-sonnet-4-5"
+        provider: "anthropic"
+        model: "claude-sonnet-4-5"
+        api_key: "your-anthropic-api-key-here"  # API key stored directly
+        timeout: 60
+        default: true
 ```
 
-**Configuration priority:** CLI options > `.env` > `~/.testmcpy` > Environment variables > Defaults
+**`.mcp_services.yaml`** - MCP server profiles:
+
+```yaml
+default: prod
+
+profiles:
+  prod:
+    name: "Production"
+    description: "Production MCP service"
+    mcps:
+      - name: "Preset Superset"
+        mcp_url: "https://your-workspace.preset.io/mcp"
+        auth:
+          auth_type: "jwt"  # or "bearer" or "none"
+          api_url: "https://api.app.preset.io/v1/auth/"
+          api_token: "your-api-token"
+          api_secret: "your-api-secret"
+        timeout: 30
+        rate_limit_rpm: 60
+        default: true
+```
+
+**Configuration priority:** CLI options > LLM Profile (.llm_providers.yaml) > MCP Profile (.mcp_services.yaml) > `.env` > Environment variables
+
+**Note:** The setup command is **idempotent** - it's safe to run multiple times. Use `--force` to overwrite existing files.
 
 ### 2. Test Your MCP Service
 
@@ -335,12 +371,26 @@ testmcpy run tests/ --model claude-haiku-4-5
 
 ## LLM Providers
 
+Configure LLM providers in `.llm_providers.yaml`. See `.llm_providers.yaml.example` for examples.
+
 ### Anthropic (Recommended)
 Best tool-calling accuracy, native MCP support:
 
 ```bash
+# Set API key in .env or ~/.testmcpy
 ANTHROPIC_API_KEY=sk-ant-your-key
-DEFAULT_MODEL=claude-haiku-4-5  # Fast & cost-effective
+```
+
+```yaml
+# Configure in .llm_providers.yaml
+prod:
+  name: "Production"
+  providers:
+    - name: "Claude Sonnet 4.5"
+      provider: "anthropic"
+      model: "claude-sonnet-4-5"
+      api_key_env: "ANTHROPIC_API_KEY"
+      default: true
 ```
 
 **Available models:** `claude-haiku-4-5`, `claude-sonnet-4-5`, `claude-opus-4-1`
@@ -356,16 +406,36 @@ brew install ollama  # macOS
 # Start Ollama and pull a model
 ollama serve
 ollama pull llama3.1:8b
+```
 
-# Configure testmcpy
-DEFAULT_PROVIDER=ollama
-DEFAULT_MODEL=llama3.1:8b
+```yaml
+# Configure in .llm_providers.yaml
+local:
+  name: "Local Only"
+  providers:
+    - name: "Ollama Llama"
+      provider: "ollama"
+      model: "llama3.1:8b"
+      base_url: "http://localhost:11434"
+      default: true
 ```
 
 ### OpenAI
 ```bash
+# Set API key in .env or ~/.testmcpy
 OPENAI_API_KEY=sk-your-key
-DEFAULT_MODEL=gpt-4-turbo
+```
+
+```yaml
+# Configure in .llm_providers.yaml
+openai:
+  name: "OpenAI"
+  providers:
+    - name: "GPT-4"
+      provider: "openai"
+      model: "gpt-4-turbo"
+      api_key_env: "OPENAI_API_KEY"
+      default: true
 ```
 
 ## Built-in Evaluators
@@ -491,6 +561,6 @@ By contributing, you agree that your contributions will be licensed under Apache
 
 ## Acknowledgments
 
-Built by the team at [Preset](https://preset.io) to enable better LLM testing and integration with Apache Superset and beyond.
+Built to enable better LLM testing and integration with Model Context Protocol services.
 
 Special thanks to the MCP community and all our contributors!

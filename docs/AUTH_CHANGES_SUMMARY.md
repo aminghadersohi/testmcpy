@@ -297,7 +297,7 @@ pytest tests/test_mcp_client_auth.py -v
 
 **Optional upgrade** to explicit auth:
 
-**Before:**
+**Before (no longer supported):**
 ```python
 # Set MCP_AUTH_TOKEN in environment
 export MCP_AUTH_TOKEN="my-token"
@@ -307,9 +307,12 @@ async with MCPClient() as client:
     ...
 ```
 
-**After (optional):**
+**Now (use .mcp_services.yaml or explicit auth):**
 ```python
-# Explicit auth in code
+# Option 1: Use .mcp_services.yaml (recommended)
+# See .mcp_services.yaml.example for configuration
+
+# Option 2: Explicit auth in code
 auth = {"type": "bearer", "token": "my-token"}
 async with MCPClient(auth=auth) as client:
     ...

@@ -253,11 +253,14 @@ function MCPExplorer({ selectedProfiles = [] }) {
     setSmokeTestReport(null)
 
     try {
+      // Extract profile ID from "profile_id:mcp_name" format
+      const profileId = activeProfile.split(':')[0]
+
       const res = await fetch('/api/smoke-test', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          profile_id: activeProfile,
+          profile_id: profileId,
           test_all_tools: true,
           max_tools_to_test: 10,
         }),

@@ -13,7 +13,6 @@
 # - For team sharing, use .mcp_services.yaml.example with ${} placeholders
 
 # Default profile (used when no --profile specified)
-# Can also mark a profile as default using "default: true" within the profile
 default: local-dev
 
 # Profile definitions
@@ -27,7 +26,7 @@ profiles:
         mcp_url: "http://localhost:5008/mcp/"
         auth:
           type: "bearer"
-          token: "${SUPERSET_MCP_TOKEN}"
+          token: "your-bearer-token-here"
 
       - name: "Database MCP"
         mcp_url: "http://localhost:5009/mcp/"
@@ -54,7 +53,6 @@ profiles:
   staging:
     name: "Staging Environment"
     description: "Staging servers for integration testing"
-    default: true  # Mark this profile as default (auto-selected in UI)
     mcps:
       - name: "Superset Staging"
         mcp_url: "https://staging.example.com/mcp/"

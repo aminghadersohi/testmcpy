@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react'
 import { Send, Loader, Wrench, DollarSign, ChevronDown, ChevronRight, CheckCircle, FileText, Plus, Server, Trash2 } from 'lucide-react'
 import ReactJson from '@microlink/react-json-view'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 
 // JSON viewer component with IDE-like collapsible tree
 function JSONViewer({ data }) {
@@ -73,13 +75,10 @@ function JSONViewer({ data }) {
   )
 }
 
-function ChatInterface({ selectedProfiles = [] }) {
+function ChatInterface({ selectedProfiles = [], selectedLlmProfile, llmProfiles = [] }) {
   const [messages, setMessages] = useState([])
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
-  const [models, setModels] = useState({})
-  const [selectedProvider, setSelectedProvider] = useState('anthropic')
-  const [selectedModel, setSelectedModel] = useState('claude-haiku-4-5')
   const messagesEndRef = useRef(null)
   const [showEvalDialog, setShowEvalDialog] = useState(false)
   const [selectedMessageIndex, setSelectedMessageIndex] = useState(null)
@@ -93,8 +92,25 @@ function ChatInterface({ selectedProfiles = [] }) {
   const activeProfile = selectedProfiles.length > 0 ? selectedProfiles[0] : null
   const hasMultipleSelected = selectedProfiles.length > 1
 
+  // Get model and provider from LLM profile
+  const getLlmConfig = () => {
+    if (!selectedLlmProfile || llmProfiles.length === 0) {
+      return { model: 'claude-sonnet-4-5', provider: 'anthropic' }
+    }
+
+    const profile = llmProfiles.find(p => p.profile_id === selectedLlmProfile)
+    if (!profile) {
+      return { model: 'claude-sonnet-4-5', provider: 'anthropic' }
+    }
+
+    const defaultProvider = profile.providers?.find(p => p.default) || profile.providers?.[0]
+    return {
+      model: defaultProvider?.model || 'claude-sonnet-4-5',
+      provider: defaultProvider?.provider || 'anthropic'
+    }
+  }
+
   useEffect(() => {
-    loadModels()
     loadChatHistory()
     checkForPrefillTool()
   }, [])
@@ -110,15 +126,6 @@ function ChatInterface({ selectedProfiles = [] }) {
     }
   }, [input])
 
-  const loadModels = async () => {
-    try {
-      const res = await fetch('/api/models')
-      const data = await res.json()
-      setModels(data)
-    } catch (error) {
-      console.error('Failed to load models:', error)
-    }
-  }
 
   const loadChatHistory = () => {
     try {
@@ -224,13 +231,14 @@ function ChatInterface({ selectedProfiles = [] }) {
         content: msg.content
       }))
 
+      const llmConfig = getLlmConfig()
       const res = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           message: input,
-          model: selectedModel,
-          provider: selectedProvider,
+          model: llmConfig.model,
+          provider: llmConfig.provider,
           profiles: activeProfile ? [activeProfile] : null,
           history: historyForAPI.length > 0 ? historyForAPI : null,
         }),
@@ -311,8 +319,8 @@ function ChatInterface({ selectedProfiles = [] }) {
           prompt: userMessage.content,
           response: assistantMessage.content,
           tool_calls: assistantMessage.tool_calls || [],
-          model: selectedModel,
-          provider: selectedProvider,
+          model: llmConfig.model,
+          provider: llmConfig.provider,
         }),
       })
 
@@ -483,35 +491,6 @@ ${evaluators}
                 <span>Clear History</span>
               </button>
             )}
-            <select
-              value={selectedProvider}
-              onChange={(e) => {
-                setSelectedProvider(e.target.value)
-                // Set default model for provider
-                const providerModels = models[e.target.value]
-                if (providerModels && providerModels.length > 0) {
-                  setSelectedModel(providerModels[0].id)
-                }
-              }}
-              className="input text-sm min-w-[140px]"
-            >
-              {Object.keys(models).map((provider) => (
-                <option key={provider} value={provider}>
-                  {provider}
-                </option>
-              ))}
-            </select>
-            <select
-              value={selectedModel}
-              onChange={(e) => setSelectedModel(e.target.value)}
-              className="input text-sm min-w-[180px]"
-            >
-              {(models[selectedProvider] || []).map((model) => (
-                <option key={model.id} value={model.id}>
-                  {model.name}
-                </option>
-              ))}
-            </select>
           </div>
         </div>
 
@@ -574,7 +553,39 @@ ${evaluators}
                       : 'bg-surface border border-border'
                   }`}
                 >
-                  <div className="whitespace-pre-wrap leading-relaxed">{message.content}</div>
+                  {message.role === 'assistant' ? (
+                    <div className="prose prose-invert prose-sm max-w-none leading-relaxed prose-p:my-2 prose-pre:bg-black/50 prose-pre:border prose-pre:border-white/10 prose-code:text-primary-light prose-a:text-primary-light prose-a:no-underline hover:prose-a:underline prose-strong:text-white prose-headings:text-white">
+                      <ReactMarkdown
+                        remarkPlugins={[remarkGfm]}
+                        components={{
+                          // Custom code block styling
+                          code({node, inline, className, children, ...props}) {
+                            return inline ? (
+                              <code className="bg-black/50 px-1.5 py-0.5 rounded text-primary-light" {...props}>
+                                {children}
+                              </code>
+                            ) : (
+                              <code className={className} {...props}>
+                                {children}
+                              </code>
+                            )
+                          },
+                          // Custom link styling to open in new tab
+                          a({node, children, href, ...props}) {
+                            return (
+                              <a href={href} target="_blank" rel="noopener noreferrer" {...props}>
+                                {children}
+                              </a>
+                            )
+                          }
+                        }}
+                      >
+                        {message.content}
+                      </ReactMarkdown>
+                    </div>
+                  ) : (
+                    <div className="whitespace-pre-wrap leading-relaxed">{message.content}</div>
+                  )}
 
                   {/* Eval and Test Actions for Assistant Messages */}
                   {message.role === 'assistant' && !message.error && (

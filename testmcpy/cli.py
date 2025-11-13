@@ -81,9 +81,15 @@ def main(
 
 # Get config instance
 config = get_config()
-DEFAULT_MODEL = config.default_model or "claude-haiku-4-5"
-DEFAULT_PROVIDER = config.default_provider or "anthropic"
-DEFAULT_MCP_URL = config.mcp_url
+
+# Get defaults from LLM profile if available
+_default_llm = config.get_default_llm_provider()
+DEFAULT_MODEL = _default_llm.model if _default_llm else "claude-sonnet-4-5"
+DEFAULT_PROVIDER = _default_llm.provider if _default_llm else "anthropic"
+
+# Get default MCP URL from profile if available
+_default_mcp_url = config.get_mcp_url()
+DEFAULT_MCP_URL = _default_mcp_url if _default_mcp_url else None
 
 
 class OutputFormat(str, Enum):
@@ -130,7 +136,7 @@ def research(
         from testmcpy.config import Config
 
         cfg = Config(profile=profile)
-        effective_mcp_url = mcp_url or cfg.mcp_url
+        effective_mcp_url = mcp_url or cfg.get_mcp_url()
     else:
         effective_mcp_url = mcp_url or DEFAULT_MCP_URL
 
@@ -297,7 +303,7 @@ def run(
         from testmcpy.config import Config
 
         cfg = Config(profile=profile)
-        effective_mcp_url = mcp_url or cfg.mcp_url
+        effective_mcp_url = mcp_url or cfg.get_mcp_url()
     else:
         effective_mcp_url = mcp_url or DEFAULT_MCP_URL
 
@@ -441,7 +447,7 @@ def tools(
         from testmcpy.config import Config
 
         cfg = Config(profile=profile)
-        effective_mcp_url = mcp_url or cfg.mcp_url
+        effective_mcp_url = mcp_url or cfg.get_mcp_url()
     else:
         effective_mcp_url = mcp_url or DEFAULT_MCP_URL
 
@@ -718,7 +724,7 @@ def report(
 
 
 @app.command()
-def chat(
+def interact(
     model: str = typer.Option(DEFAULT_MODEL, "--model", "-m", help="Model to use"),
     provider: ModelProvider = typer.Option(
         DEFAULT_PROVIDER, "--provider", "-p", help="Model provider"
@@ -729,29 +735,29 @@ def chat(
     profile: str | None = typer.Option(
         None, "--profile", help="MCP service profile from .mcp_services.yaml"
     ),
-    no_mcp: bool = typer.Option(False, "--no-mcp", help="Chat without MCP tools"),
+    no_mcp: bool = typer.Option(False, "--no-mcp", help="Interact without MCP tools"),
 ):
     """
-    Interactive chat with LLM that has access to MCP tools.
+    Interactive conversation with LLM that has access to MCP tools.
 
-    Start a chat session where you can directly talk to the LLM and it can use
+    Start an interactive session where you can directly talk to the LLM and it can use
     MCP tools from your service. Type 'exit' or 'quit' to end the session.
 
-    Use --no-mcp flag to chat without MCP tools.
+    Use --no-mcp flag to interact without MCP tools.
     """
     # Load config with profile if specified
     if profile:
         from testmcpy.config import Config
 
         cfg = Config(profile=profile)
-        effective_mcp_url = mcp_url or cfg.mcp_url
+        effective_mcp_url = mcp_url or cfg.get_mcp_url()
     else:
         effective_mcp_url = mcp_url or DEFAULT_MCP_URL
 
     if no_mcp:
         console.print(
             Panel.fit(
-                f"[bold cyan]Interactive Chat with {model}[/bold cyan]\n"
+                f"[bold cyan]Interactive Session with {model}[/bold cyan]\n"
                 f"Provider: {provider.value}\nMode: Standalone (no MCP tools)\n\n"
                 "[dim]Type your message and press Enter. Type 'exit' or 'quit' to end session.[/dim]",
                 border_style="cyan",
@@ -760,14 +766,14 @@ def chat(
     else:
         console.print(
             Panel.fit(
-                f"[bold cyan]Interactive Chat with {model}[/bold cyan]\n"
+                f"[bold cyan]Interactive Session with {model}[/bold cyan]\n"
                 f"Provider: {provider.value}\nMCP Service: {effective_mcp_url}\n\n"
                 "[dim]Type your message and press Enter. Type 'exit' or 'quit' to end session.[/dim]",
                 border_style="cyan",
             )
         )
 
-    async def chat_session():
+    async def interact_session():
         import os
         import sys
 
@@ -799,9 +805,9 @@ def chat(
                 console.print("[yellow]Continuing without MCP tools...[/yellow]\n")
 
         if not tools:
-            console.print("[dim]Chat mode: Standalone (no tools available)[/dim]\n")
+            console.print("[dim]Interactive mode: Standalone (no tools available)[/dim]\n")
 
-        # Chat loop
+        # Interactive loop
         while True:
             try:
                 # Get user input
@@ -842,7 +848,7 @@ def chat(
                 console.print()  # Empty line for spacing
 
             except KeyboardInterrupt:
-                console.print("\n[yellow]Chat interrupted. Goodbye![/yellow]")
+                console.print("\n[yellow]Session interrupted. Goodbye![/yellow]")
                 break
             except Exception as e:
                 console.print(f"[red]Error: {e}[/red]")
@@ -852,7 +858,7 @@ def chat(
             await mcp_client.close()
         await llm.close()
 
-    asyncio.run(chat_session())
+    asyncio.run(interact_session())
 
 
 @app.command()
@@ -927,340 +933,317 @@ def init(
 
 @app.command()
 def setup(
-    force: bool = typer.Option(False, "--force", "-f", help="Overwrite existing config file"),
-    location: str | None = typer.Option(
-        None, "--location", "-l", help="Config location: 'user' (~/.testmcpy) or 'project' (.env)"
-    ),
+    force: bool = typer.Option(False, "--force", "-f", help="Overwrite existing config files"),
 ):
     """
     Interactive setup wizard for testmcpy configuration.
 
-    Guides you through configuring MCP service, LLM provider, and API keys.
-    Creates either ~/.testmcpy (user config) or .env (project config).
+    Guides you through configuring MCP service profiles and LLM providers.
+    Creates .llm_providers.yaml and .mcp_services.yaml in current directory.
     """
     from testmcpy.config import get_config
 
     console.print(
         Panel.fit(
             "[bold cyan]testmcpy Interactive Setup[/bold cyan]\n"
-            "[dim]Configure MCP service and LLM provider settings[/dim]",
+            "[dim]Configure MCP service profiles and LLM providers[/dim]",
             border_style="cyan",
         )
     )
 
-    # Load current config to show existing values
+    # Load current config to show existing values and detect env vars
     current_config = get_config()
 
-    # Ask for config location if not specified
-    if not location:
-        console.print("\n[bold]Where would you like to save the configuration?[/bold]")
-        console.print("1. [cyan]~/.testmcpy[/cyan] - User config (applies to all projects)")
-        console.print("2. [cyan].env[/cyan] - Project config (current directory only)")
-        choice = console.input("\nChoice [1]: ").strip() or "1"
-        location = "user" if choice == "1" else "project"
+    # Check for existing files
+    llm_yaml_path = Path.cwd() / ".llm_providers.yaml"
+    mcp_yaml_path = Path.cwd() / ".mcp_services.yaml"
 
-    config_path = Path.home() / ".testmcpy" if location == "user" else Path.cwd() / ".env"
-
-    # Check if file exists
-    if config_path.exists() and not force:
-        console.print(f"\n[yellow]Config file already exists:[/yellow] {config_path}")
-        overwrite = console.input("Overwrite? [y/N]: ").strip().lower()
+    if (llm_yaml_path.exists() or mcp_yaml_path.exists()) and not force:
+        console.print("\n[yellow]Configuration files already exist:[/yellow]")
+        if llm_yaml_path.exists():
+            console.print(f"  • {llm_yaml_path}")
+        if mcp_yaml_path.exists():
+            console.print(f"  • {mcp_yaml_path}")
+        overwrite = console.input("\nOverwrite? [y/N]: ").strip().lower()
         if overwrite not in ["y", "yes"]:
             console.print("[yellow]Setup cancelled[/yellow]")
             return
 
-    console.print(f"\n[green]Creating config file:[/green] {config_path}\n")
-
-    config_lines = ["# testmcpy Configuration", "# Generated by interactive setup", ""]
-
-    # MCP Service Configuration
-    console.print("[bold]MCP Service Configuration[/bold]")
-
-    # Show current MCP URL if set
-    current_mcp_url = current_config.mcp_url
-    if current_mcp_url and current_mcp_url != "http://localhost:5008/mcp/":
-        source = current_config.get_source("MCP_URL")
-        console.print(f"[green]✓ MCP Service URL already configured[/green] ({source})")
-        console.print(f"[dim]  Current: {current_mcp_url}[/dim]")
-        mcp_url = (
-            console.input("  New URL (or press Enter to keep current): ").strip() or current_mcp_url
-        )
-    else:
-        mcp_url = console.input("MCP Service URL [https://your-workspace.preset.io/mcp]: ").strip()
-
-    if mcp_url:
-        config_lines.append(f"MCP_URL={mcp_url}")
-
-    # Ask for authentication method
-    console.print("\n[bold]MCP Authentication Method[/bold]")
-
-    # Detect current auth method
-    has_dynamic_jwt = all(
-        [
-            current_config.get("MCP_AUTH_API_URL"),
-            current_config.get("MCP_AUTH_API_TOKEN"),
-            current_config.get("MCP_AUTH_API_SECRET"),
-        ]
-    )
-    has_static_token = current_config.get("MCP_AUTH_TOKEN") or current_config.get(
-        "SUPERSET_MCP_TOKEN"
-    )
-
-    if has_dynamic_jwt:
-        console.print("[dim]Currently configured: Dynamic JWT[/dim]")
-    elif has_static_token:
-        console.print("[dim]Currently configured: Static Token[/dim]")
-
-    console.print("1. [cyan]Dynamic JWT[/cyan] - Fetch token from Preset API (recommended)")
-    console.print("2. [cyan]Static Token[/cyan] - Use a pre-generated bearer token")
-    default_auth = "1" if has_dynamic_jwt or not has_static_token else "2"
-    auth_method = console.input(f"\nChoice [{default_auth}]: ").strip() or default_auth
-
-    config_lines.append("")
-    if auth_method == "1":
-        config_lines.append("# Dynamic JWT Authentication")
-
-        # Show current values for dynamic JWT
-        current_api_url = current_config.get("MCP_AUTH_API_URL")
-        current_api_token = current_config.get("MCP_AUTH_API_TOKEN")
-        current_api_secret = current_config.get("MCP_AUTH_API_SECRET")
-
-        if current_api_url:
-            source = current_config.get_source("MCP_AUTH_API_URL")
-            console.print(f"[green]✓ Auth API URL already configured[/green] ({source})")
-            console.print(f"[dim]  Current: {current_api_url}[/dim]")
-            api_url = (
-                console.input("  New URL (or press Enter to keep current): ").strip()
-                or current_api_url
-            )
-        else:
-            api_url = console.input(
-                "Auth API URL (e.g., https://api.app.preset.io/v1/auth/): "
-            ).strip()
-
-        if current_api_token:
-            masked = f"{current_api_token[:8]}...{current_api_token[-4:]}"
-            console.print(f"[dim]Current API Token: {masked}[/dim]")
-            api_token = (
-                console.input("API Token [press Enter to keep current]: ").strip()
-                or current_api_token
-            )
-        else:
-            api_token = console.input("API Token: ").strip()
-
-        if current_api_secret:
-            masked = f"{current_api_secret[:8]}...{current_api_secret[-4:]}"
-            console.print(f"[dim]Current API Secret: {masked}[/dim]")
-            api_secret = (
-                console.input("API Secret [press Enter to keep current]: ").strip()
-                or current_api_secret
-            )
-        else:
-            api_secret = console.input("API Secret: ").strip()
-
-        if api_url:
-            config_lines.append(f"MCP_AUTH_API_URL={api_url}")
-        if api_token:
-            config_lines.append(f"MCP_AUTH_API_TOKEN={api_token}")
-        if api_secret:
-            config_lines.append(f"MCP_AUTH_API_SECRET={api_secret}")
-    else:
-        config_lines.append("# Static Bearer Token")
-
-        current_token = current_config.get("MCP_AUTH_TOKEN") or current_config.get(
-            "SUPERSET_MCP_TOKEN"
-        )
-        if current_token:
-            masked = f"{current_token[:20]}...{current_token[-8:]}"
-            console.print(f"[dim]Current Token: {masked}[/dim]")
-            static_token = (
-                console.input("Bearer Token [press Enter to keep current]: ").strip()
-                or current_token
-            )
-        else:
-            static_token = console.input("Bearer Token: ").strip()
-
-        if static_token:
-            config_lines.append(f"MCP_AUTH_TOKEN={static_token}")
-
+    # ============================================================
     # LLM Provider Configuration
-    console.print("\n[bold]LLM Provider Configuration[/bold]")
+    # ============================================================
+    console.print("\n[bold cyan]━━━ LLM Provider Configuration ━━━[/bold cyan]\n")
 
-    # Detect current provider
-    current_provider = current_config.default_provider
-    if current_provider:
-        console.print(f"[dim]Currently configured: {current_provider}[/dim]")
+    # Detect API keys from environment
+    env_anthropic_key = os.environ.get("ANTHROPIC_API_KEY")
+    env_openai_key = os.environ.get("OPENAI_API_KEY")
 
-    console.print("1. [cyan]Anthropic[/cyan] - Claude models (requires API key, best tool calling)")
-    console.print("2. [cyan]Ollama[/cyan] - Local models (free, requires ollama serve)")
-    console.print("3. [cyan]OpenAI[/cyan] - GPT models (requires API key)")
+    # Show detected environment variables
+    if env_anthropic_key or env_openai_key:
+        console.print("[green]✓ Detected API keys in environment:[/green]")
+        if env_anthropic_key:
+            console.print(f"  • ANTHROPIC_API_KEY: {env_anthropic_key[:8]}...{env_anthropic_key[-4:]}")
+        if env_openai_key:
+            console.print(f"  • OPENAI_API_KEY: {env_openai_key[:8]}...{env_openai_key[-4:]}")
+        console.print()
 
-    # Set default based on current provider
-    default_provider = "1"
-    if current_provider == "ollama":
-        default_provider = "2"
-    elif current_provider == "openai":
-        default_provider = "3"
+    # Ask which provider to use
+    console.print("[bold]Select LLM Provider:[/bold]")
+    console.print("1. [cyan]Anthropic[/cyan] - Claude models (best tool calling)")
+    console.print("2. [cyan]OpenAI[/cyan] - GPT models")
+    console.print("3. [cyan]Ollama[/cyan] - Local models (free, requires ollama serve)")
 
-    provider_choice = console.input(f"\nChoice [{default_provider}]: ").strip() or default_provider
+    provider_choice = console.input("\nChoice [1]: ").strip() or "1"
 
-    config_lines.append("")
-    config_lines.append("# LLM Provider Settings")
+    llm_config = {"default": "prod", "profiles": {}}
 
     if provider_choice == "1":
-        config_lines.append("DEFAULT_PROVIDER=anthropic")
-
-        console.print("\n[bold]Available Anthropic Models:[/bold]")
+        # Anthropic
+        console.print("\n[bold]Anthropic Configuration:[/bold]")
         console.print("1. [cyan]claude-sonnet-4-5[/cyan] - Latest Sonnet 4.5 (most capable)")
-        console.print(
-            "2. [cyan]claude-haiku-4-5[/cyan] - Latest Haiku 4.5 (fast & efficient, recommended)"
-        )
+        console.print("2. [cyan]claude-haiku-4-5[/cyan] - Latest Haiku 4.5 (fast & efficient)")
         console.print("3. [cyan]claude-opus-4-1[/cyan] - Latest Opus 4.1 (most powerful)")
-        console.print("4. [cyan]claude-haiku-4-5[/cyan] - Legacy Haiku 3.5")
-        console.print("5. [cyan]Custom model name[/cyan]")
 
-        current_model = current_config.default_model or "claude-haiku-4-5"
-        model_choice = console.input(
-            f"\nChoice (or press Enter for current: {current_model}): "
-        ).strip()
-
-        if model_choice == "1":
-            model = "claude-sonnet-4-5"
-        elif model_choice == "2":
+        model_choice = console.input("\nChoice [1]: ").strip() or "1"
+        model = "claude-sonnet-4-5"
+        if model_choice == "2":
             model = "claude-haiku-4-5"
         elif model_choice == "3":
             model = "claude-opus-4-1"
-        elif model_choice == "4":
-            model = "claude-haiku-4-5"
-        elif model_choice == "5":
-            model = console.input("Custom model name: ").strip()
-        elif model_choice == "":
-            model = current_model
+
+        # API Key
+        if env_anthropic_key:
+            console.print(f"\n[green]Using Anthropic API key from environment:[/green] {env_anthropic_key[:8]}...{env_anthropic_key[-4:]}")
+            use_env = console.input("Save this key to .llm_providers.yaml? [Y/n]: ").strip().lower()
+            if use_env in ["", "y", "yes"]:
+                api_key = env_anthropic_key
+            else:
+                api_key = console.input("Enter different API key: ").strip()
         else:
-            model = model_choice
+            api_key = console.input("\nAnthropic API Key: ").strip()
 
-        config_lines.append(f"DEFAULT_MODEL={model}")
-        config_lines.append(f"ANTHROPIC_MODEL={model}")
-
-        config_lines.append("")
-
-        current_api_key = current_config.get("ANTHROPIC_API_KEY")
-        if current_api_key:
-            source = current_config.get_source("ANTHROPIC_API_KEY")
-            masked = f"{current_api_key[:8]}...{current_api_key[-4:]}"
-            console.print(f"[green]✓ Anthropic API Key already configured[/green] ({source})")
-            console.print(f"[dim]  Current: {masked}[/dim]")
-            api_key = (
-                console.input("  New key (or press Enter to skip): ").strip() or current_api_key
-            )
-        else:
-            api_key = console.input("Anthropic API Key: ").strip()
-
-        if api_key:
-            config_lines.append(f"ANTHROPIC_API_KEY={api_key}")
-        else:
-            config_lines.append("# ANTHROPIC_API_KEY=sk-ant-...")
+        llm_config["profiles"]["prod"] = {
+            "name": "Production",
+            "description": "High-quality models for production use",
+            "providers": [
+                {
+                    "name": f"Claude {model}",
+                    "provider": "anthropic",
+                    "model": model,
+                    "api_key": api_key,
+                    "timeout": 60,
+                    "default": True,
+                }
+            ],
+        }
 
     elif provider_choice == "2":
-        config_lines.append("DEFAULT_PROVIDER=ollama")
-
-        console.print("\n[bold]Popular Ollama Models:[/bold]")
-        console.print("1. [cyan]llama3.1:8b[/cyan] - Meta's Llama 3.1 8B (good balance)")
-        console.print("2. [cyan]llama3.1:70b[/cyan] - Meta's Llama 3.1 70B (more capable, slower)")
-        console.print("3. [cyan]qwen2.5:14b[/cyan] - Alibaba's Qwen 2.5 14B (strong coding)")
-        console.print("4. [cyan]mistral:7b[/cyan] - Mistral 7B (efficient)")
-        console.print("5. [cyan]Custom model name[/cyan]")
-
-        current_model = current_config.default_model or "llama3.1:8b"
-        model_choice = console.input(
-            f"\nChoice (or press Enter for current: {current_model}): "
-        ).strip()
-
-        if model_choice == "1":
-            model = "llama3.1:8b"
-        elif model_choice == "2":
-            model = "llama3.1:70b"
-        elif model_choice == "3":
-            model = "qwen2.5:14b"
-        elif model_choice == "4":
-            model = "mistral:7b"
-        elif model_choice == "5":
-            model = console.input("Custom model name: ").strip()
-        elif model_choice == "":
-            model = current_model
-        else:
-            model = model_choice
-
-        config_lines.append(f"DEFAULT_MODEL={model}")
-
-        config_lines.append("")
-
-        current_base_url = current_config.get("OLLAMA_BASE_URL") or "http://localhost:11434"
-        base_url = (
-            console.input(f"Ollama Base URL [{current_base_url}]: ").strip() or current_base_url
-        )
-        config_lines.append(f"OLLAMA_BASE_URL={base_url}")
-
-    elif provider_choice == "3":
-        config_lines.append("DEFAULT_PROVIDER=openai")
-
-        console.print("\n[bold]Available OpenAI Models:[/bold]")
+        # OpenAI
+        console.print("\n[bold]OpenAI Configuration:[/bold]")
         console.print("1. [cyan]gpt-4o[/cyan] - GPT-4 Optimized (recommended)")
         console.print("2. [cyan]gpt-4-turbo[/cyan] - GPT-4 Turbo")
-        console.print("3. [cyan]gpt-4[/cyan] - GPT-4 (original)")
-        console.print("4. [cyan]gpt-3.5-turbo[/cyan] - GPT-3.5 Turbo (faster, cheaper)")
-        console.print("5. [cyan]Custom model name[/cyan]")
+        console.print("3. [cyan]gpt-3.5-turbo[/cyan] - GPT-3.5 Turbo (faster, cheaper)")
 
-        current_model = current_config.default_model or "gpt-4o"
-        model_choice = console.input(
-            f"\nChoice (or press Enter for current: {current_model}): "
-        ).strip()
-
-        if model_choice == "1":
-            model = "gpt-4o"
-        elif model_choice == "2":
+        model_choice = console.input("\nChoice [1]: ").strip() or "1"
+        model = "gpt-4o"
+        if model_choice == "2":
             model = "gpt-4-turbo"
         elif model_choice == "3":
-            model = "gpt-4"
-        elif model_choice == "4":
             model = "gpt-3.5-turbo"
-        elif model_choice == "5":
-            model = console.input("Custom model name: ").strip()
-        elif model_choice == "":
-            model = current_model
+
+        # API Key
+        if env_openai_key:
+            console.print(f"\n[green]Using OpenAI API key from environment:[/green] {env_openai_key[:8]}...{env_openai_key[-4:]}")
+            use_env = console.input("Save this key to .llm_providers.yaml? [Y/n]: ").strip().lower()
+            if use_env in ["", "y", "yes"]:
+                api_key = env_openai_key
+            else:
+                api_key = console.input("Enter different API key: ").strip()
         else:
-            model = model_choice
+            api_key = console.input("\nOpenAI API Key: ").strip()
 
-        config_lines.append(f"DEFAULT_MODEL={model}")
+        llm_config["profiles"]["prod"] = {
+            "name": "Production",
+            "description": "High-quality models for production use",
+            "providers": [
+                {
+                    "name": f"OpenAI {model}",
+                    "provider": "openai",
+                    "model": model,
+                    "api_key": api_key,
+                    "timeout": 60,
+                    "default": True,
+                }
+            ],
+        }
 
-        config_lines.append("")
+    else:
+        # Ollama
+        console.print("\n[bold]Ollama Configuration:[/bold]")
+        console.print("1. [cyan]llama3.1:8b[/cyan] - Meta's Llama 3.1 8B (good balance)")
+        console.print("2. [cyan]qwen2.5:14b[/cyan] - Alibaba's Qwen 2.5 14B (strong coding)")
+        console.print("3. [cyan]mistral:7b[/cyan] - Mistral 7B (efficient)")
 
-        current_api_key = current_config.get("OPENAI_API_KEY")
-        if current_api_key:
-            source = current_config.get_source("OPENAI_API_KEY")
-            masked = f"{current_api_key[:8]}...{current_api_key[-4:]}"
-            console.print(f"[green]✓ OpenAI API Key already configured[/green] ({source})")
-            console.print(f"[dim]  Current: {masked}[/dim]")
-            api_key = (
-                console.input("  New key (or press Enter to skip): ").strip() or current_api_key
-            )
+        model_choice = console.input("\nChoice [1]: ").strip() or "1"
+        model = "llama3.1:8b"
+        if model_choice == "2":
+            model = "qwen2.5:14b"
+        elif model_choice == "3":
+            model = "mistral:7b"
+
+        base_url = console.input("\nOllama Base URL [http://localhost:11434]: ").strip() or "http://localhost:11434"
+
+        llm_config["profiles"]["prod"] = {
+            "name": "Production",
+            "description": "Local Ollama models",
+            "providers": [
+                {
+                    "name": f"Ollama {model}",
+                    "provider": "ollama",
+                    "model": model,
+                    "base_url": base_url,
+                    "timeout": 120,
+                    "default": True,
+                }
+            ],
+        }
+
+    # Save LLM config
+    llm_yaml_path.write_text(yaml.dump(llm_config, default_flow_style=False, sort_keys=False))
+    console.print(f"\n[green]✓ LLM configuration saved to:[/green] {llm_yaml_path}")
+
+    # ============================================================
+    # MCP Service Configuration
+    # ============================================================
+    console.print("\n[bold cyan]━━━ MCP Service Configuration ━━━[/bold cyan]\n")
+
+    # Show current MCP URL if set
+    current_mcp_url = current_config.get_mcp_url()
+    if current_mcp_url and current_mcp_url != "http://localhost:5008/mcp/":
+        source = current_config.get_source("MCP_URL")
+        console.print(f"[green]✓ MCP Service URL detected[/green] ({source})")
+        console.print(f"[dim]  Current: {current_mcp_url}[/dim]")
+        mcp_url = console.input("  New URL (or press Enter to keep current): ").strip() or current_mcp_url
+    else:
+        mcp_url = console.input("MCP Service URL [https://your-workspace.preset.io/mcp]: ").strip()
+
+    if not mcp_url:
+        console.print("[yellow]Skipping MCP configuration[/yellow]")
+        console.print(f"[dim]You can configure MCP later by editing {mcp_yaml_path}[/dim]")
+    else:
+        # Ask for authentication method
+        console.print("\n[bold]MCP Authentication Method:[/bold]")
+
+        # Detect current auth method
+        has_dynamic_jwt = all([
+            current_config.get("MCP_AUTH_API_URL"),
+            current_config.get("MCP_AUTH_API_TOKEN"),
+            current_config.get("MCP_AUTH_API_SECRET"),
+        ])
+        has_static_token = current_config.get("MCP_AUTH_TOKEN") or current_config.get("SUPERSET_MCP_TOKEN")
+
+        if has_dynamic_jwt:
+            console.print("[dim]Currently configured: Dynamic JWT[/dim]")
+        elif has_static_token:
+            console.print("[dim]Currently configured: Static Token[/dim]")
+
+        console.print("1. [cyan]Dynamic JWT[/cyan] - Fetch token from Preset API (recommended)")
+        console.print("2. [cyan]Static Token[/cyan] - Use a pre-generated bearer token")
+        console.print("3. [cyan]None[/cyan] - No authentication required")
+
+        default_auth = "1" if has_dynamic_jwt or not has_static_token else "2"
+        auth_method = console.input(f"\nChoice [{default_auth}]: ").strip() or default_auth
+
+        auth_config = {}
+
+        if auth_method == "1":
+            # Dynamic JWT
+            current_api_url = current_config.get("MCP_AUTH_API_URL")
+            if current_api_url:
+                console.print(f"[dim]Current Auth API URL: {current_api_url}[/dim]")
+                api_url = console.input("  New URL (or press Enter to keep current): ").strip() or current_api_url
+            else:
+                api_url = console.input("Auth API URL (e.g., https://api.app.preset.io/v1/auth/): ").strip()
+
+            current_api_token = current_config.get("MCP_AUTH_API_TOKEN")
+            if current_api_token:
+                masked = f"{current_api_token[:8]}...{current_api_token[-4:]}"
+                console.print(f"[dim]Current API Token: {masked}[/dim]")
+                api_token = console.input("  New token (or press Enter to keep current): ").strip() or current_api_token
+            else:
+                api_token = console.input("API Token: ").strip()
+
+            current_api_secret = current_config.get("MCP_AUTH_API_SECRET")
+            if current_api_secret:
+                masked = f"{current_api_secret[:8]}...{current_api_secret[-4:]}"
+                console.print(f"[dim]Current API Secret: {masked}[/dim]")
+                api_secret = console.input("  New secret (or press Enter to keep current): ").strip() or current_api_secret
+            else:
+                api_secret = console.input("API Secret: ").strip()
+
+            auth_config = {
+                "auth_type": "jwt",
+                "api_url": api_url,
+                "api_token": api_token,
+                "api_secret": api_secret,
+            }
+
+        elif auth_method == "2":
+            # Static token
+            current_token = current_config.get("MCP_AUTH_TOKEN") or current_config.get("SUPERSET_MCP_TOKEN")
+            if current_token:
+                masked = f"{current_token[:20]}...{current_token[-8:]}"
+                console.print(f"[dim]Current Token: {masked}[/dim]")
+                static_token = console.input("  New token (or press Enter to keep current): ").strip() or current_token
+            else:
+                static_token = console.input("Bearer Token: ").strip()
+
+            auth_config = {
+                "auth_type": "bearer",
+                "token": static_token,
+            }
         else:
-            api_key = console.input("OpenAI API Key: ").strip()
+            # No auth
+            auth_config = {"auth_type": "none"}
 
-        if api_key:
-            config_lines.append(f"OPENAI_API_KEY={api_key}")
-        else:
-            config_lines.append("# OPENAI_API_KEY=sk-...")
+        # Create MCP config
+        mcp_config = {
+            "default": "prod",
+            "profiles": {
+                "prod": {
+                    "name": "Production",
+                    "description": "Production MCP service",
+                    "mcps": [
+                        {
+                            "name": "Preset Superset",
+                            "mcp_url": mcp_url,
+                            "auth": auth_config,
+                            "timeout": 30,
+                            "rate_limit_rpm": 60,
+                            "default": True,
+                        }
+                    ],
+                }
+            },
+        }
 
-    # Write config file
-    config_lines.append("")
-    config_path.write_text("\n".join(config_lines))
+        # Save MCP config
+        mcp_yaml_path.write_text(yaml.dump(mcp_config, default_flow_style=False, sort_keys=False))
+        console.print(f"\n[green]✓ MCP configuration saved to:[/green] {mcp_yaml_path}")
 
-    console.print(f"\n[green]✓ Configuration saved to:[/green] {config_path}")
+    # Final summary
+    console.print("\n[bold green]✓ Setup Complete![/bold green]")
+    console.print("\n[bold]Configuration files created:[/bold]")
+    console.print(f"  • {llm_yaml_path}")
+    if mcp_yaml_path.exists():
+        console.print(f"  • {mcp_yaml_path}")
+
     console.print("\n[bold]Next steps:[/bold]")
     console.print("1. Run: [cyan]testmcpy config-cmd[/cyan]  # Verify configuration")
-    console.print("2. Run: [cyan]testmcpy tools[/cyan]  # List available MCP tools")
-    console.print("3. Run: [cyan]testmcpy chat[/cyan]  # Start interactive chat")
+    if mcp_yaml_path.exists():
+        console.print("2. Run: [cyan]testmcpy tools[/cyan]  # List available MCP tools")
+        console.print("3. Run: [cyan]testmcpy interact[/cyan]  # Start interactive session")
+    console.print("\n[dim]Note: You can edit these files manually or run setup again with --force[/dim]")
 
 
 @app.command()
@@ -1292,7 +1275,7 @@ def serve(
 
     # Check MCP URL
     console.print("\n  [2/4] Checking MCP service URL...")
-    console.print(f"  [dim]    MCP URL: {cfg.mcp_url}[/dim]")
+    console.print(f"  [dim]    MCP URL: {cfg.get_mcp_url()}[/dim]")
     console.print(f"  [dim]    Source: {cfg.get_source('MCP_URL')}[/dim]")
     console.print("  [green]✓[/green] MCP URL configured")
 
@@ -1609,7 +1592,7 @@ def config_mcp(
 
     # Get MCP configuration
     cfg = get_config()
-    mcp_url = mcp_url or cfg.mcp_url
+    mcp_url = mcp_url or cfg.get_mcp_url()
     server_name = server_name or "preset-superset"
 
     if not mcp_url:
@@ -1619,83 +1602,150 @@ def config_mcp(
 
     # Get auth token
     if not auth_token:
-        # ALWAYS fetch fresh token from dynamic JWT if configured
-        if (
-            cfg.get("MCP_AUTH_API_URL")
-            and cfg.get("MCP_AUTH_API_TOKEN")
-            and cfg.get("MCP_AUTH_API_SECRET")
-        ):
-            console.print("[yellow]Fetching bearer token using dynamic JWT...[/yellow]")
-            try:
-                import requests
+        # Try to get auth from MCP profile first
+        mcp_server = cfg.get_default_mcp_server()
+        if mcp_server and mcp_server.auth:
+            auth = mcp_server.auth
 
-                auth_url = cfg.get("MCP_AUTH_API_URL")
-                api_token = cfg.get("MCP_AUTH_API_TOKEN")
-                api_secret = cfg.get("MCP_AUTH_API_SECRET")
+            if auth.auth_type == "bearer" and auth.token:
+                # Static bearer token
+                console.print("[green]✓ Using bearer token from MCP profile[/green]")
+                auth_token = auth.token
 
-                console.print(f"[dim]Auth URL: {auth_url}[/dim]")
-                console.print(f"[dim]API Token: {api_token[:8]}...{api_token[-4:]}[/dim]")
+            elif auth.auth_type == "jwt" and auth.api_url and auth.api_token and auth.api_secret:
+                # Dynamic JWT - fetch token
+                console.print("[yellow]Fetching bearer token using JWT from MCP profile...[/yellow]")
+                try:
+                    import requests
 
-                response = requests.post(
-                    auth_url,
-                    headers={"Content-Type": "application/json", "Accept": "application/json"},
-                    json={"name": api_token, "secret": api_secret},
-                    timeout=10,
-                )
+                    console.print(f"[dim]Auth URL: {auth.api_url}[/dim]")
+                    console.print(f"[dim]API Token: {auth.api_token[:8]}...{auth.api_token[-4:]}[/dim]")
 
-                console.print(f"[dim]Response status: {response.status_code}[/dim]")
+                    response = requests.post(
+                        auth.api_url,
+                        headers={"Content-Type": "application/json", "Accept": "application/json"},
+                        json={"name": auth.api_token, "secret": auth.api_secret},
+                        timeout=10,
+                    )
 
-                if response.status_code != 200:
-                    console.print(f"[red]Error: API returned {response.status_code}[/red]")
-                    console.print(f"[red]Response: {response.text}[/red]")
+                    console.print(f"[dim]Response status: {response.status_code}[/dim]")
+
+                    if response.status_code != 200:
+                        console.print(f"[red]Error: API returned {response.status_code}[/red]")
+                        console.print(f"[red]Response: {response.text}[/red]")
+                        console.print(
+                            "[yellow]Please provide --token with a long-lived bearer token[/yellow]"
+                        )
+                        return
+
+                    auth_data = response.json()
+                    # Try both 'access_token' and 'payload.access_token' keys
+                    auth_token = auth_data.get("access_token")
+                    if not auth_token and "payload" in auth_data:
+                        payload = auth_data["payload"]
+                        if isinstance(payload, dict):
+                            auth_token = payload.get("access_token")
+                        else:
+                            auth_token = payload
+
+                    if auth_token:
+                        console.print(
+                            f"[green]✓ Successfully fetched bearer token (length: {len(auth_token)})[/green]"
+                        )
+                    else:
+                        console.print("[red]Error: No access_token or payload in response[/red]")
+                        console.print(f"[red]Response keys: {list(auth_data.keys())}[/red]")
+                        console.print(f"[red]Full response: {auth_data}[/red]")
+                        return
+                except Exception as e:
+                    console.print(f"[red]Error fetching token: {e}[/red]")
+                    import traceback
+
+                    console.print(f"[red]{traceback.format_exc()}[/red]")
                     console.print(
                         "[yellow]Please provide --token with a long-lived bearer token[/yellow]"
                     )
                     return
+            elif auth.auth_type == "none":
+                # No auth required
+                console.print("[yellow]Note: MCP profile has auth_type: none[/yellow]")
+                console.print("[yellow]Skipping authentication (you may need to add --token manually)[/yellow]")
+                auth_token = ""  # Empty token for no-auth
+            else:
+                console.print(f"[yellow]Warning: Unknown or incomplete auth type in MCP profile: {auth.auth_type}[/yellow]")
 
-                auth_data = response.json()
-                # Try both 'access_token' and 'payload.access_token' keys
-                auth_token = auth_data.get("access_token")
-                if not auth_token and "payload" in auth_data:
-                    payload = auth_data["payload"]
-                    if isinstance(payload, dict):
-                        auth_token = payload.get("access_token")
-                    else:
-                        auth_token = payload
+        # Fallback to old env-var approach if no MCP profile auth
+        if not auth_token:
+            if (
+                cfg.get("MCP_AUTH_API_URL")
+                and cfg.get("MCP_AUTH_API_TOKEN")
+                and cfg.get("MCP_AUTH_API_SECRET")
+            ):
+                console.print("[yellow]Fetching bearer token using legacy env vars (MCP_AUTH_API_*)...[/yellow]")
+                try:
+                    import requests
 
-                if auth_token:
-                    console.print(
-                        f"[green]✓ Successfully fetched bearer token (length: {len(auth_token)})[/green]"
+                    auth_url = cfg.get("MCP_AUTH_API_URL")
+                    api_token = cfg.get("MCP_AUTH_API_TOKEN")
+                    api_secret = cfg.get("MCP_AUTH_API_SECRET")
+
+                    console.print(f"[dim]Auth URL: {auth_url}[/dim]")
+                    console.print(f"[dim]API Token: {api_token[:8]}...{api_token[-4:]}[/dim]")
+
+                    response = requests.post(
+                        auth_url,
+                        headers={"Content-Type": "application/json", "Accept": "application/json"},
+                        json={"name": api_token, "secret": api_secret},
+                        timeout=10,
                     )
-                else:
-                    console.print("[red]Error: No access_token or payload in response[/red]")
-                    console.print(f"[red]Response keys: {list(auth_data.keys())}[/red]")
-                    console.print(f"[red]Full response: {auth_data}[/red]")
-                    return
-            except Exception as e:
-                console.print(f"[red]Error fetching token: {e}[/red]")
-                import traceback
 
-                console.print(f"[red]{traceback.format_exc()}[/red]")
-                console.print(
-                    "[yellow]Please provide --token with a long-lived bearer token[/yellow]"
-                )
+                    console.print(f"[dim]Response status: {response.status_code}[/dim]")
+
+                    if response.status_code != 200:
+                        console.print(f"[red]Error: API returned {response.status_code}[/red]")
+                        console.print(f"[red]Response: {response.text}[/red]")
+                        console.print(
+                            "[yellow]Please provide --token with a long-lived bearer token[/yellow]"
+                        )
+                        return
+
+                    auth_data = response.json()
+                    auth_token = auth_data.get("access_token")
+                    if not auth_token and "payload" in auth_data:
+                        payload = auth_data["payload"]
+                        if isinstance(payload, dict):
+                            auth_token = payload.get("access_token")
+                        else:
+                            auth_token = payload
+
+                    if auth_token:
+                        console.print(
+                            f"[green]✓ Successfully fetched bearer token (length: {len(auth_token)})[/green]"
+                        )
+                    else:
+                        console.print("[red]Error: No access_token or payload in response[/red]")
+                        return
+                except Exception as e:
+                    console.print(f"[red]Error fetching token: {e}[/red]")
+                    return
+            else:
+                console.print("[red]Error: No authentication token available[/red]")
+                console.print("Options:")
+                console.print("  1. Configure MCP profile in .mcp_services.yaml (recommended)")
+                console.print("  2. Provide --token with a bearer token")
+                console.print("  3. Configure legacy env vars (MCP_AUTH_API_*)")
                 return
-        else:
-            console.print("[red]Error: No authentication token available[/red]")
-            console.print("Provide --token or configure dynamic JWT (MCP_AUTH_API_*)")
-            return
 
     # Create MCP server configuration
+    mcp_args = ["-y", "mcp-remote@latest", mcp_url]
+
+    # Only add Authorization header if we have a token (not empty for no-auth)
+    if auth_token:
+        mcp_args.extend(["--header", f"Authorization: Bearer {auth_token}"])
+
     mcp_server_config = {
         "command": "npx",
-        "args": [
-            "-y",
-            "mcp-remote@latest",
-            mcp_url,
-            "--header",
-            f"Authorization: Bearer {auth_token}",
-        ],
+        "args": mcp_args,
         "env": {"NODE_OPTIONS": "--no-warnings"},
     }
 
@@ -1797,7 +1847,7 @@ def export(
         from testmcpy.config import Config
 
         cfg = Config(profile=profile)
-        effective_mcp_url = mcp_url or cfg.mcp_url
+        effective_mcp_url = mcp_url or cfg.get_mcp_url()
     else:
         effective_mcp_url = mcp_url or DEFAULT_MCP_URL
 
@@ -1936,18 +1986,30 @@ def dash(
 
     Beautiful terminal-based dashboard for MCP testing and exploration.
     Navigate with keyboard shortcuts, manage profiles, explore tools, and more.
+
+    Features:
+    - Browse MCP tools and resources
+    - Manage profiles
+    - View connection status
+    - Quick actions and shortcuts
+
+    Press '?' for help once inside the dashboard.
     """
     try:
-        from testmcpy.tui.app import TestMCPyApp
+        from testmcpy.tui.app import run_tui
     except ImportError:
         console.print("[red]Error: Textual is required for the TUI dashboard[/red]")
-        console.print("Install with: pip install 'testmcpy' (textual is now included)")
+        console.print("Install with: pip install 'testmcpy[tui]' or pip install textual")
         console.print("Or upgrade: pip install --upgrade testmcpy")
         return
 
-    # Create and run the app
-    app = TestMCPyApp(profile=profile, enable_auto_refresh=auto_refresh)
-    app.run()
+    # Launch the TUI
+    try:
+        run_tui(profile=profile, enable_auto_refresh=auto_refresh)
+    except Exception as e:
+        console.print(f"[red]Error launching dashboard:[/red] {e}")
+        import traceback
+        console.print(f"[dim]{traceback.format_exc()}[/dim]")
 
 
 @app.command()
@@ -2008,40 +2070,115 @@ def profiles(
         "-d",
         help="Show detailed profile information",
     ),
+    set_default: str = typer.Option(
+        None,
+        "--set-default",
+        help="Set the default profile (writes to .mcp_services.yaml)",
+    ),
+    get_default: bool = typer.Option(
+        False,
+        "--get-default",
+        help="Show the current default profile",
+    ),
 ):
     """
-    List all available MCP profiles (CLI parity command).
+    List and manage MCP profiles.
 
-    Quick command to view configured MCP profiles without launching the TUI.
+    View all configured MCP profiles, get/set the default profile.
     For interactive profile management, use: testmcpy dash
-    """
-    from testmcpy.mcp_profiles import list_available_profiles
 
+    Examples:
+        testmcpy profiles                    # List all profiles
+        testmcpy profiles --details          # Show detailed info
+        testmcpy profiles --get-default      # Show default profile
+        testmcpy profiles --set-default prod # Set 'prod' as default
+    """
+    from testmcpy.mcp_profiles import get_profile_config, load_profile
+    from pathlib import Path
+    import yaml
+
+    profile_config = get_profile_config()
+
+    # Handle --get-default
+    if get_default:
+        default = profile_config.default_profile
+        if default:
+            console.print(f"\n[bold cyan]Default MCP Profile:[/bold cyan] {default}\n")
+        else:
+            console.print("\n[yellow]No default profile set[/yellow]\n")
+        return
+
+    # Handle --set-default
+    if set_default:
+        # Verify profile exists
+        if set_default not in profile_config.list_profiles():
+            console.print(f"\n[red]Error: Profile '{set_default}' not found[/red]")
+            console.print("\nAvailable profiles:")
+            for p in profile_config.list_profiles():
+                console.print(f"  • {p}")
+            return
+
+        # Read current YAML file
+        config_path = profile_config.config_path
+        if not config_path or not config_path.exists():
+            console.print(f"\n[red]Error: Config file not found at {config_path}[/red]")
+            console.print("Run: [cyan]testmcpy setup[/cyan]")
+            return
+
+        try:
+            with open(config_path, 'r') as f:
+                config_data = yaml.safe_load(f) or {}
+
+            # Update default
+            config_data['default'] = set_default
+
+            # Write back
+            with open(config_path, 'w') as f:
+                yaml.dump(config_data, f, default_flow_style=False, sort_keys=False)
+
+            console.print(f"\n[green]✓ Default profile set to:[/green] {set_default}")
+            console.print(f"[dim]Updated: {config_path}[/dim]\n")
+
+        except Exception as e:
+            console.print(f"\n[red]Error updating config: {e}[/red]\n")
+        return
+
+    # List profiles
     console.print("\n[bold cyan]MCP Profiles[/bold cyan]\n")
 
-    profiles_list = list_available_profiles()
+    profile_ids = profile_config.list_profiles()
 
-    if not profiles_list:
+    if not profile_ids:
         console.print("[dim]No profiles configured.[/dim]")
         console.print("\nTo configure profiles, create [cyan].mcp_services.yaml[/cyan]")
         console.print("See: [blue]https://github.com/preset-io/testmcpy/blob/main/docs/MCP_PROFILES.md[/blue]")
         return
 
+    # Get default profile
+    default_profile_id = profile_config.default_profile
+
     table = Table(show_header=True, header_style="bold cyan")
-    table.add_column("Status", style="dim", width=6)
+    table.add_column("", style="dim", width=3)  # Default indicator
     table.add_column("Profile ID", style="cyan")
-    table.add_column("MCP Services", justify="right")
+    table.add_column("Name", style="white")
+    table.add_column("MCPs", justify="right")
     if show_details:
         table.add_column("First MCP URL")
         table.add_column("Auth Type")
 
-    for profile in profiles_list:
-        status_icon = "● " if profile.is_default else "○"
+    for profile_id in profile_ids:
+        profile = load_profile(profile_id)
+        if not profile:
+            continue
+
+        is_default = profile_id == default_profile_id
+        status_icon = "●" if is_default else "○"
         mcp_count = len(profile.mcps) if profile.mcps else 0
 
         row = [
             status_icon,
-            profile.profile_id,
+            profile_id,
+            profile.name or "-",
             str(mcp_count),
         ]
 
@@ -2049,14 +2186,20 @@ def profiles(
             first_mcp = profile.mcps[0]
             row.extend([
                 first_mcp.mcp_url,
-                first_mcp.auth.auth_type,
+                first_mcp.auth.auth_type if first_mcp.auth else "none",
             ])
 
         table.add_row(*row)
 
     console.print(table)
-    console.print(f"\n[dim]Total: {len(profiles_list)} profile(s)[/dim]")
-    console.print("\nTo manage profiles interactively: [cyan]testmcpy dash[/cyan]")
+    console.print(f"\n[dim]Total: {len(profile_ids)} profile(s)[/dim]")
+    if default_profile_id:
+        console.print(f"[dim]Default: {default_profile_id}[/dim]")
+
+    console.print("\n[bold]Commands:[/bold]")
+    console.print("  [cyan]testmcpy profiles --get-default[/cyan]        # Show default profile")
+    console.print("  [cyan]testmcpy profiles --set-default <name>[/cyan] # Set default profile")
+    console.print("  [cyan]testmcpy dash[/cyan]                         # Interactive management")
 
 
 @app.command()
@@ -2316,36 +2459,381 @@ def chat(
 
 
 @app.command()
-def dash(
-    tests_dir: Path = typer.Option(
-        Path("tests"), "--tests-dir", "-t", help="Directory containing test files"
+def generate(
+    profile: str | None = typer.Option(
+        None,
+        "--profile",
+        "-p",
+        help="MCP service profile from .mcp_services.yaml",
+    ),
+    mcp_url: str | None = typer.Option(
+        None,
+        "--mcp-url",
+        help="MCP service URL (overrides profile)",
+    ),
+    output_dir: Path = typer.Option(
+        Path("tests/generated"),
+        "--output",
+        "-o",
+        help="Output directory for generated tests",
+    ),
+    test_prefix: str = typer.Option(
+        "test_",
+        "--prefix",
+        help="Prefix for generated test files",
+    ),
+    include_examples: bool = typer.Option(
+        True,
+        "--examples/--no-examples",
+        help="Include example test cases for each tool",
+    ),
+    verbose: bool = typer.Option(
+        False,
+        "--verbose",
+        "-v",
+        help="Show detailed progress",
     ),
 ):
     """
-    Launch interactive TUI dashboard for test management.
+    Generate test suite for an MCP service.
 
-    This command starts a beautiful terminal UI for managing and running tests,
-    similar to k9s for Kubernetes or lazygit for Git.
+    This command connects to an MCP service, discovers all available tools,
+    and generates comprehensive test YAML files for each tool.
+
+    Examples:
+        testmcpy generate --profile my-profile
+        testmcpy generate --mcp-url http://localhost:5008/mcp
+        testmcpy generate --profile prod --output tests/prod-tests
     """
-    # Check if textual is installed
-    try:
-        from testmcpy.tui.app import run_tui
-    except ImportError:
-        console.print("[red]Error: Textual is required for the TUI dashboard[/red]")
-        console.print("Install with: pip install textual textual-dev")
-        return
+    console.print(
+        Panel.fit(
+            "[bold cyan]Test Suite Generator[/bold cyan]\n"
+            "[dim]Discovering MCP tools and generating tests...[/dim]",
+            border_style="cyan",
+        )
+    )
 
-    # Ensure tests directory exists
-    if not tests_dir.exists():
-        console.print(f"[yellow]Warning: Tests directory not found: {tests_dir}[/yellow]")
-        console.print("[yellow]Creating tests directory...[/yellow]")
-        tests_dir.mkdir(parents=True, exist_ok=True)
+    # Load config with profile if specified
+    if profile:
+        from testmcpy.config import Config
+        cfg = Config(profile=profile)
+        effective_mcp_url = mcp_url or cfg.get_mcp_url()
+        mcp_server = cfg.get_default_mcp_server()
+        auth_config = mcp_server.auth.to_dict() if mcp_server else None
+    else:
+        effective_mcp_url = mcp_url or DEFAULT_MCP_URL
+        auth_config = None
 
-    # Run the TUI
-    try:
-        run_tui(tests_dir=tests_dir)
-    except Exception as e:
-        console.print(f"[red]Error running TUI:[/red] {e}")
+    if not effective_mcp_url:
+        console.print("[red]Error:[/red] No MCP URL provided. Use --mcp-url or --profile")
+        console.print("\nExamples:")
+        console.print("  testmcpy generate --mcp-url http://localhost:5008/mcp")
+        console.print("  testmcpy generate --profile my-profile")
+        raise typer.Exit(1)
+
+    async def run_generation():
+        from testmcpy.src.mcp_client import MCPClient
+
+        tools_discovered = 0
+        tests_generated = 0
+        errors = []
+
+        try:
+            # Step 1: Connect to MCP service
+            if verbose:
+                console.print(f"\n[bold]Step 1:[/bold] Connecting to MCP service")
+                console.print(f"  URL: {effective_mcp_url}")
+                if auth_config:
+                    console.print(f"  Auth: {auth_config.get('type', 'none')}")
+
+            with console.status("[cyan]Connecting to MCP service...[/cyan]"):
+                client = MCPClient(base_url=effective_mcp_url, auth=auth_config)
+                await client.initialize()
+
+            if verbose:
+                console.print("[green]✓[/green] Connected successfully\n")
+            else:
+                console.print("[green]✓[/green] Connected to MCP service")
+
+            # Step 2: Discover tools
+            if verbose:
+                console.print("[bold]Step 2:[/bold] Discovering available tools")
+
+            with console.status("[cyan]Listing tools...[/cyan]"):
+                tools = await client.list_tools()
+
+            tools_discovered = len(tools)
+
+            if tools_discovered == 0:
+                console.print("[yellow]⚠[/yellow] No tools found in MCP service")
+                await client.close()
+                return
+
+            if verbose:
+                console.print(f"[green]✓[/green] Found {tools_discovered} tools\n")
+                for tool in tools:
+                    console.print(f"  • {tool.name}")
+                console.print()
+            else:
+                console.print(f"[green]✓[/green] Found {tools_discovered} tools")
+
+            # Step 3: Create output directory
+            if verbose:
+                console.print(f"[bold]Step 3:[/bold] Creating output directory")
+                console.print(f"  Path: {output_dir}")
+
+            output_dir.mkdir(parents=True, exist_ok=True)
+
+            if verbose:
+                console.print(f"[green]✓[/green] Output directory ready\n")
+
+            # Step 4: Generate test files
+            if verbose:
+                console.print(f"[bold]Step 4:[/bold] Generating test files")
+            else:
+                console.print("\n[cyan]Generating tests...[/cyan]")
+
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                console=console,
+            ) as progress:
+                task = progress.add_task(
+                    f"Generating tests for {tools_discovered} tools...",
+                    total=tools_discovered
+                )
+
+                for tool in tools:
+                    try:
+                        # Generate test YAML for this tool
+                        test_content = _generate_tool_test(
+                            tool,
+                            effective_mcp_url,
+                            profile,
+                            auth_config,
+                            include_examples,
+                            output_dir
+                        )
+
+                        # Write to file
+                        safe_name = tool.name.replace("/", "_").replace(":", "_")
+                        test_file = output_dir / f"{test_prefix}{safe_name}.yaml"
+                        test_file.write_text(test_content)
+
+                        tests_generated += 1
+
+                        if verbose:
+                            console.print(f"  [green]✓[/green] {test_file.name}")
+
+                    except Exception as e:
+                        error_msg = f"Failed to generate test for {tool.name}: {str(e)}"
+                        errors.append(error_msg)
+                        if verbose:
+                            console.print(f"  [red]✗[/red] {tool.name}: {str(e)}")
+
+                    progress.update(task, advance=1)
+
+            # Close MCP connection
+            await client.close()
+
+            # Step 5: Summary
+            console.print("\n" + "=" * 50)
+            console.print("[bold green]Test Generation Complete![/bold green]\n")
+
+            table = Table(show_header=False, box=None)
+            table.add_column("Label", style="dim")
+            table.add_column("Value", style="bold")
+
+            table.add_row("Tools discovered:", str(tools_discovered))
+            table.add_row("Tests generated:", f"[green]{tests_generated}[/green]")
+            if errors:
+                table.add_row("Errors:", f"[red]{len(errors)}[/red]")
+            table.add_row("Output directory:", str(output_dir))
+
+            console.print(table)
+
+            if errors:
+                console.print("\n[bold red]Errors:[/bold red]")
+                for error in errors:
+                    console.print(f"  • {error}")
+
+            console.print("\n[bold]Next steps:[/bold]")
+            console.print(f"  1. Review generated tests: [cyan]ls {output_dir}[/cyan]")
+            console.print(f"  2. Edit tests as needed to match your requirements")
+            console.print(f"  3. Run tests: [cyan]testmcpy run {output_dir}[/cyan]")
+            console.print()
+
+        except Exception as e:
+            console.print(f"\n[red]Error:[/red] {str(e)}")
+            if verbose:
+                import traceback
+                console.print("\n[dim]Traceback:[/dim]")
+                console.print(traceback.format_exc())
+            raise typer.Exit(1)
+
+    asyncio.run(run_generation())
+
+
+def _generate_tool_test(
+    tool,
+    mcp_url: str,
+    profile: str | None,
+    auth_config: dict | None,
+    include_examples: bool,
+    output_dir: Path = Path("tests/generated"),
+) -> str:
+    """Generate a test YAML file for a single tool."""
+
+    # Extract required parameters from schema
+    required_params = []
+    optional_params = []
+
+    schema = tool.input_schema
+    if schema and "properties" in schema:
+        required_list = schema.get("required", [])
+        for param_name, param_info in schema["properties"].items():
+            param_type = param_info.get("type", "string")
+            param_desc = param_info.get("description", "")
+
+            param_dict = {
+                "name": param_name,
+                "type": param_type,
+                "description": param_desc,
+            }
+
+            if param_name in required_list:
+                required_params.append(param_dict)
+            else:
+                optional_params.append(param_dict)
+
+    # Start building the YAML content
+    lines = []
+    lines.append('version: "1.0"')
+    lines.append(f'name: "Test Suite for {tool.name}"')
+    lines.append(f'description: "Auto-generated tests for the {tool.name} MCP tool"')
+    lines.append('')
+    lines.append(f'# Tool: {tool.name}')
+    if tool.description:
+        lines.append(f'# Description: {tool.description}')
+    lines.append(f'# Generated by: testmcpy generate')
+    lines.append('')
+
+    # Add connection info comment
+    if profile:
+        lines.append(f'# Profile: {profile}')
+    lines.append(f'# MCP URL: {mcp_url}')
+    if auth_config:
+        lines.append(f'# Auth Type: {auth_config.get("type", "none")}')
+    lines.append('')
+
+    lines.append('tests:')
+
+    # Test 1: Basic tool discovery
+    lines.append('  # Test 1: Verify tool is available')
+    lines.append(f'  - name: "test_{tool.name}_exists"')
+    lines.append(f'    prompt: "Use the {tool.name} tool"')
+    lines.append('    evaluators:')
+    lines.append('      - name: "was_mcp_tool_called"')
+    lines.append('        args:')
+    lines.append(f'          tool_name: "{tool.name}"')
+    lines.append('      - name: "execution_successful"')
+    lines.append('')
+
+    # Test 2: Required parameters
+    if required_params:
+        lines.append('  # Test 2: Verify required parameters are provided')
+        lines.append(f'  - name: "test_{tool.name}_required_params"')
+
+        # Build a prompt that mentions the required parameters
+        param_mentions = []
+        for param in required_params:
+            if param['type'] == 'integer':
+                param_mentions.append(f"{param['name']} 123")
+            elif param['type'] == 'boolean':
+                param_mentions.append(f"{param['name']} true")
+            elif param['type'] == 'array':
+                param_mentions.append(f"{param['name']} list")
+            else:
+                param_mentions.append(f"{param['name']} 'example'")
+
+        prompt_params = ", ".join(param_mentions)
+        lines.append(f'    prompt: "Call {tool.name} with {prompt_params}"')
+        lines.append('    evaluators:')
+        lines.append('      - name: "was_mcp_tool_called"')
+        lines.append('        args:')
+        lines.append(f'          tool_name: "{tool.name}"')
+
+        # Check each required parameter was provided
+        for param in required_params:
+            lines.append('      - name: "tool_called_with_parameter"')
+            lines.append('        args:')
+            lines.append(f'          tool_name: "{tool.name}"')
+            lines.append(f'          parameter_name: "{param["name"]}"')
+
+        lines.append('      - name: "execution_successful"')
+        lines.append('')
+
+    # Test 3: Example test cases (if requested)
+    if include_examples:
+        lines.append(f'  # Test 3: Example usage of {tool.name}')
+        lines.append(f'  - name: "test_{tool.name}_example"')
+        lines.append(f'    prompt: "{_generate_example_prompt(tool, required_params, optional_params)}"')
+        lines.append('    evaluators:')
+        lines.append('      - name: "was_mcp_tool_called"')
+        lines.append('        args:')
+        lines.append(f'          tool_name: "{tool.name}"')
+        lines.append('      - name: "execution_successful"')
+        lines.append('      - name: "within_time_limit"')
+        lines.append('        args:')
+        lines.append('          max_seconds: 30')
+        lines.append('')
+
+    # Add parameter reference comment
+    if required_params or optional_params:
+        lines.append('# Parameter Reference:')
+        if required_params:
+            lines.append('# Required Parameters:')
+            for param in required_params:
+                lines.append(f'#   - {param["name"]} ({param["type"]}): {param.get("description", "No description")}')
+        if optional_params:
+            lines.append('# Optional Parameters:')
+            for param in optional_params:
+                lines.append(f'#   - {param["name"]} ({param["type"]}): {param.get("description", "No description")}')
+        lines.append('')
+
+    lines.append('# How to run:')
+    if profile:
+        lines.append(f'#   testmcpy run {output_dir / f"test_{tool.name}.yaml"} --profile {profile}')
+    else:
+        lines.append(f'#   testmcpy run {output_dir / f"test_{tool.name}.yaml"} --mcp-url {mcp_url}')
+    lines.append('#')
+    lines.append('# Tips:')
+    lines.append('#   - Customize prompts to match your specific use cases')
+    lines.append('#   - Add more evaluators to validate specific behaviors')
+    lines.append('#   - See docs/EVALUATOR_REFERENCE.md for all available evaluators')
+
+    return '\n'.join(lines)
+
+
+def _generate_example_prompt(tool, required_params: list, optional_params: list) -> str:
+    """Generate a natural language prompt for example test."""
+
+    if tool.description:
+        # Use the tool description to create a natural prompt
+        base = tool.description
+        if base.endswith('.'):
+            base = base[:-1]
+        return f"{base} using {tool.name}"
+
+    # Fallback: generic prompt with parameters
+    if required_params:
+        param_names = [p['name'] for p in required_params[:2]]  # Take first 2 params
+        if len(required_params) > 2:
+            return f"Use {tool.name} with {', '.join(param_names)}, and other required parameters"
+        else:
+            return f"Use {tool.name} with {' and '.join(param_names)}"
+
+    return f"Execute the {tool.name} tool"
 
 
 @app.command()
@@ -2443,7 +2931,7 @@ def doctor():
     cfg = get_config()
 
     # Check MCP URL
-    mcp_url = cfg.mcp_url
+    mcp_url = cfg.get_mcp_url()
     if mcp_url and mcp_url != "http://localhost:5008/mcp/":
         console.print(f"[green]✓[/green] MCP URL configured: {mcp_url}")
     else:

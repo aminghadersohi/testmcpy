@@ -10,7 +10,8 @@ import {
   Server,
   Cpu,
   CheckCircle2,
-  ChevronRight
+  ChevronRight,
+  Shield
 } from 'lucide-react'
 
 import MCPExplorer from './pages/MCPExplorer'
@@ -18,6 +19,7 @@ import ChatInterface from './pages/ChatInterface'
 import TestManager from './pages/TestManager'
 import Configuration from './pages/Configuration'
 import MCPProfiles from './pages/MCPProfiles'
+import AuthDebugger from './pages/AuthDebugger'
 
 function AppContent() {
   const [sidebarOpen, setSidebarOpen] = useState(true)
@@ -25,13 +27,58 @@ function AppContent() {
   const [selectedProfiles, setSelectedProfiles] = useState([])
   const [profiles, setProfiles] = useState([])
   const [showProfilesModal, setShowProfilesModal] = useState(false)
+  const [llmProfiles, setLlmProfiles] = useState([])
+  const [selectedLlmProfile, setSelectedLlmProfile] = useState(null)
+  const [showLlmProfilesModal, setShowLlmProfilesModal] = useState(false)
+  const [apiReady, setApiReady] = useState(false)
+  const [healthCheckAttempts, setHealthCheckAttempts] = useState(0)
   const navigate = useNavigate()
   const location = useLocation()
 
   useEffect(() => {
-    loadConfig()
-    loadProfiles()
+    checkApiHealth()
   }, [])
+
+  useEffect(() => {
+    if (apiReady) {
+      loadConfig()
+      loadProfiles()
+      loadLlmProfiles()
+    }
+  }, [apiReady])
+
+  const checkApiHealth = async () => {
+    const maxAttempts = 5
+    const delay = 1000
+
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      try {
+        setHealthCheckAttempts(attempt + 1)
+        const res = await fetch('/api/health', {
+          method: 'GET',
+          cache: 'no-cache'
+        })
+
+        if (res.ok) {
+          const data = await res.json()
+          console.log('API health check passed:', data)
+          setApiReady(true)
+          return
+        }
+      } catch (error) {
+        console.log(`Health check attempt ${attempt + 1}/${maxAttempts} failed:`, error.message)
+      }
+
+      if (attempt < maxAttempts - 1) {
+        const waitTime = delay * Math.pow(2, attempt)
+        console.log(`Waiting ${waitTime}ms before retry...`)
+        await new Promise(resolve => setTimeout(resolve, waitTime))
+      }
+    }
+
+    console.error('API health check failed after all attempts')
+    setApiReady(true)
+  }
 
   const loadConfig = async () => {
     try {
@@ -83,6 +130,45 @@ function AppContent() {
     }
   }
 
+  const loadLlmProfiles = async () => {
+    try {
+      const res = await fetch('/api/llm/profiles')
+      const data = await res.json()
+      console.log('Loaded LLM profiles:', data.profiles)
+      setLlmProfiles(data.profiles || [])
+
+      // Check localStorage for saved LLM profile selection
+      const savedLlmProfile = localStorage.getItem('selectedLLMProfile')
+
+      if (savedLlmProfile) {
+        setSelectedLlmProfile(savedLlmProfile)
+      } else if (data.default) {
+        // Use default from API
+        setSelectedLlmProfile(data.default)
+        localStorage.setItem('selectedLLMProfile', data.default)
+      }
+    } catch (error) {
+      console.error('Failed to load LLM profiles:', error)
+    }
+  }
+
+  const getSelectedLLMDisplay = () => {
+    if (!selectedLlmProfile) {
+      return { name: 'No LLM Selected', model: 'Click to configure' }
+    }
+
+    const profile = llmProfiles.find(p => p.profile_id === selectedLlmProfile)
+    if (!profile) {
+      return { name: 'Loading...', model: '' }
+    }
+
+    const defaultProvider = profile.providers?.find(p => p.default) || profile.providers?.[0]
+    return {
+      name: profile.name,
+      model: defaultProvider?.model || 'No model'
+    }
+  }
+
   const getSelectedMCPDisplay = () => {
     if (selectedProfiles.length === 0) {
       return { profile: 'No MCP Selected', server: 'Click to configure' }
@@ -124,9 +210,26 @@ function AppContent() {
   const navItems = [
     { path: '/', label: 'Explorer', icon: Package },
     { path: '/tests', label: 'Tests', icon: FileText },
-    { path: '/chat', label: 'Chat', icon: MessageSquare },
+    { path: '/chat', label: 'Interact', icon: MessageSquare },
+    { path: '/auth-debugger', label: 'Auth Debug', icon: Shield },
     { path: '/config', label: 'Config', icon: Settings },
   ]
+
+  if (!apiReady) {
+    return (
+      <div className="flex h-screen bg-background text-text-primary items-center justify-center">
+        <div className="flex flex-col items-center gap-4">
+          <div className="w-12 h-12 border-4 border-primary border-t-transparent rounded-full animate-spin"></div>
+          <div className="text-center">
+            <div className="text-lg font-semibold text-text-primary">Connecting to API</div>
+            <div className="text-sm text-text-secondary mt-1">
+              Attempt {healthCheckAttempts} of 5...
+            </div>
+          </div>
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div className="flex h-screen bg-background text-text-primary">
@@ -190,8 +293,9 @@ function AppContent() {
             })}
           </nav>
 
-          {/* MCP Selector Widget */}
-          <div className="px-3 py-3 border-t border-border">
+          {/* Profile Selectors */}
+          <div className="px-3 py-3 border-t border-border space-y-2">
+            {/* MCP Selector Widget */}
             <button
               onClick={() => setShowProfilesModal(true)}
               className="w-full flex items-center gap-2 px-3 py-2 rounded-lg transition-all duration-200 bg-surface-elevated border border-border hover:bg-surface-hover"
@@ -204,6 +308,25 @@ function AppContent() {
                   </div>
                   <div className="text-[10px] text-text-tertiary truncate">
                     {getSelectedMCPDisplay().server}
+                  </div>
+                </div>
+              )}
+              {sidebarOpen && <ChevronRight size={14} className="text-text-tertiary flex-shrink-0" />}
+            </button>
+
+            {/* LLM Profile Selector Widget */}
+            <button
+              onClick={() => setShowLlmProfilesModal(true)}
+              className="w-full flex items-center gap-2 px-3 py-2 rounded-lg transition-all duration-200 bg-surface-elevated border border-border hover:bg-surface-hover"
+            >
+              <Cpu size={16} className="text-success flex-shrink-0" />
+              {sidebarOpen && (
+                <div className="flex-1 min-w-0 text-left">
+                  <div className="text-xs font-semibold text-text-primary truncate">
+                    {getSelectedLLMDisplay().name}
+                  </div>
+                  <div className="text-[10px] text-text-tertiary truncate">
+                    {getSelectedLLMDisplay().model}
                   </div>
                 </div>
               )}
@@ -253,8 +376,9 @@ function AppContent() {
         <main className="flex-1 overflow-auto">
           <Routes>
             <Route path="/" element={<MCPExplorer selectedProfiles={selectedProfiles} />} />
-            <Route path="/chat" element={<ChatInterface selectedProfiles={selectedProfiles} />} />
+            <Route path="/chat" element={<ChatInterface selectedProfiles={selectedProfiles} selectedLlmProfile={selectedLlmProfile} llmProfiles={llmProfiles} />} />
             <Route path="/tests" element={<TestManager selectedProfiles={selectedProfiles} />} />
+            <Route path="/auth-debugger" element={<AuthDebugger />} />
             <Route path="/config" element={<Configuration />} />
           </Routes>
         </main>
@@ -290,6 +414,107 @@ function AppContent() {
                   }}
                   hideHeader={true}
                 />
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* LLM Profiles Modal Overlay */}
+        {showLlmProfilesModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
+            <div className="w-full max-w-2xl m-4 bg-surface-elevated rounded-xl shadow-2xl border border-border overflow-hidden flex flex-col max-h-[80vh]">
+              {/* Modal Header */}
+              <div className="flex items-center justify-between p-4 border-b border-border bg-surface-elevated">
+                <div>
+                  <h2 className="text-xl font-bold text-text-primary">LLM Provider Selection</h2>
+                  <p className="text-sm text-text-secondary mt-1">Select your LLM provider for interactive sessions and testing</p>
+                </div>
+                <button
+                  onClick={() => setShowLlmProfilesModal(false)}
+                  className="p-2 hover:bg-surface-hover rounded-lg transition-colors text-text-secondary hover:text-text-primary"
+                >
+                  <X size={20} />
+                </button>
+              </div>
+
+              {/* Modal Content */}
+              <div className="flex-1 overflow-auto p-4">
+                {llmProfiles.length === 0 ? (
+                  <div className="text-center py-8">
+                    <Cpu size={48} className="mx-auto text-text-disabled mb-4" />
+                    <p className="text-text-secondary">No LLM profiles configured</p>
+                    <p className="text-sm text-text-tertiary mt-2">
+                      Create a <code className="bg-surface px-2 py-1 rounded">.llm_providers.yaml</code> file to configure LLM providers
+                    </p>
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    {llmProfiles.map((profile) => {
+                      const isSelected = profile.profile_id === selectedLlmProfile
+                      const defaultProvider = profile.providers?.find(p => p.default) || profile.providers?.[0]
+
+                      return (
+                        <button
+                          key={profile.profile_id}
+                          onClick={async () => {
+                            setSelectedLlmProfile(profile.profile_id)
+                            localStorage.setItem('selectedLLMProfile', profile.profile_id)
+
+                            // Set as default in backend
+                            try {
+                              await fetch(`/api/llm/profiles/default/${profile.profile_id}`, {
+                                method: 'PUT',
+                              })
+                            } catch (err) {
+                              console.error('Failed to set default LLM profile:', err)
+                            }
+
+                            setShowLlmProfilesModal(false)
+                          }}
+                          className={`w-full p-4 rounded-lg border-2 transition-all text-left ${
+                            isSelected
+                              ? 'border-success bg-success/10'
+                              : 'border-border bg-surface hover:bg-surface-hover'
+                          }`}
+                        >
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="flex-1 min-w-0">
+                              <div className="flex items-center gap-2 mb-1">
+                                <div className="font-semibold text-text-primary">{profile.name}</div>
+                                {isSelected && (
+                                  <CheckCircle2 size={18} className="text-success flex-shrink-0" />
+                                )}
+                              </div>
+                              {profile.description && (
+                                <div className="text-sm text-text-secondary mb-2">{profile.description}</div>
+                              )}
+                              {defaultProvider && (
+                                <div className="flex items-center gap-2 text-sm">
+                                  <span className="px-2 py-0.5 rounded bg-surface-elevated border border-border text-text-secondary">
+                                    {defaultProvider.provider}
+                                  </span>
+                                  <span className="text-text-tertiary">{defaultProvider.model}</span>
+                                </div>
+                              )}
+                              {profile.providers && profile.providers.length > 1 && (
+                                <div className="text-xs text-text-tertiary mt-2">
+                                  +{profile.providers.length - 1} more provider{profile.providers.length > 2 ? 's' : ''}
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        </button>
+                      )
+                    })}
+                  </div>
+                )}
+              </div>
+
+              {/* Modal Footer */}
+              <div className="p-4 border-t border-border bg-surface">
+                <p className="text-xs text-text-tertiary">
+                  Selected profile will be used for interactive sessions and test execution
+                </p>
               </div>
             </div>
           </div>

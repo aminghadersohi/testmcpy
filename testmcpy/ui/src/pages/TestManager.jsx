@@ -27,19 +27,24 @@ function TestManager({ selectedProfiles = [] }) {
   const [showNewFileDialog, setShowNewFileDialog] = useState(false)
   const [testResults, setTestResults] = useState(null)
   const [running, setRunning] = useState(false)
-  const [models, setModels] = useState({})
-  const [selectedProvider, setSelectedProvider] = useState('anthropic')
-  const [selectedModel, setSelectedModel] = useState('claude-haiku-4-5')
   const [runningTests, setRunningTests] = useState({
     current: null,
     total: 0,
     completed: 0,
     status: 'idle'
   })
+  const [testProfiles, setTestProfiles] = useState([])
+  const [selectedTestProfile, setSelectedTestProfile] = useState(null)
+  const [mcpProfiles, setMcpProfiles] = useState([])
+  const [selectedMcpProfile, setSelectedMcpProfile] = useState(null)
+  const [llmProfiles, setLlmProfiles] = useState([])
+  const [selectedLlmProfile, setSelectedLlmProfile] = useState(null)
 
   useEffect(() => {
     loadTestFiles()
-    loadModels()
+    loadTestProfiles()
+    loadMcpProfiles()
+    loadLlmProfiles()
   }, [])
 
   // Load previously selected test file after test data is loaded
@@ -52,13 +57,91 @@ function TestManager({ selectedProfiles = [] }) {
     }
   }, [testData])
 
-  const loadModels = async () => {
+  const loadTestProfiles = async () => {
     try {
-      const res = await fetch('/api/models')
+      const res = await fetch('/api/test/profiles')
       const data = await res.json()
-      setModels(data)
+      setTestProfiles(data.profiles || [])
+
+      // Check localStorage for saved test profile
+      const savedProfile = localStorage.getItem('selectedTestProfile')
+      if (savedProfile) {
+        setSelectedTestProfile(savedProfile)
+      } else if (data.default) {
+        setSelectedTestProfile(data.default)
+        localStorage.setItem('selectedTestProfile', data.default)
+      }
     } catch (error) {
-      console.error('Failed to load models:', error)
+      console.error('Failed to load test profiles:', error)
+    }
+  }
+
+  const handleTestProfileChange = (profileId) => {
+    setSelectedTestProfile(profileId)
+    localStorage.setItem('selectedTestProfile', profileId)
+  }
+
+  const loadMcpProfiles = async () => {
+    try {
+      const res = await fetch('/api/mcp/profiles')
+      const data = await res.json()
+      setMcpProfiles(data.profiles || [])
+
+      // Check localStorage for saved MCP profile
+      const savedProfile = localStorage.getItem('selectedMCPProfileForTests')
+      if (savedProfile) {
+        setSelectedMcpProfile(savedProfile)
+      } else if (data.default_selection) {
+        setSelectedMcpProfile(data.default_selection)
+        localStorage.setItem('selectedMCPProfileForTests', data.default_selection)
+      }
+    } catch (error) {
+      console.error('Failed to load MCP profiles:', error)
+    }
+  }
+
+  const loadLlmProfiles = async () => {
+    try {
+      const res = await fetch('/api/llm/profiles')
+      const data = await res.json()
+      setLlmProfiles(data.profiles || [])
+
+      // Check localStorage for saved LLM profile
+      const savedProfile = localStorage.getItem('selectedLLMProfileForTests')
+      if (savedProfile) {
+        setSelectedLlmProfile(savedProfile)
+      } else if (data.default) {
+        setSelectedLlmProfile(data.default)
+        localStorage.setItem('selectedLLMProfileForTests', data.default)
+      }
+    } catch (error) {
+      console.error('Failed to load LLM profiles:', error)
+    }
+  }
+
+  const handleMcpProfileChange = (profileSelection) => {
+    setSelectedMcpProfile(profileSelection)
+    localStorage.setItem('selectedMCPProfileForTests', profileSelection)
+  }
+
+  const handleLlmProfileChange = (profileId) => {
+    setSelectedLlmProfile(profileId)
+    localStorage.setItem('selectedLLMProfileForTests', profileId)
+  }
+
+  // Get model and provider from selected LLM profile
+  const getLlmConfig = () => {
+    if (!selectedLlmProfile || llmProfiles.length === 0) {
+      return { model: 'claude-sonnet-4-5', provider: 'anthropic' }
+    }
+    const profile = llmProfiles.find(p => p.profile_id === selectedLlmProfile)
+    if (!profile || !profile.providers || profile.providers.length === 0) {
+      return { model: 'claude-sonnet-4-5', provider: 'anthropic' }
+    }
+    const defaultProvider = profile.providers.find(p => p.default) || profile.providers[0]
+    return {
+      model: defaultProvider.model || 'claude-sonnet-4-5',
+      provider: defaultProvider.provider || 'anthropic'
     }
   }
 
@@ -193,13 +276,14 @@ tests:
     })
 
     try {
+      const llmConfig = getLlmConfig()
       const res = await fetch('/api/tests/run', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           test_path: selectedFile.path,
-          model: selectedModel,
-          provider: selectedProvider,
+          model: llmConfig.model,
+          provider: llmConfig.provider,
         }),
       })
 
@@ -236,20 +320,89 @@ tests:
   }
 
   return (
-    <div className="h-full flex">
-      {/* File List */}
-      <div className="w-80 border-r border-border flex flex-col bg-surface-elevated">
-        <div className="p-4 border-b border-border">
-          <div className="flex items-center justify-between mb-4">
-            <h2 className="text-lg font-semibold text-text-primary">Test Files</h2>
-            <button
-              onClick={() => setShowNewFileDialog(true)}
-              className="p-2 hover:bg-surface-hover rounded-lg transition-all duration-200 text-text-secondary hover:text-text-primary"
-              title="Create new test file"
+    <div className="h-full flex flex-col">
+      {/* Profile Selectors */}
+      <div className="px-6 py-3 border-b border-border bg-surface-elevated">
+        <div className="grid grid-cols-3 gap-4">
+          {/* MCP Profile Selector */}
+          <div className="flex flex-col gap-1">
+            <label className="text-xs font-medium text-text-tertiary uppercase tracking-wide">
+              MCP Profile
+            </label>
+            <select
+              value={selectedMcpProfile || ''}
+              onChange={(e) => handleMcpProfileChange(e.target.value)}
+              className="input text-sm"
             >
-              <Plus size={20} />
-            </button>
+              {!selectedMcpProfile && <option value="">Select MCP...</option>}
+              {mcpProfiles.map(profile => (
+                <option key={profile.id} value={profile.id}>
+                  {profile.name} ({profile.mcps.length} server{profile.mcps.length !== 1 ? 's' : ''})
+                </option>
+              ))}
+            </select>
           </div>
+
+          {/* LLM Profile Selector */}
+          <div className="flex flex-col gap-1">
+            <label className="text-xs font-medium text-text-tertiary uppercase tracking-wide">
+              LLM Profile
+            </label>
+            <select
+              value={selectedLlmProfile || ''}
+              onChange={(e) => handleLlmProfileChange(e.target.value)}
+              className="input text-sm"
+            >
+              {!selectedLlmProfile && <option value="">Select LLM...</option>}
+              {llmProfiles.map(profile => {
+                const defaultProvider = profile.providers?.find(p => p.default) || profile.providers?.[0]
+                return (
+                  <option key={profile.profile_id} value={profile.profile_id}>
+                    {profile.name} {defaultProvider ? `(${defaultProvider.model})` : ''}
+                  </option>
+                )
+              })}
+            </select>
+          </div>
+
+          {/* Test Profile Selector */}
+          <div className="flex flex-col gap-1">
+            <label className="text-xs font-medium text-text-tertiary uppercase tracking-wide">
+              Test Config
+            </label>
+            <select
+              value={selectedTestProfile || ''}
+              onChange={(e) => handleTestProfileChange(e.target.value)}
+              className="input text-sm"
+            >
+              {!selectedTestProfile && <option value="">Select config...</option>}
+              {testProfiles.map(profile => {
+                const defaultConfig = profile.test_configs?.find(c => c.default) || profile.test_configs?.[0]
+                return (
+                  <option key={profile.profile_id} value={profile.profile_id}>
+                    {profile.name} {defaultConfig ? `(${defaultConfig.tests_dir})` : ''}
+                  </option>
+                )
+              })}
+            </select>
+          </div>
+        </div>
+      </div>
+
+      <div className="flex-1 flex">
+        {/* File List */}
+        <div className="w-80 border-r border-border flex flex-col bg-surface-elevated">
+          <div className="p-4 border-b border-border">
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-lg font-semibold text-text-primary">Test Files</h2>
+              <button
+                onClick={() => setShowNewFileDialog(true)}
+                className="p-2 hover:bg-surface-hover rounded-lg transition-all duration-200 text-text-secondary hover:text-text-primary"
+                title="Create new test file"
+              >
+                <Plus size={20} />
+              </button>
+            </div>
 
           {showNewFileDialog && (
             <div className="space-y-3 p-4 bg-surface rounded-lg border border-border animate-fade-in">
@@ -440,42 +593,19 @@ tests:
               </div>
 
               <div className="flex items-center gap-3 mt-3">
-                <select
-                  value={selectedProvider}
-                  onChange={(e) => {
-                    setSelectedProvider(e.target.value)
-                    const providerModels = models[e.target.value]
-                    if (providerModels && providerModels.length > 0) {
-                      setSelectedModel(providerModels[0].id)
-                    }
-                  }}
-                  className="input text-sm min-w-[120px]"
-                >
-                  {Object.keys(models).map((provider) => (
-                    <option key={provider} value={provider}>
-                      {provider}
-                    </option>
-                  ))}
-                </select>
-                <select
-                  value={selectedModel}
-                  onChange={(e) => setSelectedModel(e.target.value)}
-                  className="input text-sm min-w-[160px]"
-                >
-                  {(models[selectedProvider] || []).map((model) => (
-                    <option key={model.id} value={model.id}>
-                      {model.name}
-                    </option>
-                  ))}
-                </select>
                 <button
                   onClick={runTests}
-                  disabled={running}
+                  disabled={running || !selectedFile}
                   className="btn btn-primary"
                 >
                   <Play size={16} />
                   <span>{running ? 'Running...' : 'Run Tests'}</span>
                 </button>
+                {selectedLlmProfile && llmProfiles.length > 0 && (
+                  <div className="text-xs text-text-tertiary">
+                    Using: {llmProfiles.find(p => p.profile_id === selectedLlmProfile)?.name || 'Default'} profile
+                  </div>
+                )}
               </div>
             </div>
 
@@ -581,6 +711,7 @@ tests:
             </div>
           </div>
         )}
+        </div>
       </div>
     </div>
   )

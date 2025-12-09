@@ -143,6 +143,7 @@ function MCPEditorModal({ mcp, onSave, onCancel }) {
     name: mcp?.name || '',
     mcp_url: mcp?.mcp_url || '',
     auth_type: mcp?.auth?.type || 'none',
+    oauth_auto_discover: mcp?.auth?.type === 'oauth' && !mcp?.auth?.client_id,
     token: mcp?.auth?.token || '',
     api_url: mcp?.auth?.api_url || '',
     api_token: mcp?.auth?.api_token || '',
@@ -153,6 +154,7 @@ function MCPEditorModal({ mcp, onSave, onCancel }) {
     scopes: mcp?.auth?.scopes?.join(', ') || '',
     timeout: mcp?.timeout || 30,
     rate_limit_rpm: mcp?.rate_limit_rpm || 60,
+    insecure: mcp?.auth?.insecure || false,
   })
   const [errors, setErrors] = useState({})
 
@@ -177,7 +179,7 @@ function MCPEditorModal({ mcp, onSave, onCancel }) {
       if (!formData.api_token) newErrors.api_token = 'API Token is required for JWT'
       if (!formData.api_secret) newErrors.api_secret = 'API Secret is required for JWT'
     }
-    if (formData.auth_type === 'oauth') {
+    if (formData.auth_type === 'oauth' && !formData.oauth_auto_discover) {
       if (!formData.client_id) newErrors.client_id = 'Client ID is required for OAuth'
       if (!formData.client_secret) newErrors.client_secret = 'Client Secret is required for OAuth'
       if (!formData.token_url) newErrors.token_url = 'Token URL is required for OAuth'
@@ -318,49 +320,69 @@ function MCPEditorModal({ mcp, onSave, onCancel }) {
             {/* Auth Fields - OAuth */}
             {formData.auth_type === 'oauth' && (
               <>
-                <div>
-                  <label className="block text-sm font-medium mb-1">Client ID</label>
+                <div className="flex items-center gap-2 p-3 bg-surface rounded-lg border border-border">
                   <input
-                    type="text"
-                    value={formData.client_id}
-                    onChange={(e) => updateField('client_id', e.target.value)}
-                    className="input w-full font-mono text-sm"
-                    placeholder="Enter client ID or ${ENV_VAR_NAME}"
+                    type="checkbox"
+                    id="oauth_auto_discover"
+                    checked={formData.oauth_auto_discover}
+                    onChange={(e) => updateField('oauth_auto_discover', e.target.checked)}
+                    className="w-4 h-4"
                   />
-                  {errors.client_id && <p className="text-error text-xs mt-1">{errors.client_id}</p>}
+                  <label htmlFor="oauth_auto_discover" className="text-sm">
+                    <span className="font-medium">Auto-discover OAuth configuration</span>
+                    <p className="text-text-tertiary text-xs mt-0.5">
+                      Use RFC 8414 well-known endpoint to discover OAuth settings from the MCP server
+                    </p>
+                  </label>
                 </div>
-                <div>
-                  <label className="block text-sm font-medium mb-1">Client Secret</label>
-                  <input
-                    type="password"
-                    value={formData.client_secret}
-                    onChange={(e) => updateField('client_secret', e.target.value)}
-                    className="input w-full font-mono text-sm"
-                    placeholder="Enter secret or ${ENV_VAR_NAME}"
-                  />
-                  {errors.client_secret && <p className="text-error text-xs mt-1">{errors.client_secret}</p>}
-                </div>
-                <div>
-                  <label className="block text-sm font-medium mb-1">Token URL</label>
-                  <input
-                    type="text"
-                    value={formData.token_url}
-                    onChange={(e) => updateField('token_url', e.target.value)}
-                    className="input w-full font-mono text-sm"
-                    placeholder="https://api.example.com/oauth/token"
-                  />
-                  {errors.token_url && <p className="text-error text-xs mt-1">{errors.token_url}</p>}
-                </div>
-                <div>
-                  <label className="block text-sm font-medium mb-1">Scopes (comma-separated)</label>
-                  <input
-                    type="text"
-                    value={formData.scopes}
-                    onChange={(e) => updateField('scopes', e.target.value)}
-                    className="input w-full font-mono text-sm"
-                    placeholder="read, write, admin"
-                  />
-                </div>
+
+                {!formData.oauth_auto_discover && (
+                  <>
+                    <div>
+                      <label className="block text-sm font-medium mb-1">Client ID</label>
+                      <input
+                        type="text"
+                        value={formData.client_id}
+                        onChange={(e) => updateField('client_id', e.target.value)}
+                        className="input w-full font-mono text-sm"
+                        placeholder="Enter client ID or ${ENV_VAR_NAME}"
+                      />
+                      {errors.client_id && <p className="text-error text-xs mt-1">{errors.client_id}</p>}
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium mb-1">Client Secret</label>
+                      <input
+                        type="password"
+                        value={formData.client_secret}
+                        onChange={(e) => updateField('client_secret', e.target.value)}
+                        className="input w-full font-mono text-sm"
+                        placeholder="Enter secret or ${ENV_VAR_NAME}"
+                      />
+                      {errors.client_secret && <p className="text-error text-xs mt-1">{errors.client_secret}</p>}
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium mb-1">Token URL</label>
+                      <input
+                        type="text"
+                        value={formData.token_url}
+                        onChange={(e) => updateField('token_url', e.target.value)}
+                        className="input w-full font-mono text-sm"
+                        placeholder="https://api.example.com/oauth/token"
+                      />
+                      {errors.token_url && <p className="text-error text-xs mt-1">{errors.token_url}</p>}
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium mb-1">Scopes (comma-separated)</label>
+                      <input
+                        type="text"
+                        value={formData.scopes}
+                        onChange={(e) => updateField('scopes', e.target.value)}
+                        className="input w-full font-mono text-sm"
+                        placeholder="read, write, admin"
+                      />
+                    </div>
+                  </>
+                )}
               </>
             )}
 
@@ -388,6 +410,21 @@ function MCPEditorModal({ mcp, onSave, onCancel }) {
                   max="1000"
                 />
               </div>
+            </div>
+
+            {/* SSL Options */}
+            <div className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                id="insecure"
+                checked={formData.insecure}
+                onChange={(e) => updateField('insecure', e.target.checked)}
+                className="w-4 h-4"
+              />
+              <label htmlFor="insecure" className="text-sm">
+                <span className="font-medium">Skip SSL verification</span>
+                <span className="text-text-tertiary ml-1">(for self-signed certificates)</span>
+              </label>
             </div>
           </div>
 
@@ -661,13 +698,37 @@ function MCPProfiles({ selectedProfiles = [], onSelectProfiles, hideHeader = fal
     }
   }
 
+  // Helper to transform flat form data to API format
+  const formatMCPDataForAPI = (mcpData) => {
+    return {
+      name: mcpData.name,
+      mcp_url: mcpData.mcp_url,
+      auth: {
+        type: mcpData.auth_type,
+        token: mcpData.token || null,
+        api_url: mcpData.api_url || null,
+        api_token: mcpData.api_token || null,
+        api_secret: mcpData.api_secret || null,
+        client_id: mcpData.client_id || null,
+        client_secret: mcpData.client_secret || null,
+        token_url: mcpData.token_url || null,
+        scopes: mcpData.scopes || null,
+        oauth_auto_discover: mcpData.oauth_auto_discover || false,
+        insecure: mcpData.insecure || false,
+      },
+      timeout: mcpData.timeout,
+      rate_limit_rpm: mcpData.rate_limit_rpm,
+    }
+  }
+
   // MCP operations
   const handleAddMCP = async (profileId, mcpData) => {
     try {
+      const formattedData = formatMCPDataForAPI(mcpData)
       const res = await fetch(`/api/mcp/profiles/${profileId}/mcps`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(mcpData)
+        body: JSON.stringify(formattedData)
       })
       const data = await res.json()
 
@@ -676,7 +737,7 @@ function MCPProfiles({ selectedProfiles = [], onSelectProfiles, hideHeader = fal
         setMCPEditor(null)
         showToast('MCP added successfully')
       } else {
-        showToast('Failed to add MCP', 'error')
+        showToast(data.detail || 'Failed to add MCP', 'error')
       }
     } catch (error) {
       console.error('Failed to add MCP:', error)
@@ -686,10 +747,11 @@ function MCPProfiles({ selectedProfiles = [], onSelectProfiles, hideHeader = fal
 
   const handleUpdateMCP = async (profileId, mcpIndex, mcpData) => {
     try {
+      const formattedData = formatMCPDataForAPI(mcpData)
       const res = await fetch(`/api/mcp/profiles/${profileId}/mcps/${mcpIndex}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(mcpData)
+        body: JSON.stringify(formattedData)
       })
       const data = await res.json()
 
@@ -698,7 +760,7 @@ function MCPProfiles({ selectedProfiles = [], onSelectProfiles, hideHeader = fal
         setMCPEditor(null)
         showToast('MCP updated successfully')
       } else {
-        showToast('Failed to update MCP', 'error')
+        showToast(data.detail || 'Failed to update MCP', 'error')
       }
     } catch (error) {
       console.error('Failed to update MCP:', error)

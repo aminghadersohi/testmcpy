@@ -66,6 +66,8 @@ class AuthConfig(BaseModel):
     client_secret: str | None = None
     token_url: str | None = None
     scopes: list[str] | None = None
+    insecure: bool = False  # Skip SSL verification
+    oauth_auto_discover: bool = False  # Use RFC 8414 auto-discovery for OAuth
 
 
 class ChatRequest(BaseModel):
@@ -213,6 +215,7 @@ class DebugAuthRequest(BaseModel):
     client_secret: str | None = None
     token_url: str | None = None
     scopes: list[str] | None = None
+    oauth_auto_discover: bool = False  # Use RFC 8414 auto-discovery for OAuth
     # JWT fields
     api_url: str | None = None
     api_token: str | None = None
@@ -989,6 +992,8 @@ async def get_profile_auth(profile_id: str):
             "client_secret": auth.client_secret,
             "scopes": auth.scopes,
             "token": auth.token,
+            "oauth_auto_discover": auth.oauth_auto_discover,
+            "insecure": auth.insecure,
         }
     except HTTPException:
         raise
@@ -1215,6 +1220,10 @@ async def add_mcp_to_profile(profile_id: str, request: MCPCreateRequest):
             auth_config["token_url"] = request.auth.token_url
         if request.auth.scopes:
             auth_config["scopes"] = request.auth.scopes
+        if request.auth.oauth_auto_discover:
+            auth_config["oauth_auto_discover"] = request.auth.oauth_auto_discover
+        if request.auth.insecure:
+            auth_config["insecure"] = request.auth.insecure
 
         # Create new MCP
         new_mcp = {"name": request.name, "mcp_url": request.mcp_url, "auth": auth_config}
@@ -1340,6 +1349,10 @@ async def update_mcp_in_profile(profile_id: str, mcp_index: int, request: MCPUpd
                 auth_config["token_url"] = request.auth.token_url
             if request.auth.scopes:
                 auth_config["scopes"] = request.auth.scopes
+            if request.auth.oauth_auto_discover:
+                auth_config["oauth_auto_discover"] = request.auth.oauth_auto_discover
+            if request.auth.insecure:
+                auth_config["insecure"] = request.auth.insecure
 
             mcp["auth"] = auth_config
 
@@ -1500,6 +1513,8 @@ async def test_mcp_connection(profile_id: str, mcp_index: int):
                     "client_secret": auth_data.get("client_secret"),
                     "token_url": auth_data.get("token_url"),
                     "scopes": auth_data.get("scopes", []),
+                    "oauth_auto_discover": auth_data.get("oauth_auto_discover", False),
+                    "insecure": auth_data.get("insecure", False),
                 }
             elif auth_type == "none":
                 auth_dict = {"type": "none"}
@@ -3892,18 +3907,36 @@ async def debug_auth(request: DebugAuthRequest, record: bool = False, flow_name:
 
         try:
             if request.auth_type == "oauth":
-                if not all([request.client_id, request.client_secret, request.token_url]):
+                if request.oauth_auto_discover:
+                    # Use RFC 8414 auto-discovery
+                    if not request.mcp_url:
+                        raise HTTPException(
+                            status_code=400,
+                            detail="OAuth auto-discovery requires mcp_url",
+                        )
+                    from testmcpy.auth_debugger import debug_oauth_auto_discover_flow
+
+                    metadata = await debug_oauth_auto_discover_flow(
+                        mcp_url=request.mcp_url,
+                        debugger=debugger,
+                        insecure=request.insecure,
+                    )
+                    # Return metadata instead of token for auto-discovery
+                    # The actual token exchange requires client credentials
+                    token = None
+                elif not all([request.client_id, request.client_secret, request.token_url]):
                     raise HTTPException(
                         status_code=400,
-                        detail="OAuth requires client_id, client_secret, and token_url",
+                        detail="OAuth requires client_id, client_secret, and token_url (or enable oauth_auto_discover)",
                     )
-                token = await debug_oauth_flow(
-                    client_id=request.client_id,
-                    client_secret=request.client_secret,
-                    token_url=request.token_url,
-                    scopes=request.scopes,
-                    debugger=debugger,
-                )
+                else:
+                    token = await debug_oauth_flow(
+                        client_id=request.client_id,
+                        client_secret=request.client_secret,
+                        token_url=request.token_url,
+                        scopes=request.scopes,
+                        debugger=debugger,
+                    )
             elif request.auth_type == "jwt":
                 if not all([request.api_url, request.api_token, request.api_secret]):
                     raise HTTPException(

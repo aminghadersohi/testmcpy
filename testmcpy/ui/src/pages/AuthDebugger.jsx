@@ -476,6 +476,8 @@ function AuthDebugger() {
   const [clientSecret, setClientSecret] = useState('')
   const [tokenUrl, setTokenUrl] = useState('')
   const [scopes, setScopes] = useState('')
+  const [oauthAutoDiscover, setOauthAutoDiscover] = useState(false)
+  const [insecure, setInsecure] = useState(false)
 
   // Form fields for JWT
   const [apiUrl, setApiUrl] = useState('')
@@ -524,6 +526,8 @@ function AuthDebugger() {
         setClientSecret(auth.client_secret || '')
         setTokenUrl(auth.token_url || '')
         setScopes((auth.scopes || []).join(', '))
+        setOauthAutoDiscover(auth.oauth_auto_discover || false)
+        setInsecure(auth.insecure || false)
       } else if (type === 'jwt') {
         setApiUrl(auth.api_url || '')
         setApiToken(auth.api_token || '')
@@ -541,6 +545,8 @@ function AuthDebugger() {
     setClientSecret('')
     setTokenUrl('')
     setScopes('')
+    setOauthAutoDiscover(false)
+    setInsecure(false)
     setApiUrl('')
     setApiToken('')
     setApiSecret('')
@@ -575,7 +581,10 @@ function AuthDebugger() {
           client_id: clientId,
           client_secret: clientSecret,
           token_url: tokenUrl,
-          scopes: scopes ? scopes.split(',').map(s => s.trim()) : []
+          scopes: scopes ? scopes.split(',').map(s => s.trim()) : [],
+          oauth_auto_discover: oauthAutoDiscover,
+          insecure: insecure,
+          mcp_url: mcpUrl
         }
       } else if (authType === 'jwt') {
         requestBody = {
@@ -762,6 +771,10 @@ function AuthDebugger() {
 
   const canDebug = () => {
     if (authType === 'oauth') {
+      // Auto-discover mode only needs mcp_url
+      if (oauthAutoDiscover) {
+        return mcpUrl
+      }
       return clientId && clientSecret && tokenUrl
     } else if (authType === 'jwt') {
       return apiUrl && apiToken && apiSecret
@@ -857,53 +870,105 @@ function AuthDebugger() {
                 {/* OAuth Fields */}
                 {authType === 'oauth' && (
                   <div className="space-y-3 mt-4">
-                    <div>
-                      <label className="block text-sm font-medium text-text-secondary mb-1">
-                        Client ID
-                      </label>
+                    {/* Auto-discover checkbox */}
+                    <div className="flex items-center gap-2">
                       <input
-                        type="text"
-                        value={clientId}
-                        onChange={(e) => setClientId(e.target.value)}
-                        placeholder="your-client-id"
-                        className="w-full px-3 py-2 bg-surface border border-border rounded-lg text-text-primary placeholder-text-disabled focus:outline-none focus:ring-2 focus:ring-primary"
+                        type="checkbox"
+                        id="oauth-auto-discover"
+                        checked={oauthAutoDiscover}
+                        onChange={(e) => setOauthAutoDiscover(e.target.checked)}
+                        className="w-4 h-4 rounded border-border bg-surface text-primary focus:ring-primary"
                       />
+                      <label htmlFor="oauth-auto-discover" className="text-sm text-text-secondary">
+                        Use RFC 8414 Auto-Discovery
+                      </label>
                     </div>
-                    <div>
-                      <label className="block text-sm font-medium text-text-secondary mb-1">
-                        Client Secret
-                      </label>
+
+                    {/* MCP URL - shown when auto-discover is enabled */}
+                    {oauthAutoDiscover && (
+                      <div>
+                        <label className="block text-sm font-medium text-text-secondary mb-1">
+                          MCP URL
+                        </label>
+                        <input
+                          type="text"
+                          value={mcpUrl}
+                          onChange={(e) => setMcpUrl(e.target.value)}
+                          placeholder="https://localhost:5443/mcp"
+                          className="w-full px-3 py-2 bg-surface border border-border rounded-lg text-text-primary placeholder-text-disabled focus:outline-none focus:ring-2 focus:ring-primary"
+                        />
+                        <p className="text-xs text-text-tertiary mt-1">
+                          OAuth endpoints will be discovered from /.well-known/oauth-authorization-server
+                        </p>
+                      </div>
+                    )}
+
+                    {/* Manual OAuth fields - hidden when auto-discover is enabled */}
+                    {!oauthAutoDiscover && (
+                      <>
+                        <div>
+                          <label className="block text-sm font-medium text-text-secondary mb-1">
+                            Client ID
+                          </label>
+                          <input
+                            type="text"
+                            value={clientId}
+                            onChange={(e) => setClientId(e.target.value)}
+                            placeholder="your-client-id"
+                            className="w-full px-3 py-2 bg-surface border border-border rounded-lg text-text-primary placeholder-text-disabled focus:outline-none focus:ring-2 focus:ring-primary"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-sm font-medium text-text-secondary mb-1">
+                            Client Secret
+                          </label>
+                          <input
+                            type="text"
+                            value={clientSecret}
+                            onChange={(e) => setClientSecret(e.target.value)}
+                            placeholder="your-client-secret"
+                            className="w-full px-3 py-2 bg-surface border border-border rounded-lg text-text-primary placeholder-text-disabled focus:outline-none focus:ring-2 focus:ring-primary font-mono text-sm"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-sm font-medium text-text-secondary mb-1">
+                            Token URL
+                          </label>
+                          <input
+                            type="text"
+                            value={tokenUrl}
+                            onChange={(e) => setTokenUrl(e.target.value)}
+                            placeholder="https://auth.example.com/oauth/token"
+                            className="w-full px-3 py-2 bg-surface border border-border rounded-lg text-text-primary placeholder-text-disabled focus:outline-none focus:ring-2 focus:ring-primary"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-sm font-medium text-text-secondary mb-1">
+                            Scopes (comma-separated)
+                          </label>
+                          <input
+                            type="text"
+                            value={scopes}
+                            onChange={(e) => setScopes(e.target.value)}
+                            placeholder="read, write"
+                            className="w-full px-3 py-2 bg-surface border border-border rounded-lg text-text-primary placeholder-text-disabled focus:outline-none focus:ring-2 focus:ring-primary"
+                          />
+                        </div>
+                      </>
+                    )}
+
+                    {/* Insecure checkbox for self-signed certs */}
+                    <div className="flex items-center gap-2 pt-2 border-t border-border">
                       <input
-                        type="text"
-                        value={clientSecret}
-                        onChange={(e) => setClientSecret(e.target.value)}
-                        placeholder="your-client-secret"
-                        className="w-full px-3 py-2 bg-surface border border-border rounded-lg text-text-primary placeholder-text-disabled focus:outline-none focus:ring-2 focus:ring-primary font-mono text-sm"
+                        type="checkbox"
+                        id="oauth-insecure"
+                        checked={insecure}
+                        onChange={(e) => setInsecure(e.target.checked)}
+                        className="w-4 h-4 rounded border-border bg-surface text-primary focus:ring-primary"
                       />
-                    </div>
-                    <div>
-                      <label className="block text-sm font-medium text-text-secondary mb-1">
-                        Token URL
+                      <label htmlFor="oauth-insecure" className="text-sm text-text-secondary">
+                        Skip SSL verification (for self-signed certs)
                       </label>
-                      <input
-                        type="text"
-                        value={tokenUrl}
-                        onChange={(e) => setTokenUrl(e.target.value)}
-                        placeholder="https://auth.example.com/oauth/token"
-                        className="w-full px-3 py-2 bg-surface border border-border rounded-lg text-text-primary placeholder-text-disabled focus:outline-none focus:ring-2 focus:ring-primary"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-sm font-medium text-text-secondary mb-1">
-                        Scopes (comma-separated)
-                      </label>
-                      <input
-                        type="text"
-                        value={scopes}
-                        onChange={(e) => setScopes(e.target.value)}
-                        placeholder="read, write"
-                        className="w-full px-3 py-2 bg-surface border border-border rounded-lg text-text-primary placeholder-text-disabled focus:outline-none focus:ring-2 focus:ring-primary"
-                      />
                     </div>
                   </div>
                 )}
@@ -1281,29 +1346,62 @@ function AuthDebugger() {
                           )}
 
                           {isExpanded && (
-                            <div className="px-4 pb-4">
-                              <div className="bg-black/40 rounded-lg p-3 border border-white/10">
-                                <ReactJson
-                                  src={step.data}
-                                  theme="monokai"
-                                  collapsed={false}
-                                  displayDataTypes={false}
-                                  displayObjectSize={true}
-                                  enableClipboard={(copy) => {
-                                    // Copy raw value without quotes for strings
-                                    const value = copy.src
-                                    const textToCopy = typeof value === 'string' ? value : JSON.stringify(value, null, 2)
-                                    navigator.clipboard.writeText(textToCopy)
-                                  }}
-                                  name={false}
-                                  indentWidth={2}
-                                  iconStyle="triangle"
-                                  style={{
-                                    backgroundColor: 'transparent',
-                                    fontSize: '12px',
-                                    fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace'
-                                  }}
-                                />
+                            <div className="px-4 pb-4 space-y-3">
+                              {/* Raw Request */}
+                              {step.data.raw_request && (
+                                <div>
+                                  <div className="text-xs font-semibold text-text-secondary mb-1 flex items-center gap-2">
+                                    <ArrowRight size={12} className="text-blue-400" />
+                                    Raw Request
+                                  </div>
+                                  <pre className="bg-blue-950/50 rounded-lg p-3 border border-blue-500/30 text-xs font-mono text-blue-200 overflow-x-auto whitespace-pre-wrap">
+                                    {step.data.raw_request}
+                                  </pre>
+                                </div>
+                              )}
+
+                              {/* Raw Response */}
+                              {step.data.raw_response && (
+                                <div>
+                                  <div className="text-xs font-semibold text-text-secondary mb-1 flex items-center gap-2">
+                                    <ArrowRight size={12} className="text-green-400 rotate-180" />
+                                    Raw Response
+                                  </div>
+                                  <pre className="bg-green-950/50 rounded-lg p-3 border border-green-500/30 text-xs font-mono text-green-200 overflow-x-auto whitespace-pre-wrap max-h-64 overflow-y-auto">
+                                    {step.data.raw_response}
+                                  </pre>
+                                </div>
+                              )}
+
+                              {/* Parsed Data */}
+                              <div>
+                                <div className="text-xs font-semibold text-text-secondary mb-1">
+                                  Parsed Data
+                                </div>
+                                <div className="bg-black/40 rounded-lg p-3 border border-white/10">
+                                  <ReactJson
+                                    src={Object.fromEntries(
+                                      Object.entries(step.data).filter(([k]) => !['raw_request', 'raw_response'].includes(k))
+                                    )}
+                                    theme="monokai"
+                                    collapsed={false}
+                                    displayDataTypes={false}
+                                    displayObjectSize={true}
+                                    enableClipboard={(copy) => {
+                                      const value = copy.src
+                                      const textToCopy = typeof value === 'string' ? value : JSON.stringify(value, null, 2)
+                                      navigator.clipboard.writeText(textToCopy)
+                                    }}
+                                    name={false}
+                                    indentWidth={2}
+                                    iconStyle="triangle"
+                                    style={{
+                                      backgroundColor: 'transparent',
+                                      fontSize: '12px',
+                                      fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace'
+                                    }}
+                                  />
+                                </div>
                               </div>
                             </div>
                           )}

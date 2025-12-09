@@ -334,6 +334,223 @@ class AuthDebugger:
         return filepath
 
 
+async def discover_oauth_endpoints(
+    mcp_url: str,
+    debugger: AuthDebugger | None = None,
+    insecure: bool = False,
+) -> dict[str, Any]:
+    """Discover OAuth endpoints using RFC 8414 well-known endpoint.
+
+    Args:
+        mcp_url: The MCP service URL to discover OAuth config from
+        debugger: Optional AuthDebugger instance
+        insecure: Skip SSL certificate verification
+
+    Returns:
+        Dictionary with OAuth server metadata including token_endpoint, etc.
+
+    Raises:
+        Exception: If discovery fails
+    """
+    if debugger is None:
+        debugger = AuthDebugger(enabled=False)
+
+    # Parse the MCP URL to get the base URL
+    from urllib.parse import urlparse, urlunparse
+
+    parsed = urlparse(mcp_url)
+    base_url = urlunparse((parsed.scheme, parsed.netloc, "", "", "", ""))
+
+    # RFC 8414 well-known endpoint
+    well_known_url = f"{base_url}/.well-known/oauth-authorization-server"
+
+    debugger.log_step(
+        "1. OAuth Discovery Started",
+        {
+            "mcp_url": mcp_url,
+            "base_url": base_url,
+            "well_known_url": well_known_url,
+        },
+        step_type="request",
+    )
+
+    try:
+        async with httpx.AsyncClient(verify=not insecure) as client:
+            request_headers = {
+                "Accept": "application/json",
+                "User-Agent": "testmcpy/1.0",
+            }
+            debugger.log_step(
+                "2. Fetching OAuth Server Metadata",
+                {
+                    "url": well_known_url,
+                    "method": "GET",
+                    "headers": request_headers,
+                    "raw_request": f"GET {well_known_url} HTTP/1.1\nAccept: application/json\nUser-Agent: testmcpy/1.0",
+                },
+                step_type="request",
+            )
+
+            response = await client.get(well_known_url, headers=request_headers, timeout=10.0)
+
+            # Capture raw response
+            raw_response = f"HTTP/1.1 {response.status_code} {response.reason_phrase}\n"
+            for key, value in response.headers.items():
+                raw_response += f"{key}: {value}\n"
+            raw_response += f"\n{response.text[:2000]}"
+
+            debugger.log_step(
+                "3. Discovery Response Received",
+                {
+                    "status_code": response.status_code,
+                    "headers": dict(response.headers),
+                    "raw_response": raw_response,
+                    "response_body": response.text[:2000],
+                },
+                success=response.status_code == 200,
+                step_type="response",
+            )
+
+            if response.status_code != 200:
+                debugger.log_step(
+                    "3. Discovery Failed",
+                    {
+                        "error": f"HTTP {response.status_code}",
+                        "response_body": response.text[:500],
+                    },
+                    success=False,
+                    step_type="error",
+                )
+                raise Exception(
+                    f"OAuth discovery failed: HTTP {response.status_code} from {well_known_url}"
+                )
+
+            metadata = response.json()
+
+            debugger.log_step(
+                "4. OAuth Metadata Parsed",
+                {
+                    "issuer": metadata.get("issuer"),
+                    "token_endpoint": metadata.get("token_endpoint"),
+                    "authorization_endpoint": metadata.get("authorization_endpoint"),
+                    "registration_endpoint": metadata.get("registration_endpoint"),
+                    "scopes_supported": metadata.get("scopes_supported", []),
+                    "grant_types_supported": metadata.get("grant_types_supported", []),
+                    "response_types_supported": metadata.get("response_types_supported", []),
+                },
+                success=True,
+                step_type="extraction",
+            )
+
+            return metadata
+
+    except httpx.HTTPError as e:
+        error_data = {
+            "error": str(e),
+            "error_type": type(e).__name__,
+        }
+        if hasattr(e, "response") and e.response is not None:
+            error_data["status_code"] = e.response.status_code
+            error_data["response_body"] = e.response.text[:500]
+
+        debugger.log_step("ERROR: Discovery HTTP Request Failed", error_data, success=False)
+        raise Exception(f"OAuth discovery failed: {e}")
+    except json.JSONDecodeError as e:
+        debugger.log_step(
+            "ERROR: Invalid JSON in Discovery Response",
+            {"error": str(e)},
+            success=False,
+        )
+        raise Exception(f"OAuth discovery returned invalid JSON: {e}")
+    except Exception as e:
+        if "OAuth discovery failed" in str(e):
+            raise
+        debugger.log_step(
+            "ERROR: Unexpected Discovery Error",
+            {"error": str(e), "error_type": type(e).__name__},
+            success=False,
+        )
+        raise
+
+
+async def debug_oauth_auto_discover_flow(
+    mcp_url: str,
+    debugger: AuthDebugger | None = None,
+    insecure: bool = False,
+) -> dict[str, Any]:
+    """Debug OAuth flow using RFC 8414 auto-discovery.
+
+    This function discovers OAuth endpoints from the MCP server and returns
+    the metadata. It does NOT perform token exchange since dynamic client
+    registration would be needed.
+
+    Args:
+        mcp_url: The MCP service URL
+        debugger: Optional AuthDebugger instance
+        insecure: Skip SSL certificate verification
+
+    Returns:
+        Dictionary with discovered OAuth metadata
+
+    Raises:
+        Exception: If discovery fails
+    """
+    if debugger is None:
+        debugger = AuthDebugger(enabled=False)
+
+    # Discover OAuth endpoints
+    metadata = await discover_oauth_endpoints(mcp_url, debugger, insecure)
+
+    # Check for required endpoints
+    if not metadata.get("token_endpoint"):
+        debugger.log_step(
+            "5. Missing Token Endpoint",
+            {
+                "error": "OAuth metadata does not include token_endpoint",
+                "available_fields": list(metadata.keys()),
+            },
+            success=False,
+            step_type="validation",
+        )
+        raise Exception("OAuth discovery succeeded but no token_endpoint found")
+
+    # Check for registration endpoint (needed for dynamic client registration)
+    if metadata.get("registration_endpoint"):
+        debugger.log_step(
+            "5. Dynamic Client Registration Available",
+            {
+                "registration_endpoint": metadata["registration_endpoint"],
+                "note": "Server supports dynamic client registration (RFC 7591)",
+            },
+            success=True,
+            step_type="validation",
+        )
+    else:
+        debugger.log_step(
+            "5. No Dynamic Client Registration",
+            {
+                "note": "Server does not support dynamic client registration",
+                "action_required": "Manual client_id and client_secret required",
+            },
+            success=True,
+            step_type="validation",
+        )
+
+    debugger.log_step(
+        "6. OAuth Discovery Complete",
+        {
+            "token_endpoint": metadata.get("token_endpoint"),
+            "authorization_endpoint": metadata.get("authorization_endpoint"),
+            "scopes_supported": metadata.get("scopes_supported", []),
+            "grant_types_supported": metadata.get("grant_types_supported", []),
+        },
+        success=True,
+        step_type="validation",
+    )
+
+    return metadata
+
+
 async def debug_oauth_flow(
     client_id: str,
     client_secret: str,
@@ -366,7 +583,19 @@ async def debug_oauth_flow(
         "client_secret": client_secret,
         "scope": " ".join(scopes) if scopes else "",
     }
-    debugger.log_step("1. OAuth Request Prepared", request_data)
+
+    # Build raw request for display
+    request_body = f"grant_type=client_credentials&client_id={client_id}&client_secret=***&scope={' '.join(scopes) if scopes else ''}"
+    raw_request = f"POST {token_url} HTTP/1.1\nContent-Type: application/x-www-form-urlencoded\n\n{request_body}"
+
+    debugger.log_step(
+        "1. OAuth Request Prepared",
+        {
+            **request_data,
+            "raw_request": raw_request,
+        },
+        step_type="request",
+    )
 
     try:
         async with httpx.AsyncClient() as client:
@@ -375,8 +604,11 @@ async def debug_oauth_flow(
                 "2. Sending POST to Token Endpoint",
                 {
                     "url": token_url,
+                    "method": "POST",
                     "headers": {"Content-Type": "application/x-www-form-urlencoded"},
+                    "body": request_body,
                 },
+                step_type="request",
             )
 
             response = await client.post(
@@ -391,10 +623,22 @@ async def debug_oauth_flow(
                 timeout=10.0,
             )
 
+            # Capture raw response
+            raw_response = f"HTTP/1.1 {response.status_code} {response.reason_phrase}\n"
+            for key, value in response.headers.items():
+                raw_response += f"{key}: {value}\n"
+            raw_response += f"\n{response.text[:2000]}"
+
             # Step 3: Response received
             debugger.log_step(
                 "3. Response Received",
-                {"status_code": response.status_code, "headers": dict(response.headers)},
+                {
+                    "status_code": response.status_code,
+                    "headers": dict(response.headers),
+                    "raw_response": raw_response,
+                    "response_body": response.text[:2000],
+                },
+                step_type="response",
             )
 
             response.raise_for_status()
@@ -476,7 +720,19 @@ async def debug_jwt_flow(
         "name": api_token,
         "secret": api_secret,
     }
-    debugger.log_step("1. JWT Request Prepared", request_data)
+
+    # Build raw request for display (mask secret)
+    request_body_display = json.dumps({"name": api_token, "secret": "***"}, indent=2)
+    raw_request = f"POST {api_url} HTTP/1.1\nContent-Type: application/json\nAccept: application/json\n\n{request_body_display}"
+
+    debugger.log_step(
+        "1. JWT Request Prepared",
+        {
+            **request_data,
+            "raw_request": raw_request,
+        },
+        step_type="request",
+    )
 
     try:
         async with httpx.AsyncClient(verify=not insecure) as client:
@@ -485,8 +741,11 @@ async def debug_jwt_flow(
                 "2. Sending POST to JWT Endpoint",
                 {
                     "url": api_url,
+                    "method": "POST",
                     "headers": {"Content-Type": "application/json", "Accept": "application/json"},
+                    "body": request_body_display,
                 },
+                step_type="request",
             )
 
             response = await client.post(
@@ -496,10 +755,22 @@ async def debug_jwt_flow(
                 timeout=10.0,
             )
 
+            # Capture raw response
+            raw_response = f"HTTP/1.1 {response.status_code} {response.reason_phrase}\n"
+            for key, value in response.headers.items():
+                raw_response += f"{key}: {value}\n"
+            raw_response += f"\n{response.text[:2000]}"
+
             # Step 3: Response received
             debugger.log_step(
                 "3. Response Received",
-                {"status_code": response.status_code, "headers": dict(response.headers)},
+                {
+                    "status_code": response.status_code,
+                    "headers": dict(response.headers),
+                    "raw_response": raw_response,
+                    "response_body": response.text[:2000],
+                },
+                step_type="response",
             )
 
             response.raise_for_status()

@@ -32,6 +32,7 @@ class AuthConfig:
     client_secret: str | None = None
     token_url: str | None = None
     scopes: list[str] = field(default_factory=list)
+    oauth_auto_discover: bool = False  # Use RFC 8414 auto-discovery for OAuth
     # SSL options
     insecure: bool = False  # Disable SSL verification for self-signed certificates
 
@@ -53,6 +54,8 @@ class AuthConfig:
             if self.api_secret:
                 auth_dict["api_secret"] = self.api_secret
         elif self.auth_type == "oauth":
+            if self.oauth_auto_discover:
+                auth_dict["oauth_auto_discover"] = True
             if self.client_id:
                 auth_dict["client_id"] = self.client_id
             if self.client_secret:
@@ -215,6 +218,7 @@ class MCPProfileConfig:
             client_secret=auth_data.get("client_secret"),
             token_url=auth_data.get("token_url"),
             scopes=auth_data.get("scopes", []),
+            oauth_auto_discover=auth_data.get("oauth_auto_discover", False),
             # SSL options
             insecure=auth_data.get("insecure", False),
         )

@@ -252,6 +252,12 @@ class AuthFlowListItem(BaseModel):
     step_count: int
 
 
+class CostEstimateRequest(BaseModel):
+    model_id: str
+    input_tokens: int
+    output_tokens: int
+
+
 class AuthFlowCompareRequest(BaseModel):
     filepath1: str
     filepath2: str
@@ -1953,6 +1959,74 @@ async def set_default_llm_profile(profile_id: str):
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# Model Registry endpoints
+
+
+@app.get("/api/llm/models")
+async def list_all_models():
+    """List all available LLM models with metadata."""
+    from testmcpy.src.model_registry import list_all_models
+
+    return {"models": list_all_models()}
+
+
+@app.get("/api/llm/providers")
+async def list_all_providers():
+    """List all available LLM providers with their models."""
+    from testmcpy.src.model_registry import list_providers
+
+    return {"providers": list_providers()}
+
+
+@app.get("/api/llm/models/{model_id}")
+async def get_model_info(model_id: str):
+    """Get detailed info for a specific model."""
+    from testmcpy.src.model_registry import get_model
+
+    model = get_model(model_id)
+    if not model:
+        raise HTTPException(status_code=404, detail=f"Model '{model_id}' not found")
+
+    return model.to_dict()
+
+
+@app.get("/api/llm/providers/{provider}/models")
+async def get_provider_models(provider: str):
+    """Get all models for a specific provider."""
+    from testmcpy.src.model_registry import get_models_by_provider, get_default_model
+
+    models = get_models_by_provider(provider)
+    if not models:
+        raise HTTPException(status_code=404, detail=f"Provider '{provider}' not found")
+
+    default = get_default_model(provider)
+    return {
+        "provider": provider,
+        "models": [m.to_dict() for m in models],
+        "default_model": default.id if default else None,
+    }
+
+
+@app.post("/api/llm/estimate-cost")
+async def estimate_model_cost(request: CostEstimateRequest):
+    """Estimate cost for a model with given token usage."""
+    from testmcpy.src.model_registry import estimate_cost, get_model
+
+    model = get_model(request.model_id)
+    if not model:
+        raise HTTPException(status_code=404, detail=f"Model '{request.model_id}' not found")
+
+    cost = estimate_cost(request.model_id, request.input_tokens, request.output_tokens)
+    return {
+        "model_id": request.model_id,
+        "input_tokens": request.input_tokens,
+        "output_tokens": request.output_tokens,
+        "estimated_cost_usd": round(cost, 6),
+        "input_price_per_1m": model.input_price_per_1m,
+        "output_price_per_1m": model.output_price_per_1m,
+    }
 
 
 # Test Profile endpoints

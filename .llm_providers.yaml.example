@@ -1,15 +1,19 @@
-# LLM Provider Configuration Profiles
-# Copy to .llm_providers.yaml and customize for your providers
+# LLM Provider Configuration for testmcpy
 #
-# This replaces DEFAULT_MODEL and DEFAULT_PROVIDER from .env
-# Configure your LLM models and providers here instead
+# Copy to .llm_providers.yaml and customize for your environment.
 #
-# This allows you to define different LLM setups for different scenarios:
-# - Development (fast models for quick iteration)
-# - Testing (specific model versions for reproducibility)
-# - Production (powerful cloud models for best results)
-# - Cost-optimized (cheaper models to reduce costs)
-# - Local (no API costs, uses local models like Ollama)
+# Supported Providers:
+#   - anthropic: Anthropic Claude models (API)
+#   - openai: OpenAI GPT models (API)
+#   - google/gemini: Google Gemini models (API)
+#   - claude-code: Claude Code CLI wrapper
+#   - claude-sdk: Claude Agent SDK
+#   - ollama: Local models via Ollama
+#
+# API Key Sources (priority order):
+#   1. Provider-specific api_key in this file (not recommended)
+#   2. Provider-specific api_key_env pointing to env var
+#   3. Default env vars: ANTHROPIC_API_KEY, OPENAI_API_KEY, GOOGLE_API_KEY
 
 # Default profile (used when no --llm-profile specified)
 default: prod
@@ -18,93 +22,201 @@ default: prod
 profiles:
   # Development profile - fast iteration
   dev:
-    name: "Development"
-    description: "Fast local models for development"
+    name: Development
+    description: Fast models for quick iteration during development
     providers:
-      - name: "Claude Haiku"
-        provider: "anthropic"
-        model: "claude-3-5-haiku-20241022"
-        api_key: "your-anthropic-api-key-here"  # Or use api_key_env: "ANTHROPIC_API_KEY"
+      - name: Claude Haiku 3.5
+        provider: anthropic
+        model: claude-haiku-3-5-20241022
         timeout: 30
         default: true
 
-      - name: "Local Ollama"
-        provider: "ollama"
-        model: "llama3.2"
-        base_url: "http://localhost:11434"
-        timeout: 60
+      - name: GPT-4o Mini
+        provider: openai
+        model: gpt-4o-mini
+        timeout: 30
 
-  # Production profile - best quality (DEFAULT)
+      - name: Gemini 2.5 Flash
+        provider: google
+        model: gemini-2.5-flash
+        timeout: 30
+
+  # Production profile - high quality (DEFAULT)
   prod:
-    name: "Production"
-    description: "High-quality models for production use"
+    name: Production
+    description: High-quality models for production testing
     providers:
-      - name: "Claude Sonnet 4.5"
-        provider: "anthropic"
-        model: "claude-sonnet-4-5"
-        api_key: "your-anthropic-api-key-here"  # Or use api_key_env: "ANTHROPIC_API_KEY" to read from env
+      - name: Claude Sonnet 4.5
+        provider: anthropic
+        model: claude-sonnet-4-5-20250514
         timeout: 60
         default: true
 
-      - name: "GPT-4"
-        provider: "openai"
-        model: "gpt-4-turbo-preview"
-        api_key: "your-openai-api-key-here"  # Or use api_key_env: "OPENAI_API_KEY"
+      - name: GPT-4o
+        provider: openai
+        model: gpt-4o
         timeout: 60
 
-  # Testing profile - consistent versions
-  testing:
-    name: "Testing"
-    description: "Specific model versions for reproducible tests"
+      - name: Gemini 2.5 Pro
+        provider: google
+        model: gemini-2.5-pro
+        timeout: 60
+
+  # Multi-model profile - test across providers
+  multi-model:
+    name: Multi-Model Testing
+    description: Test across multiple providers for comparison
     providers:
-      - name: "Claude Haiku Fixed"
-        provider: "anthropic"
-        model: "claude-3-5-haiku-20241022"
-        api_key: "your-anthropic-api-key-here"
-        timeout: 30
+      # Anthropic
+      - name: Claude Sonnet 4.5
+        provider: anthropic
+        model: claude-sonnet-4-5-20250514
         default: true
 
-  # Cost-optimized profile
+      - name: Claude Haiku 3.5
+        provider: anthropic
+        model: claude-haiku-3-5-20241022
+
+      # OpenAI
+      - name: GPT-4o
+        provider: openai
+        model: gpt-4o
+
+      - name: GPT-4o Mini
+        provider: openai
+        model: gpt-4o-mini
+
+      # Google
+      - name: Gemini 2.5 Pro
+        provider: google
+        model: gemini-2.5-pro
+
+      - name: Gemini 2.5 Flash
+        provider: google
+        model: gemini-2.5-flash
+
+  # Claude Code profile - uses Claude Code CLI
+  claude-code:
+    name: Claude Code
+    description: Execute tests using Claude Code CLI
+    providers:
+      - name: Claude Code (Sonnet)
+        provider: claude-code
+        model: claude-code-sonnet
+        default: true
+        settings:
+          permission_mode: auto  # auto, ask, manual
+
+      - name: Claude Code (Opus)
+        provider: claude-code
+        model: claude-code-opus
+        settings:
+          permission_mode: ask
+
+  # Claude SDK profile - uses Claude Agent SDK
+  claude-sdk:
+    name: Claude Agent SDK
+    description: Execute tests using Claude Agent SDK
+    providers:
+      - name: Claude SDK (Sonnet)
+        provider: claude-sdk
+        model: claude-sdk-sonnet
+        default: true
+        settings:
+          max_turns: 10
+
+      - name: Claude SDK (Opus)
+        provider: claude-sdk
+        model: claude-sdk-opus
+        settings:
+          max_turns: 15
+
+  # Reasoning profile - for complex tasks
+  reasoning:
+    name: Reasoning Models
+    description: Models optimized for complex reasoning
+    providers:
+      - name: Claude Opus 4.5
+        provider: anthropic
+        model: claude-opus-4-5-20250514
+        timeout: 180
+        default: true
+
+      - name: OpenAI o1
+        provider: openai
+        model: o1
+        timeout: 180
+
+      - name: Gemini 2.5 Pro (Thinking)
+        provider: google
+        model: gemini-2.5-pro
+        timeout: 180
+
+  # Budget profile - cost-effective
   budget:
-    name: "Budget"
-    description: "Cost-effective models"
+    name: Budget
+    description: Cost-effective models for high-volume testing
     providers:
-      - name: "Claude Haiku"
-        provider: "anthropic"
-        model: "claude-3-5-haiku-20241022"
-        api_key: "your-anthropic-api-key-here"
+      - name: Claude Haiku 3.5
+        provider: anthropic
+        model: claude-haiku-3-5-20241022
         timeout: 30
         default: true
 
-      - name: "GPT-3.5"
-        provider: "openai"
-        model: "gpt-3.5-turbo"
-        api_key: "your-openai-api-key-here"
+      - name: GPT-4o Mini
+        provider: openai
+        model: gpt-4o-mini
         timeout: 30
 
-  # Local-only profile (no API costs)
+      - name: Gemini 2.5 Flash
+        provider: google
+        model: gemini-2.5-flash
+        timeout: 30
+
+  # Local profile - no API costs
   local:
-    name: "Local Only"
-    description: "All local models, no cloud APIs"
+    name: Local Only
+    description: Local models via Ollama - no cloud API costs
     providers:
-      - name: "Ollama Llama"
-        provider: "ollama"
-        model: "llama3.2"
-        base_url: "http://localhost:11434"
+      - name: Llama 3.2
+        provider: ollama
+        model: llama3.2
+        base_url: http://localhost:11434
         timeout: 120
         default: true
 
-      - name: "Ollama Mistral"
-        provider: "ollama"
-        model: "mistral"
-        base_url: "http://localhost:11434"
+      - name: CodeGemma
+        provider: ollama
+        model: codegemma
+        base_url: http://localhost:11434
         timeout: 120
 
-# Optional: Global settings for all profiles
+      - name: Mistral
+        provider: ollama
+        model: mistral
+        base_url: http://localhost:11434
+        timeout: 120
+
+# Global settings for all profiles
 global:
-  # Default timeout if not specified in provider
+  # Default timeout if not specified in provider (seconds)
   default_timeout: 60
 
-  # Retry settings
+  # Retry settings for rate-limited requests
   max_retries: 3
-  retry_delay: 1
+  retry_delay: 2.0
+
+  # Token rate limiting (tokens per minute)
+  tokens_per_minute_limit: 40000
+
+# API Key Configuration (not recommended - use env vars instead)
+# api_keys:
+#   ANTHROPIC_API_KEY: sk-ant-...
+#   OPENAI_API_KEY: sk-...
+#   GOOGLE_API_KEY: ...
+#
+# Recommended: Set environment variables instead:
+#   export ANTHROPIC_API_KEY=sk-ant-...
+#   export OPENAI_API_KEY=sk-...
+#   export GOOGLE_API_KEY=...
+#   export GEMINI_API_KEY=...  # (alias for GOOGLE_API_KEY)

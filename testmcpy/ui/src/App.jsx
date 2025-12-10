@@ -30,7 +30,6 @@ function AppContent() {
   const [showProfilesModal, setShowProfilesModal] = useState(false)
   const [llmProfiles, setLlmProfiles] = useState([])
   const [selectedLlmProfile, setSelectedLlmProfile] = useState(null)
-  const [showLlmProfilesModal, setShowLlmProfilesModal] = useState(false)
   const [apiReady, setApiReady] = useState(false)
   const [healthCheckAttempts, setHealthCheckAttempts] = useState(0)
   const navigate = useNavigate()
@@ -214,7 +213,6 @@ function AppContent() {
     { path: '/chat', label: 'Interact', icon: MessageSquare },
     { path: '/auth-debugger', label: 'Auth Debug', icon: Shield },
     { path: '/config', label: 'Config', icon: Settings },
-    { path: '/llm-profiles', label: 'LLM Profiles', icon: Cpu },
   ]
 
   if (!apiReady) {
@@ -316,12 +314,16 @@ function AppContent() {
               {sidebarOpen && <ChevronRight size={14} className="text-text-tertiary flex-shrink-0" />}
             </button>
 
-            {/* LLM Profile Selector Widget */}
+            {/* LLM Profile Selector Widget - navigates to LLM Profiles page */}
             <button
-              onClick={() => setShowLlmProfilesModal(true)}
-              className="w-full flex items-center gap-2 px-3 py-2 rounded-lg transition-all duration-200 bg-surface-elevated border border-border hover:bg-surface-hover"
+              onClick={() => navigate('/llm-profiles')}
+              className={`w-full flex items-center gap-2 px-3 py-2 rounded-lg transition-all duration-200 ${
+                location.pathname === '/llm-profiles'
+                  ? 'bg-primary/10 border border-primary text-primary'
+                  : 'bg-surface-elevated border border-border hover:bg-surface-hover'
+              }`}
             >
-              <Cpu size={16} className="text-success flex-shrink-0" />
+              <Cpu size={16} className={location.pathname === '/llm-profiles' ? 'text-primary' : 'text-success'} />
               {sidebarOpen && (
                 <div className="flex-1 min-w-0 text-left">
                   <div className="text-xs font-semibold text-text-primary truncate">
@@ -422,106 +424,6 @@ function AppContent() {
           </div>
         )}
 
-        {/* LLM Profiles Modal Overlay */}
-        {showLlmProfilesModal && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
-            <div className="w-full max-w-2xl m-4 bg-surface-elevated rounded-xl shadow-2xl border border-border overflow-hidden flex flex-col max-h-[80vh]">
-              {/* Modal Header */}
-              <div className="flex items-center justify-between p-4 border-b border-border bg-surface-elevated">
-                <div>
-                  <h2 className="text-xl font-bold text-text-primary">LLM Provider Selection</h2>
-                  <p className="text-sm text-text-secondary mt-1">Select your LLM provider for interactive sessions and testing</p>
-                </div>
-                <button
-                  onClick={() => setShowLlmProfilesModal(false)}
-                  className="p-2 hover:bg-surface-hover rounded-lg transition-colors text-text-secondary hover:text-text-primary"
-                >
-                  <X size={20} />
-                </button>
-              </div>
-
-              {/* Modal Content */}
-              <div className="flex-1 overflow-auto p-4">
-                {llmProfiles.length === 0 ? (
-                  <div className="text-center py-8">
-                    <Cpu size={48} className="mx-auto text-text-disabled mb-4" />
-                    <p className="text-text-secondary">No LLM profiles configured</p>
-                    <p className="text-sm text-text-tertiary mt-2">
-                      Create a <code className="bg-surface px-2 py-1 rounded">.llm_providers.yaml</code> file to configure LLM providers
-                    </p>
-                  </div>
-                ) : (
-                  <div className="space-y-2">
-                    {llmProfiles.map((profile) => {
-                      const isSelected = profile.profile_id === selectedLlmProfile
-                      const defaultProvider = profile.providers?.find(p => p.default) || profile.providers?.[0]
-
-                      return (
-                        <button
-                          key={profile.profile_id}
-                          onClick={async () => {
-                            setSelectedLlmProfile(profile.profile_id)
-                            localStorage.setItem('selectedLLMProfile', profile.profile_id)
-
-                            // Set as default in backend
-                            try {
-                              await fetch(`/api/llm/profiles/default/${profile.profile_id}`, {
-                                method: 'PUT',
-                              })
-                            } catch (err) {
-                              console.error('Failed to set default LLM profile:', err)
-                            }
-
-                            setShowLlmProfilesModal(false)
-                          }}
-                          className={`w-full p-4 rounded-lg border-2 transition-all text-left ${
-                            isSelected
-                              ? 'border-success bg-success/10'
-                              : 'border-border bg-surface hover:bg-surface-hover'
-                          }`}
-                        >
-                          <div className="flex items-start justify-between gap-3">
-                            <div className="flex-1 min-w-0">
-                              <div className="flex items-center gap-2 mb-1">
-                                <div className="font-semibold text-text-primary">{profile.name}</div>
-                                {isSelected && (
-                                  <CheckCircle2 size={18} className="text-success flex-shrink-0" />
-                                )}
-                              </div>
-                              {profile.description && (
-                                <div className="text-sm text-text-secondary mb-2">{profile.description}</div>
-                              )}
-                              {defaultProvider && (
-                                <div className="flex items-center gap-2 text-sm">
-                                  <span className="px-2 py-0.5 rounded bg-surface-elevated border border-border text-text-secondary">
-                                    {defaultProvider.provider}
-                                  </span>
-                                  <span className="text-text-tertiary">{defaultProvider.model}</span>
-                                </div>
-                              )}
-                              {profile.providers && profile.providers.length > 1 && (
-                                <div className="text-xs text-text-tertiary mt-2">
-                                  +{profile.providers.length - 1} more provider{profile.providers.length > 2 ? 's' : ''}
-                                </div>
-                              )}
-                            </div>
-                          </div>
-                        </button>
-                      )
-                    })}
-                  </div>
-                )}
-              </div>
-
-              {/* Modal Footer */}
-              <div className="p-4 border-t border-border bg-surface">
-                <p className="text-xs text-text-tertiary">
-                  Selected profile will be used for interactive sessions and test execution
-                </p>
-              </div>
-            </div>
-          </div>
-        )}
       </div>
   )
 }

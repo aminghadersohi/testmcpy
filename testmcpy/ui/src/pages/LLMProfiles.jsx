@@ -568,7 +568,14 @@ function LLMProfiles({ selectedProfile, onSelectProfile, hideHeader = false }) {
   const handleAddProvider = async (profileId, providerData) => {
     try {
       const currentProfile = profiles.find(p => p.profile_id === profileId)
-      const updatedProviders = [...(currentProfile?.providers || []), providerData]
+      let updatedProviders = [...(currentProfile?.providers || [])]
+
+      // If the new provider is default, unset default on all existing providers
+      if (providerData.default) {
+        updatedProviders = updatedProviders.map(p => ({ ...p, default: false }))
+      }
+
+      updatedProviders.push(providerData)
 
       const res = await fetch(`/api/llm/profiles/${profileId}`, {
         method: 'PUT',
@@ -597,7 +604,15 @@ function LLMProfiles({ selectedProfile, onSelectProfile, hideHeader = false }) {
   const handleUpdateProvider = async (profileId, providerIndex, providerData) => {
     try {
       const currentProfile = profiles.find(p => p.profile_id === profileId)
-      const updatedProviders = [...currentProfile.providers]
+      let updatedProviders = [...currentProfile.providers]
+
+      // If the updated provider is default, unset default on all other providers
+      if (providerData.default) {
+        updatedProviders = updatedProviders.map((p, idx) =>
+          idx === providerIndex ? p : { ...p, default: false }
+        )
+      }
+
       updatedProviders[providerIndex] = providerData
 
       const res = await fetch(`/api/llm/profiles/${profileId}`, {

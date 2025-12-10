@@ -6,15 +6,9 @@ This test suite ensures that no MCP URLs are accidentally sent to external APIs,
 specifically validating the MCPURLFilter security class.
 """
 
-import os
-
-# Add parent directory to path for imports
-import sys
 import unittest
 
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from src.llm_integration import MCPURLFilter
+from testmcpy.src.llm_integration import MCPURLFilter
 
 
 class TestMCPURLFilter(unittest.TestCase):

@@ -1199,6 +1199,298 @@ class NoHallucination(BaseEvaluator):
         return False
 
 
+class LLMJudge(BaseEvaluator):
+    """Use an LLM to evaluate the quality of a response."""
+
+    def __init__(
+        self,
+        criteria: str,
+        model: str = "claude-sonnet-4-20250514",
+        provider: str = "anthropic",
+        pass_threshold: float = 0.7,
+        rubric: str | None = None,
+    ):
+        """
+        Use LLM to judge response quality.
+
+        Args:
+            criteria: What to evaluate (e.g., "accuracy", "helpfulness", "completeness")
+            model: LLM model to use for judging
+            provider: LLM provider (anthropic, openai, gemini)
+            pass_threshold: Minimum score (0-1) to pass (default: 0.7)
+            rubric: Optional detailed rubric for scoring. If not provided, uses criteria.
+
+        Example YAML:
+            evaluators:
+              - type: llm_judge
+                criteria: "Response correctly answers the user's question about chart data"
+                pass_threshold: 0.8
+                rubric: |
+                  Score 1.0: Complete, accurate answer with all requested data
+                  Score 0.7: Mostly correct with minor omissions
+                  Score 0.4: Partially correct but missing key information
+                  Score 0.0: Incorrect or unrelated response
+        """
+        self.criteria = criteria
+        self.model = model
+        self.provider = provider
+        self.pass_threshold = pass_threshold
+        self.rubric = rubric or self._default_rubric()
+
+    def _default_rubric(self) -> str:
+        return f"""Evaluate based on: {self.criteria}
+
+Score 1.0: Fully meets the criteria
+Score 0.8: Mostly meets criteria with minor issues
+Score 0.6: Partially meets criteria
+Score 0.4: Significant gaps in meeting criteria
+Score 0.2: Barely addresses the criteria
+Score 0.0: Does not meet criteria at all"""
+
+    @property
+    def name(self) -> str:
+        return f"llm_judge:{self.criteria[:30]}..."
+
+    @property
+    def description(self) -> str:
+        return f"LLM judges response based on: {self.criteria}"
+
+    def evaluate(self, context: dict[str, Any]) -> EvalResult:
+        """Evaluate using LLM - runs synchronously by creating event loop if needed."""
+        import asyncio
+
+        try:
+            # Try to get existing event loop
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # We're in an async context, create a new task
+                import concurrent.futures
+
+                with concurrent.futures.ThreadPoolExecutor() as executor:
+                    future = executor.submit(asyncio.run, self._async_evaluate(context))
+                    return future.result(timeout=60)
+            else:
+                return loop.run_until_complete(self._async_evaluate(context))
+        except RuntimeError:
+            # No event loop, create one
+            return asyncio.run(self._async_evaluate(context))
+
+    async def _async_evaluate(self, context: dict[str, Any]) -> EvalResult:
+        """Async evaluation using LLM."""
+        import httpx
+        import json
+        import os
+
+        prompt = context.get("prompt", "")
+        response = context.get("response", "")
+        tool_calls = context.get("tool_calls", [])
+        tool_results = context.get("tool_results", [])
+
+        # Build context for the judge
+        judge_context = f"""## Original User Request
+{prompt}
+
+## Assistant Response
+{response}
+
+## Tool Calls Made
+{json.dumps(tool_calls, indent=2) if tool_calls else "None"}
+
+## Tool Results
+{self._format_tool_results(tool_results) if tool_results else "None"}
+"""
+
+        judge_prompt = f"""You are an impartial judge evaluating an AI assistant's response.
+
+{judge_context}
+
+## Evaluation Criteria
+{self.criteria}
+
+## Scoring Rubric
+{self.rubric}
+
+## Instructions
+1. Analyze the response against the criteria
+2. Consider the tool calls and results in your evaluation
+3. Provide a score from 0.0 to 1.0
+4. Explain your reasoning
+
+Respond in this exact JSON format:
+{{"score": 0.X, "reasoning": "Your explanation here"}}"""
+
+        try:
+            result = await self._call_llm(judge_prompt)
+
+            # Parse JSON response
+            try:
+                # Extract JSON from response (handle markdown code blocks)
+                json_str = result
+                if "```json" in result:
+                    json_str = result.split("```json")[1].split("```")[0]
+                elif "```" in result:
+                    json_str = result.split("```")[1].split("```")[0]
+
+                parsed = json.loads(json_str.strip())
+                score = float(parsed.get("score", 0))
+                reasoning = parsed.get("reasoning", "No reasoning provided")
+
+            except (json.JSONDecodeError, ValueError, IndexError):
+                # Fallback: try to extract score from text
+                score = self._extract_score(result)
+                reasoning = result
+
+            passed = score >= self.pass_threshold
+
+            return EvalResult(
+                passed=passed,
+                score=score,
+                reason=f"LLM Judge score: {score:.2f} (threshold: {self.pass_threshold})",
+                details={
+                    "reasoning": reasoning,
+                    "criteria": self.criteria,
+                    "model": self.model,
+                    "threshold": self.pass_threshold,
+                },
+            )
+
+        except Exception as e:
+            return EvalResult(
+                passed=False,
+                score=0.0,
+                reason=f"LLM Judge error: {str(e)}",
+                details={"error": str(e)},
+            )
+
+    def _format_tool_results(self, tool_results: list) -> str:
+        """Format tool results for the judge."""
+        formatted = []
+        for result in tool_results:
+            content = getattr(result, "content", str(result))
+            if len(str(content)) > 500:
+                content = str(content)[:500] + "..."
+            formatted.append(f"- {content}")
+        return "\n".join(formatted) if formatted else "None"
+
+    def _extract_score(self, text: str) -> float:
+        """Try to extract a score from unstructured text."""
+        import re
+
+        # Look for patterns like "score: 0.8" or "0.8/1.0" or "8/10"
+        patterns = [
+            r"score[:\s]+([0-9.]+)",
+            r"([0-9.]+)\s*/\s*1\.?0?",
+            r"([0-9]+)\s*/\s*10",
+            r"rating[:\s]+([0-9.]+)",
+        ]
+
+        for pattern in patterns:
+            match = re.search(pattern, text.lower())
+            if match:
+                try:
+                    score = float(match.group(1))
+                    # Normalize to 0-1 range
+                    if score > 1:
+                        score = score / 10
+                    return min(1.0, max(0.0, score))
+                except ValueError:
+                    continue
+
+        return 0.0
+
+    async def _call_llm(self, prompt: str) -> str:
+        """Call LLM API for judging."""
+        import httpx
+        import os
+
+        # Get config
+        try:
+            from testmcpy.config import get_config
+
+            config = get_config()
+        except ImportError:
+            config = None
+
+        if self.provider == "anthropic":
+            api_key = (
+                os.environ.get("ANTHROPIC_API_KEY")
+                or (config.get("ANTHROPIC_API_KEY") if config else None)
+                or ""
+            )
+            if not api_key:
+                raise ValueError("ANTHROPIC_API_KEY not set")
+
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                response = await client.post(
+                    "https://api.anthropic.com/v1/messages",
+                    headers={
+                        "x-api-key": api_key,
+                        "anthropic-version": "2023-06-01",
+                        "content-type": "application/json",
+                    },
+                    json={
+                        "model": self.model,
+                        "max_tokens": 500,
+                        "messages": [{"role": "user", "content": prompt}],
+                    },
+                )
+                response.raise_for_status()
+                result = response.json()
+                return result["content"][0]["text"]
+
+        elif self.provider == "openai":
+            api_key = (
+                os.environ.get("OPENAI_API_KEY")
+                or (config.get("OPENAI_API_KEY") if config else None)
+                or ""
+            )
+            if not api_key:
+                raise ValueError("OPENAI_API_KEY not set")
+
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                response = await client.post(
+                    "https://api.openai.com/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": self.model,
+                        "max_tokens": 500,
+                        "messages": [{"role": "user", "content": prompt}],
+                    },
+                )
+                response.raise_for_status()
+                result = response.json()
+                return result["choices"][0]["message"]["content"]
+
+        elif self.provider in ("gemini", "google"):
+            api_key = (
+                os.environ.get("GOOGLE_API_KEY")
+                or os.environ.get("GEMINI_API_KEY")
+                or (config.get("GOOGLE_API_KEY") if config else None)
+                or (config.get("GEMINI_API_KEY") if config else None)
+                or ""
+            )
+            if not api_key:
+                raise ValueError("GOOGLE_API_KEY or GEMINI_API_KEY not set")
+
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                response = await client.post(
+                    f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent?key={api_key}",
+                    json={
+                        "contents": [{"parts": [{"text": prompt}]}],
+                        "generationConfig": {"maxOutputTokens": 500},
+                    },
+                )
+                response.raise_for_status()
+                result = response.json()
+                return result["candidates"][0]["content"]["parts"][0]["text"]
+
+        else:
+            raise ValueError(f"Unsupported provider for LLM judge: {self.provider}")
+
+
 class CompositeEvaluator(BaseEvaluator):
     """Run multiple evaluators and combine results."""
 
@@ -1282,6 +1574,7 @@ def create_evaluator(name: str, **kwargs) -> BaseEvaluator:
         "final_answer_contains": FinalAnswerContains,
         "response_includes": ResponseIncludes,  # More intuitive name
         "no_hallucination": NoHallucination,
+        "llm_judge": LLMJudge,  # LLM-as-judge evaluator
         "answer_contains_link": AnswerContainsLink,
         "within_time_limit": WithinTimeLimit,
         "token_usage_reasonable": TokenUsageReasonable,

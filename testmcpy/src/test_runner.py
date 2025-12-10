@@ -123,6 +123,7 @@ class TestRunner:
         model: str,
         provider: str = "ollama",
         mcp_url: str | None = None,
+        mcp_client: MCPClient | None = None,
         verbose: bool = False,
         hide_tool_output: bool = False,
     ):
@@ -133,7 +134,9 @@ class TestRunner:
         self.hide_tool_output = hide_tool_output
         self.llm_provider: LLMProvider | None = None
         self.rate_limiter = RateLimitTracker()
-        self.mcp_client: MCPClient | None = None
+        self.mcp_client: MCPClient | None = mcp_client
+        # Track if we own the client (created it ourselves) vs external
+        self._owns_mcp_client = mcp_client is None
 
     async def initialize(self):
         """Initialize LLM provider and MCP client."""
@@ -248,7 +251,9 @@ class TestRunner:
             test_mcp_client = self.mcp_client
             if test_case.auth:
                 if self.verbose:
-                    print(f"  Using test-specific auth configuration: {test_case.auth.get('type', 'unknown')}")
+                    print(
+                        f"  Using test-specific auth configuration: {test_case.auth.get('type', 'unknown')}"
+                    )
 
                 # Create a new MCP client with the test's auth config
                 test_mcp_client = MCPClient(self.mcp_url, auth=test_case.auth)
@@ -261,28 +266,28 @@ class TestRunner:
                     auth_success = True
 
                     # Try to get the token from the client's auth object
-                    if test_mcp_client.auth and hasattr(test_mcp_client.auth, 'token'):
+                    if test_mcp_client.auth and hasattr(test_mcp_client.auth, "token"):
                         auth_token = test_mcp_client.auth.token
 
                     # Get auth flow steps from the client's debugger if available
                     # Note: We'd need to modify MCPClient to expose its debugger
                     # For now, we'll infer steps from successful auth
-                    auth_type = test_case.auth.get('type', 'unknown')
-                    if auth_type == 'oauth':
+                    auth_type = test_case.auth.get("type", "unknown")
+                    if auth_type == "oauth":
                         auth_flow_steps = [
                             "request_prepared",
                             "token_endpoint_called",
                             "response_received",
-                            "token_extracted"
+                            "token_extracted",
                         ]
-                    elif auth_type == 'jwt':
+                    elif auth_type == "jwt":
                         auth_flow_steps = [
                             "request_prepared",
                             "jwt_endpoint_called",
                             "response_received",
-                            "token_extracted"
+                            "token_extracted",
                         ]
-                    elif auth_type == 'bearer':
+                    elif auth_type == "bearer":
                         auth_flow_steps = ["token_validated"]
 
                 except Exception as auth_exc:
@@ -500,7 +505,11 @@ class TestRunner:
 
         finally:
             # Clean up test-specific MCP client if one was created
-            if test_case.auth and 'test_mcp_client' in locals() and test_mcp_client != self.mcp_client:
+            if (
+                test_case.auth
+                and "test_mcp_client" in locals()
+                and test_mcp_client != self.mcp_client
+            ):
                 try:
                     await test_mcp_client.close()
                 except Exception:
@@ -588,7 +597,8 @@ class TestRunner:
         """Clean up resources."""
         if self.llm_provider:
             await self.llm_provider.close()
-        if self.mcp_client:
+        # Only close MCP client if we created it (not externally provided)
+        if self.mcp_client and self._owns_mcp_client:
             await self.mcp_client.close()
 
 

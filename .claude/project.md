@@ -885,3 +885,124 @@ Types: `fix:`, `feat:`, `chore:`, `release:`
 - Ensure CI passes before merging
 - Include screenshots for UI changes
 - No internal Preset info in open source PRs
+
+---
+
+# MCP Evals Gap Analysis (December 2025)
+
+## Meeting Requirements vs Current Implementation
+
+### Evaluation Framework
+
+| Requirement | Status | Notes |
+|-------------|--------|-------|
+| Compare model responses to expected outputs | ✅ 80% | `response_matches` evaluator exists |
+| Evaluate tool call correctness | ✅ | `tool_called`, `tool_args_match` evaluators |
+| Custom evaluators | ✅ | Extensible evaluator system |
+| Hallucination detection | ❌ | Need evaluator to detect made-up data |
+| Human review integration | ❌ | No manual review workflow |
+| `response_includes` evaluator | ❌ CRITICAL | Need to check if response contains specific content |
+
+### Test Structure
+
+| Requirement | Status | Notes |
+|-------------|--------|-------|
+| YAML-based test definitions | ✅ | Full support with prompt/evaluators/expected |
+| ~50 test questions on examples dataset | ⚠️ 30% | Only ~15 tests exist, need more coverage |
+| Test versioning | ❌ | No tracking of test changes over time |
+| Test categorization | ✅ | Tests organized by tool/scenario |
+| Parameterized tests | ❌ | No variable substitution in tests |
+
+### Test Runner
+
+| Requirement | Status | Notes |
+|-------------|--------|-------|
+| Run tests against multiple models | ✅ | Anthropic + OpenAI supported |
+| Gemini support | ❌ HIGH | Missing Google Gemini integration |
+| Parallel test execution | ✅ | Async runner with configurable parallelism |
+| Profile-based configuration | ✅ | MCP profiles with auth config |
+| Streaming test output | ✅ | SSE endpoint in `routers/tests.py` |
+
+### Infrastructure
+
+| Requirement | Status | Notes |
+|-------------|--------|-------|
+| Store evaluation results | ⚠️ 60% | JSON files only, no database |
+| Historical metrics storage | ❌ | No time-series storage for metrics |
+| Result comparison over time | ❌ | No trend analysis capabilities |
+| CI/CD integration | ⚠️ | CLI exists but no GitHub Actions template |
+
+### Multi-Step Support
+
+| Requirement | Status | Notes |
+|-------------|--------|-------|
+| Multi-turn conversations | ⚠️ 50% | Single turn per test only |
+| Context carry-over | ❌ | Each test is independent |
+| Conversation simulation | ❌ | No back-and-forth flow testing |
+| State management | ❌ | No session state between turns |
+
+### Metrics & Analytics
+
+| Requirement | Status | Notes |
+|-------------|--------|-------|
+| Pass/fail rates | ✅ | In test results |
+| Response time tracking | ✅ | Duration captured per test |
+| Token usage | ✅ | Input/output tokens tracked |
+| Cost calculation | ✅ | Cost per model provider |
+| Historical dashboards | ❌ | No time-series visualization |
+| Model comparison charts | ❌ | No side-by-side model analysis |
+
+---
+
+## Priority Implementation Gaps
+
+### 1. CRITICAL: `response_includes` Evaluator
+```yaml
+# Needed pattern
+evaluators:
+  - type: response_includes
+    content: "chart_id"
+    case_sensitive: false
+```
+
+### 2. HIGH: Gemini Model Support
+Add Google Gemini to LLM integration alongside Anthropic/OpenAI.
+
+### 3. HIGH: Test Versioning
+Track test changes over time with git-like history.
+
+### 4. HIGH: More Test Coverage
+Need ~35 more tests to reach target of 50 tests on examples dataset.
+
+### 5. HIGH: Hallucination Detection
+Evaluator to detect when model returns data not present in tool results.
+
+### 6. MEDIUM: Multi-Turn Conversations
+Support for sequential test steps that share context.
+
+### 7. MEDIUM: Database for Metrics
+SQLite or similar for historical result storage and analysis.
+
+---
+
+## Implementation Roadmap
+
+### Phase 1: Core Evaluators (Week 1)
+- [ ] Add `response_includes` evaluator
+- [ ] Add `no_hallucination` evaluator
+- [ ] Expand test coverage (+20 tests)
+
+### Phase 2: Model Support (Week 2)
+- [ ] Add Gemini model integration
+- [ ] Unify model interface for all providers
+- [ ] Add model comparison in reports
+
+### Phase 3: Infrastructure (Week 3)
+- [ ] Add SQLite storage for results
+- [ ] Implement test versioning
+- [ ] Create historical dashboard
+
+### Phase 4: Advanced Features (Week 4)
+- [ ] Multi-turn conversation support
+- [ ] Parameterized tests
+- [ ] CI/CD GitHub Actions template

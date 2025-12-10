@@ -394,6 +394,24 @@ async def get_mcp_client_for_server(profile_id: str, mcp_name: str) -> MCPClient
     return client
 
 
+async def get_or_create_mcp_client(profile_selection: str) -> MCPClient | None:
+    """
+    Get or create MCP client for the selected profile.
+
+    Args:
+        profile_selection: Either "profile_id" or "profile_id:mcp_name" format
+
+    Returns:
+        MCPClient instance or None if not found
+    """
+    if ":" in profile_selection:
+        profile_id, mcp_name = profile_selection.split(":", 1)
+        return await get_mcp_client_for_server(profile_id, mcp_name)
+    else:
+        clients = await get_mcp_clients_for_profile(profile_selection)
+        return clients[0][1] if clients else None
+
+
 async def close_all_clients():
     """Close all MCP clients (for shutdown)."""
     global mcp_client, mcp_clients

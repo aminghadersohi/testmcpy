@@ -12,22 +12,10 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 
 from testmcpy.server.models import TestRunRequest
-from testmcpy.server.state import TimeoutConfig, config
+from testmcpy.server.state import TimeoutConfig, config, get_or_create_mcp_client
 from testmcpy.src.test_runner import TestCase, TestRunner
 
 router = APIRouter(prefix="/api", tags=["tests"])
-
-
-async def get_or_create_mcp_client(profile_selection: str):
-    """Get or create MCP client for the selected profile."""
-    from testmcpy.server.state import get_mcp_client_for_server, get_mcp_clients_for_profile
-
-    if ":" in profile_selection:
-        profile_id, mcp_name = profile_selection.split(":", 1)
-        return await get_mcp_client_for_server(profile_id, mcp_name)
-    else:
-        clients = await get_mcp_clients_for_profile(profile_selection)
-        return clients[0][1] if clients else None
 
 
 async def stream_test_output(

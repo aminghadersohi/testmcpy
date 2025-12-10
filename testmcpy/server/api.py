@@ -34,6 +34,7 @@ from testmcpy.config import get_config
 from testmcpy.evals.base_evaluators import create_evaluator
 from testmcpy.mcp_profiles import MCPProfile, MCPServer, load_profile
 from testmcpy.src.llm_integration import create_llm_provider
+from testmcpy.server.state import get_or_create_mcp_client
 from testmcpy.src.mcp_client import MCPClient, MCPToolCall
 from testmcpy.src.test_runner import TestCase, TestRunner
 

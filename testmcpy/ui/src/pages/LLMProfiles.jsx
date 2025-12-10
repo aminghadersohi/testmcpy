@@ -2,7 +2,8 @@ import React, { useState, useEffect } from 'react'
 import {
   Cpu, Check, AlertCircle, RefreshCw, ChevronDown, ChevronRight,
   Edit2, Trash2, Plus, Save, X, Copy, Download, Settings,
-  CheckCircle, XCircle, AlertTriangle, DollarSign, Zap, Play, Loader2
+  CheckCircle, XCircle, AlertTriangle, DollarSign, Zap, Play, Loader2,
+  Eye, EyeOff, Key
 } from 'lucide-react'
 
 // Toast notification component
@@ -166,11 +167,13 @@ function ProviderEditorModal({ provider, availableModels, onSave, onCancel }) {
     name: provider?.name || '',
     provider: provider?.provider || 'anthropic',
     model: provider?.model || '',
-    api_key_env: provider?.api_key_env || '',
+    api_key: provider?.api_key || '',  // Direct API key
+    api_key_env: provider?.api_key_env || '',  // Or env var name
     base_url: provider?.base_url || '',
     timeout: provider?.timeout || 60,
     default: provider?.default || false,
   })
+  const [showApiKey, setShowApiKey] = useState(false)  // Toggle visibility
   const [errors, setErrors] = useState({})
   const [filteredModels, setFilteredModels] = useState([])
 
@@ -323,20 +326,66 @@ function ProviderEditorModal({ provider, availableModels, onSave, onCancel }) {
               {errors.name && <p className="text-error text-xs mt-1">{errors.name}</p>}
             </div>
 
-            {/* API Key Environment Variable */}
-            <div>
-              <label className="block text-sm font-medium mb-1">API Key Environment Variable (optional)</label>
-              <input
-                type="text"
-                value={formData.api_key_env}
-                onChange={(e) => updateField('api_key_env', e.target.value)}
-                className="input w-full font-mono text-sm"
-                placeholder="e.g., ANTHROPIC_API_KEY"
-              />
-              <p className="text-text-tertiary text-xs mt-1">
-                Leave empty to use default env var for the provider
-              </p>
-            </div>
+            {/* API Key Section - hidden for claude-code and claude-sdk */}
+            {!['claude-code', 'claude-sdk'].includes(formData.provider) && (
+              <div className="space-y-3 p-3 bg-surface rounded-lg border border-border">
+                <div className="flex items-center gap-2 text-sm font-medium">
+                  <Key size={14} />
+                  API Key Configuration
+                </div>
+
+                {/* Direct API Key */}
+                <div>
+                  <label className="block text-xs font-medium mb-1 text-text-secondary">API Key (direct)</label>
+                  <div className="relative">
+                    <input
+                      type={showApiKey ? 'text' : 'password'}
+                      value={formData.api_key}
+                      onChange={(e) => updateField('api_key', e.target.value)}
+                      className="input w-full font-mono text-sm pr-10"
+                      placeholder="sk-ant-... or sk-..."
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowApiKey(!showApiKey)}
+                      className="absolute right-2 top-1/2 -translate-y-1/2 p-1 hover:bg-surface-hover rounded"
+                    >
+                      {showApiKey ? <EyeOff size={14} /> : <Eye size={14} />}
+                    </button>
+                  </div>
+                </div>
+
+                <div className="text-center text-xs text-text-tertiary">— or —</div>
+
+                {/* Environment Variable */}
+                <div>
+                  <label className="block text-xs font-medium mb-1 text-text-secondary">Environment Variable</label>
+                  <input
+                    type="text"
+                    value={formData.api_key_env}
+                    onChange={(e) => updateField('api_key_env', e.target.value)}
+                    className="input w-full font-mono text-sm"
+                    placeholder="e.g., ANTHROPIC_API_KEY"
+                  />
+                  <p className="text-text-tertiary text-xs mt-1">
+                    Leave both empty to use default env var for the provider
+                  </p>
+                </div>
+              </div>
+            )}
+
+            {/* Info for Claude Code/SDK */}
+            {['claude-code', 'claude-sdk'].includes(formData.provider) && (
+              <div className="p-3 bg-primary/10 rounded-lg border border-primary/30 text-sm">
+                <div className="flex items-center gap-2 font-medium text-primary">
+                  <CheckCircle size={14} />
+                  No API key needed
+                </div>
+                <p className="text-text-secondary mt-1 text-xs">
+                  Uses Claude Code authentication. Make sure you're logged in via <code className="bg-surface px-1 rounded">claude auth</code>
+                </p>
+              </div>
+            )}
 
             {/* Base URL (for Ollama) */}
             {formData.provider === 'ollama' && (
@@ -482,7 +531,8 @@ function LLMProfiles({ selectedProfile, onSelectProfile, hideHeader = false }) {
         body: JSON.stringify({
           provider: provider.provider,
           model: provider.model,
-          api_key_env: provider.api_key_env || null,
+          api_key: provider.api_key || null,  // Direct API key
+          api_key_env: provider.api_key_env || null,  // Or env var name
           base_url: provider.base_url || null,
           timeout: provider.timeout || 30,
         })

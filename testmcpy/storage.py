@@ -80,7 +80,7 @@ class TestStorage:
         """Initialize database schema."""
         with sqlite3.connect(self.db_path) as conn:
             conn.executescript("""
-                -- Test versions table
+                -- Test versions table (legacy, per-file versioning)
                 CREATE TABLE IF NOT EXISTS test_versions (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     test_path TEXT NOT NULL,
@@ -92,7 +92,7 @@ class TestStorage:
                     UNIQUE(test_path, version)
                 );
 
-                -- Test results table
+                -- Test results table (legacy, per-test results)
                 CREATE TABLE IF NOT EXISTS test_results (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     test_path TEXT NOT NULL,
@@ -111,11 +111,66 @@ class TestStorage:
                     FOREIGN KEY (version_id) REFERENCES test_versions(id)
                 );
 
+                -- Test suites table (collection of questions)
+                CREATE TABLE IF NOT EXISTS test_suites (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    suite_id TEXT NOT NULL UNIQUE,
+                    name TEXT NOT NULL,
+                    version INTEGER NOT NULL DEFAULT 1,
+                    environment_id TEXT,
+                    description TEXT,
+                    content_hash TEXT NOT NULL,
+                    questions TEXT NOT NULL,  -- JSON array of questions
+                    metadata TEXT,  -- JSON object
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                -- Test runs table (grouped execution results)
+                CREATE TABLE IF NOT EXISTS test_runs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_id TEXT NOT NULL UNIQUE,
+                    test_id TEXT NOT NULL,
+                    test_version INTEGER NOT NULL,
+                    environment_id TEXT,
+                    model TEXT NOT NULL,
+                    provider TEXT NOT NULL,
+                    runner_tool TEXT DEFAULT 'preset-mcp-client',
+                    mcp_setup_version TEXT,
+                    started_at TEXT NOT NULL,
+                    completed_at TEXT,
+                    metadata TEXT,  -- JSON object
+                    FOREIGN KEY (test_id) REFERENCES test_suites(suite_id)
+                );
+
+                -- Question results table (per-question results within a run)
+                CREATE TABLE IF NOT EXISTS question_results (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_id TEXT NOT NULL,
+                    question_id TEXT NOT NULL,
+                    answer TEXT,
+                    tool_uses TEXT,  -- JSON array
+                    tool_results TEXT,  -- JSON array
+                    tokens_input INTEGER DEFAULT 0,
+                    tokens_output INTEGER DEFAULT 0,
+                    tti_ms INTEGER,  -- Time to first token
+                    duration_ms INTEGER DEFAULT 0,
+                    evaluations TEXT,  -- JSON array
+                    score REAL DEFAULT 0.0,
+                    passed BOOLEAN NOT NULL,
+                    error TEXT,
+                    FOREIGN KEY (run_id) REFERENCES test_runs(run_id)
+                );
+
                 -- Indexes for common queries
                 CREATE INDEX IF NOT EXISTS idx_versions_path ON test_versions(test_path);
                 CREATE INDEX IF NOT EXISTS idx_results_path ON test_results(test_path);
                 CREATE INDEX IF NOT EXISTS idx_results_created ON test_results(created_at);
                 CREATE INDEX IF NOT EXISTS idx_results_model ON test_results(model);
+                CREATE INDEX IF NOT EXISTS idx_suites_id ON test_suites(suite_id);
+                CREATE INDEX IF NOT EXISTS idx_runs_test_id ON test_runs(test_id);
+                CREATE INDEX IF NOT EXISTS idx_runs_started ON test_runs(started_at);
+                CREATE INDEX IF NOT EXISTS idx_question_results_run ON question_results(run_id);
             """)
 
     def _hash_content(self, content: str) -> str:
@@ -620,6 +675,364 @@ class TestStorage:
                     else 0,
                     "last_error": row["last_error"],
                     "last_run": row["last_run"],
+                }
+                for row in rows
+            ]
+
+    # ==================== Test Suite Management ====================
+
+    def save_suite(
+        self,
+        suite_id: str,
+        name: str,
+        questions: list[dict],
+        environment_id: str | None = None,
+        description: str | None = None,
+        metadata: dict | None = None,
+    ) -> dict[str, Any]:
+        """
+        Save a test suite. Auto-increments version if content changes.
+
+        Returns:
+            Dict with suite info including version number
+        """
+        questions_json = json.dumps(questions, sort_keys=True)
+        content_hash = self._hash_content(questions_json)
+        now = datetime.now(timezone.utc).isoformat()
+
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+
+            # Check if suite exists and if content changed
+            existing = conn.execute(
+                "SELECT version, content_hash FROM test_suites WHERE suite_id = ?",
+                (suite_id,),
+            ).fetchone()
+
+            if existing:
+                if existing["content_hash"] == content_hash:
+                    # No changes, return existing
+                    return self.get_suite(suite_id)
+
+                # Content changed, increment version
+                new_version = existing["version"] + 1
+                conn.execute(
+                    """
+                    UPDATE test_suites SET
+                        name = ?,
+                        version = ?,
+                        environment_id = ?,
+                        description = ?,
+                        content_hash = ?,
+                        questions = ?,
+                        metadata = ?,
+                        updated_at = ?
+                    WHERE suite_id = ?
+                    """,
+                    (
+                        name,
+                        new_version,
+                        environment_id,
+                        description,
+                        content_hash,
+                        questions_json,
+                        json.dumps(metadata) if metadata else None,
+                        now,
+                        suite_id,
+                    ),
+                )
+            else:
+                # New suite
+                new_version = 1
+                conn.execute(
+                    """
+                    INSERT INTO test_suites
+                    (suite_id, name, version, environment_id, description,
+                     content_hash, questions, metadata, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        suite_id,
+                        name,
+                        new_version,
+                        environment_id,
+                        description,
+                        content_hash,
+                        questions_json,
+                        json.dumps(metadata) if metadata else None,
+                        now,
+                        now,
+                    ),
+                )
+
+            conn.commit()
+            return self.get_suite(suite_id)
+
+    def get_suite(self, suite_id: str) -> dict[str, Any] | None:
+        """Get a test suite by ID."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT * FROM test_suites WHERE suite_id = ?", (suite_id,)
+            ).fetchone()
+
+            if not row:
+                return None
+
+            return {
+                "id": suite_id,
+                "name": row["name"],
+                "version": row["version"],
+                "environment_id": row["environment_id"],
+                "description": row["description"],
+                "questions": json.loads(row["questions"]),
+                "metadata": json.loads(row["metadata"]) if row["metadata"] else {},
+                "created_at": row["created_at"],
+                "updated_at": row["updated_at"],
+            }
+
+    def list_suites(self, limit: int = 100) -> list[dict[str, Any]]:
+        """List all test suites."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                """
+                SELECT suite_id, name, version, environment_id, description,
+                       created_at, updated_at,
+                       json_array_length(questions) as question_count
+                FROM test_suites
+                ORDER BY updated_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+
+            return [
+                {
+                    "id": row["suite_id"],
+                    "name": row["name"],
+                    "version": row["version"],
+                    "environment_id": row["environment_id"],
+                    "description": row["description"],
+                    "question_count": row["question_count"],
+                    "created_at": row["created_at"],
+                    "updated_at": row["updated_at"],
+                }
+                for row in rows
+            ]
+
+    # ==================== Test Run Management ====================
+
+    def save_run(
+        self,
+        run_id: str,
+        test_id: str,
+        test_version: int,
+        model: str,
+        provider: str,
+        started_at: str,
+        environment_id: str | None = None,
+        runner_tool: str = "preset-mcp-client",
+        mcp_setup_version: str | None = None,
+        metadata: dict | None = None,
+    ) -> None:
+        """Save a new test run."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                """
+                INSERT INTO test_runs
+                (run_id, test_id, test_version, environment_id, model, provider,
+                 runner_tool, mcp_setup_version, started_at, metadata)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    test_id,
+                    test_version,
+                    environment_id,
+                    model,
+                    provider,
+                    runner_tool,
+                    mcp_setup_version,
+                    started_at,
+                    json.dumps(metadata) if metadata else None,
+                ),
+            )
+            conn.commit()
+
+    def complete_run(self, run_id: str, completed_at: str) -> None:
+        """Mark a test run as completed."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "UPDATE test_runs SET completed_at = ? WHERE run_id = ?",
+                (completed_at, run_id),
+            )
+            conn.commit()
+
+    def save_question_result(
+        self,
+        run_id: str,
+        question_id: str,
+        passed: bool,
+        score: float = 0.0,
+        answer: str | None = None,
+        tool_uses: list | None = None,
+        tool_results: list | None = None,
+        tokens_input: int = 0,
+        tokens_output: int = 0,
+        tti_ms: int | None = None,
+        duration_ms: int = 0,
+        evaluations: list | None = None,
+        error: str | None = None,
+    ) -> None:
+        """Save a question result within a run."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                """
+                INSERT INTO question_results
+                (run_id, question_id, answer, tool_uses, tool_results,
+                 tokens_input, tokens_output, tti_ms, duration_ms,
+                 evaluations, score, passed, error)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    question_id,
+                    answer,
+                    json.dumps(tool_uses) if tool_uses else None,
+                    json.dumps(tool_results) if tool_results else None,
+                    tokens_input,
+                    tokens_output,
+                    tti_ms,
+                    duration_ms,
+                    json.dumps(evaluations) if evaluations else None,
+                    score,
+                    passed,
+                    error,
+                ),
+            )
+            conn.commit()
+
+    def get_run(self, run_id: str) -> dict[str, Any] | None:
+        """Get a test run with all its question results."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+
+            run = conn.execute("SELECT * FROM test_runs WHERE run_id = ?", (run_id,)).fetchone()
+
+            if not run:
+                return None
+
+            questions = conn.execute(
+                "SELECT * FROM question_results WHERE run_id = ? ORDER BY id",
+                (run_id,),
+            ).fetchall()
+
+            question_results = [
+                {
+                    "question_id": q["question_id"],
+                    "answer": q["answer"],
+                    "tool_uses": json.loads(q["tool_uses"]) if q["tool_uses"] else [],
+                    "tool_results": json.loads(q["tool_results"]) if q["tool_results"] else [],
+                    "tokens_input": q["tokens_input"],
+                    "tokens_output": q["tokens_output"],
+                    "tti_ms": q["tti_ms"],
+                    "duration_ms": q["duration_ms"],
+                    "evaluations": json.loads(q["evaluations"]) if q["evaluations"] else [],
+                    "score": q["score"],
+                    "passed": bool(q["passed"]),
+                    "error": q["error"],
+                }
+                for q in questions
+            ]
+
+            total = len(question_results)
+            passed = sum(1 for q in question_results if q["passed"])
+
+            return {
+                "run_id": run["run_id"],
+                "test_id": run["test_id"],
+                "test_version": run["test_version"],
+                "environment_id": run["environment_id"],
+                "model": run["model"],
+                "provider": run["provider"],
+                "runner_tool": run["runner_tool"],
+                "mcp_setup_version": run["mcp_setup_version"],
+                "started_at": run["started_at"],
+                "completed_at": run["completed_at"],
+                "metadata": json.loads(run["metadata"]) if run["metadata"] else {},
+                "question_results": question_results,
+                "summary": {
+                    "total": total,
+                    "passed": passed,
+                    "failed": total - passed,
+                    "pass_rate": (passed / total * 100) if total > 0 else 0,
+                    "total_tokens": sum(
+                        q["tokens_input"] + q["tokens_output"] for q in question_results
+                    ),
+                    "total_duration_ms": sum(q["duration_ms"] for q in question_results),
+                },
+            }
+
+    def list_runs(
+        self,
+        test_id: str | None = None,
+        model: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """List test runs with optional filters."""
+        query = """
+            SELECT
+                r.run_id, r.test_id, r.test_version, r.environment_id,
+                r.model, r.provider, r.runner_tool, r.started_at, r.completed_at,
+                COUNT(q.id) as total_questions,
+                SUM(CASE WHEN q.passed THEN 1 ELSE 0 END) as passed_questions
+            FROM test_runs r
+            LEFT JOIN question_results q ON r.run_id = q.run_id
+        """
+        params = []
+        conditions = []
+
+        if test_id:
+            conditions.append("r.test_id = ?")
+            params.append(test_id)
+
+        if model:
+            conditions.append("r.model = ?")
+            params.append(model)
+
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
+
+        query += """
+            GROUP BY r.run_id
+            ORDER BY r.started_at DESC
+            LIMIT ?
+        """
+        params.append(limit)
+
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(query, params).fetchall()
+
+            return [
+                {
+                    "run_id": row["run_id"],
+                    "test_id": row["test_id"],
+                    "test_version": row["test_version"],
+                    "environment_id": row["environment_id"],
+                    "model": row["model"],
+                    "provider": row["provider"],
+                    "runner_tool": row["runner_tool"],
+                    "started_at": row["started_at"],
+                    "completed_at": row["completed_at"],
+                    "total_questions": row["total_questions"],
+                    "passed_questions": row["passed_questions"] or 0,
+                    "pass_rate": (
+                        (row["passed_questions"] / row["total_questions"] * 100)
+                        if row["total_questions"] > 0
+                        else 0
+                    ),
                 }
                 for row in rows
             ]

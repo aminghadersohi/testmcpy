@@ -79,8 +79,8 @@ class ModelInfo:
 
 CLAUDE_MODELS: list[ModelInfo] = [
     ModelInfo(
-        id="claude-sonnet-4-5-20250514",
-        name="Claude Sonnet 4.5",
+        id="claude-sonnet-4-20250514",
+        name="Claude Sonnet 4",
         provider=Provider.ANTHROPIC,
         description="Best balance of speed and intelligence for most tasks",
         context_window=200_000,
@@ -95,11 +95,11 @@ CLAUDE_MODELS: list[ModelInfo] = [
         ],
         family="claude-4",
         is_default=True,
-        aliases=["claude-sonnet-4-5", "claude-4-sonnet", "sonnet"],
+        aliases=["claude-sonnet-4", "claude-4-sonnet", "sonnet"],
     ),
     ModelInfo(
-        id="claude-opus-4-5-20250514",
-        name="Claude Opus 4.5",
+        id="claude-opus-4-20250514",
+        name="Claude Opus 4",
         provider=Provider.ANTHROPIC,
         description="Most capable model for complex reasoning and analysis",
         context_window=200_000,
@@ -114,11 +114,11 @@ CLAUDE_MODELS: list[ModelInfo] = [
             ModelCapability.REASONING,
         ],
         family="claude-4",
-        aliases=["claude-opus-4-5", "claude-4-opus", "opus"],
+        aliases=["claude-opus-4", "claude-4-opus", "opus"],
     ),
     ModelInfo(
-        id="claude-haiku-3-5-20241022",
-        name="Claude Haiku 3.5",
+        id="claude-3-5-haiku-20241022",
+        name="Claude 3.5 Haiku",
         provider=Provider.ANTHROPIC,
         description="Fastest model for simple tasks and high throughput",
         context_window=200_000,
@@ -132,7 +132,7 @@ CLAUDE_MODELS: list[ModelInfo] = [
             ModelCapability.LONG_CONTEXT,
         ],
         family="claude-3.5",
-        aliases=["claude-haiku-3-5", "claude-3-haiku", "haiku"],
+        aliases=["claude-3-5-haiku", "claude-3-haiku", "haiku"],
     ),
     ModelInfo(
         id="claude-3-5-sonnet-20241022",

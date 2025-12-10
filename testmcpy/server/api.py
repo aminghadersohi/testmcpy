@@ -113,6 +113,7 @@ class TestRunRequest(BaseModel):
     provider: str | None = None
     profile: str | None = None  # MCP profile selection (e.g., "sandbox:Preset Sandbox 66d22a6f")
     test_name: str | None = None  # Optional: run only a specific test by name
+    stream: bool = False  # Enable streaming test output
 
 
 class EvalRunRequest(BaseModel):

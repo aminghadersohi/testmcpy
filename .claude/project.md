@@ -984,6 +984,21 @@ evaluators:
     strict: false
 ```
 
+### 5.1 ✅ HIGH: LLM-as-Judge Evaluator - DONE
+```yaml
+evaluators:
+  - type: llm_judge
+    criteria: "Response correctly answers the user's question"
+    pass_threshold: 0.7
+    provider: anthropic  # or openai, gemini
+    model: claude-sonnet-4-20250514
+    rubric: |
+      Score 1.0: Complete, accurate answer
+      Score 0.7: Mostly correct with minor issues
+      Score 0.4: Partially correct
+      Score 0.0: Incorrect
+```
+
 ### 6. MEDIUM: Multi-Turn Conversations
 Support for sequential test steps that share context.
 

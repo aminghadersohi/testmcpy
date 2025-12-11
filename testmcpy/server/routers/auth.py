@@ -80,7 +80,6 @@ async def debug_auth(request: DebugAuthRequest, record: bool = False, flow_name:
                 protocol_version="OAuth 2.0" if request.auth_type == "oauth" else None,
             )
 
-        token = None
         error = None
 
         try:
@@ -94,21 +93,21 @@ async def debug_auth(request: DebugAuthRequest, record: bool = False, flow_name:
                         )
                     from testmcpy.auth_debugger import debug_oauth_auto_discover_flow
 
-                    metadata = await debug_oauth_auto_discover_flow(
+                    # Auto-discovery returns metadata, not a token
+                    # The actual token exchange requires client credentials
+                    await debug_oauth_auto_discover_flow(
                         mcp_url=request.mcp_url,
                         debugger=debugger,
                         insecure=request.insecure,
                     )
-                    # Return metadata instead of token for auto-discovery
-                    # The actual token exchange requires client credentials
-                    token = None
                 elif not all([request.client_id, request.client_secret, request.token_url]):
                     raise HTTPException(
                         status_code=400,
                         detail="OAuth requires client_id, client_secret, and token_url (or enable oauth_auto_discover)",
                     )
                 else:
-                    token = await debug_oauth_flow(
+                    # Token is captured by debugger trace, not returned directly
+                    await debug_oauth_flow(
                         client_id=request.client_id,
                         client_secret=request.client_secret,
                         token_url=request.token_url,
@@ -120,7 +119,8 @@ async def debug_auth(request: DebugAuthRequest, record: bool = False, flow_name:
                     raise HTTPException(
                         status_code=400, detail="JWT requires api_url, api_token, and api_secret"
                     )
-                token = await debug_jwt_flow(
+                # Token is captured by debugger trace, not returned directly
+                await debug_jwt_flow(
                     api_url=request.api_url,
                     api_token=request.api_token,
                     api_secret=request.api_secret,
@@ -129,7 +129,8 @@ async def debug_auth(request: DebugAuthRequest, record: bool = False, flow_name:
             elif request.auth_type == "bearer":
                 if not request.token:
                     raise HTTPException(status_code=400, detail="Bearer auth requires token")
-                token = await debug_bearer_token(
+                # Token is captured by debugger trace, not returned directly
+                await debug_bearer_token(
                     token=request.token, mcp_url=request.mcp_url, debugger=debugger
                 )
             else:

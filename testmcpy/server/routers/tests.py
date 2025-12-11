@@ -442,7 +442,6 @@ async def run_specific_test_case(
         with open(test_path) as f:
             data = yaml.safe_load(f)
 
-        test_cases = []
         if "test_cases" in data:
             test_case_data = data["test_cases"]
         elif "tests" in data:

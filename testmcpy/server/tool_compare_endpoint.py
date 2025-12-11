@@ -17,14 +17,11 @@ async def compare_tools(request: ToolCompareRequest):
     import time
 
     # Parse profile IDs
-    profile1_parts = request.profile1.split(':', 1)
-    profile2_parts = request.profile2.split(':', 1)
+    profile1_parts = request.profile1.split(":", 1)
+    profile2_parts = request.profile2.split(":", 1)
 
     if len(profile1_parts) != 2 or len(profile2_parts) != 2:
-        raise HTTPException(
-            status_code=400,
-            detail="Profile format must be 'profile_id:mcp_name'"
-        )
+        raise HTTPException(status_code=400, detail="Profile format must be 'profile_id:mcp_name'")
 
     profile1_id, mcp1_name = profile1_parts
     profile2_id, mcp2_name = profile2_parts
@@ -53,7 +50,7 @@ async def compare_tools(request: ToolCompareRequest):
             "success": False,
             "result": None,
             "error": None,
-            "duration_ms": 0
+            "duration_ms": 0,
         }
 
         client = None
@@ -61,16 +58,12 @@ async def compare_tools(request: ToolCompareRequest):
             start_time = time.time()
 
             # Initialize client
-            client = MCPClient(
-                mcp_url=mcp_config.mcp_url,
-                auth=mcp_config.auth
-            )
+            client = MCPClient(mcp_url=mcp_config.mcp_url, auth=mcp_config.auth)
             await client.initialize()
 
             # Call the tool
             tool_result = await client.call_tool(
-                name=request.tool_name,
-                arguments=request.parameters
+                name=request.tool_name, arguments=request.parameters
             )
 
             result["success"] = True
@@ -125,8 +118,9 @@ async def compare_tools(request: ToolCompareRequest):
                 "success_rate2_pct": success_rate2,
                 "faster_profile": 1 if avg_time1 < avg_time2 else 2,
                 "time_difference_ms": abs(avg_time1 - avg_time2),
-                "time_difference_pct": (abs(avg_time1 - avg_time2) / max(avg_time1, avg_time2)) * 100
-            }
+                "time_difference_pct": (abs(avg_time1 - avg_time2) / max(avg_time1, avg_time2))
+                * 100,
+            },
         }
 
     except Exception as e:

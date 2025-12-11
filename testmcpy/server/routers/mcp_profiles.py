@@ -4,10 +4,8 @@ import copy
 import re
 import shutil
 from pathlib import Path
-from typing import Any
-
 import yaml
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field, field_validator
 
 from testmcpy.server.helpers import (

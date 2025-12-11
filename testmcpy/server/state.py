@@ -412,6 +412,16 @@ async def get_or_create_mcp_client(profile_selection: str) -> MCPClient | None:
         return clients[0][1] if clients else None
 
 
+def get_mcp_clients() -> dict[str, MCPClient]:
+    """Get the MCP clients dictionary."""
+    return mcp_clients
+
+
+def get_default_mcp_client() -> MCPClient | None:
+    """Get the default MCP client."""
+    return mcp_client
+
+
 async def close_all_clients():
     """Close all MCP clients (for shutdown)."""
     global mcp_client, mcp_clients

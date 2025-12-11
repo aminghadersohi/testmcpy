@@ -69,7 +69,7 @@ class GenerateTestsRequest(BaseModel):
     provider: str | None = None
 
 
-@router.get("/api/tests")
+@router.get("/tests")
 async def list_tests():
     """List all test files in the tests directory, including subdirectories."""
     tests_dir = Path.cwd() / "tests"
@@ -123,7 +123,7 @@ async def list_tests():
     return {"folders": folders, "files": root_files}
 
 
-@router.get("/api/tests/{filename:path}")
+@router.get("/tests/{filename:path}")
 async def get_test_file(filename: str):
     """Get content of a specific test file (supports paths like 'folder/file.yaml')."""
     tests_dir = Path.cwd() / "tests"
@@ -141,7 +141,7 @@ async def get_test_file(filename: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/api/tests")
+@router.post("/tests")
 async def create_test_file(request: TestFileCreate):
     """Create a new test file. Accepts either structured test data or raw YAML content."""
     tests_dir = Path.cwd() / "tests"
@@ -192,7 +192,7 @@ async def create_test_file(request: TestFileCreate):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.put("/api/tests/{filename:path}")
+@router.put("/tests/{filename:path}")
 async def update_test_file(filename: str, request: TestFileUpdate):
     """Update an existing test file. Accepts either structured test data or raw YAML content."""
     tests_dir = Path.cwd() / "tests"
@@ -238,7 +238,7 @@ async def update_test_file(filename: str, request: TestFileUpdate):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.delete("/api/tests/{filename:path}")
+@router.delete("/tests/{filename:path}")
 async def delete_test_file(filename: str):
     """Delete a test file (supports paths like 'folder/file.yaml')."""
     tests_dir = Path.cwd() / "tests"
@@ -257,7 +257,7 @@ async def delete_test_file(filename: str):
 # Test execution
 
 
-@router.post("/api/tests/run")
+@router.post("/tests/run")
 async def run_tests(request: TestRunRequest):
     """Run test cases from a file."""
     test_path = Path(request.test_path)
@@ -359,7 +359,7 @@ async def run_tests(request: TestRunRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/api/tests/{test_name}/run")
+@router.post("/tests/{test_name}/run")
 async def run_specific_test(test_name: str, request: TestRunRequest | None = None):
     """Run all test cases from a specific test file."""
     tests_dir = Path.cwd() / "tests"
@@ -419,7 +419,7 @@ async def run_specific_test(test_name: str, request: TestRunRequest | None = Non
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/api/tests/{test_name}/cases/{case_index}/run")
+@router.post("/tests/{test_name}/cases/{case_index}/run")
 async def run_specific_test_case(
     test_name: str, case_index: int, request: TestRunRequest | None = None
 ):
@@ -486,7 +486,7 @@ async def run_specific_test_case(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/api/tests/run-tool/{tool_name}")
+@router.post("/tests/run-tool/{tool_name}")
 async def run_tool_tests(tool_name: str, model: str | None = None, provider: str | None = None):
     """Run all tests for a specific tool."""
     # Sanitize tool name for folder lookup
@@ -567,7 +567,7 @@ async def run_tool_tests(tool_name: str, model: str | None = None, provider: str
 # Eval endpoints
 
 
-@router.get("/api/reports")
+@router.get("/reports")
 async def get_reports():
     """Get list of test execution reports."""
     reports_dir = Path.cwd() / "reports"
@@ -605,7 +605,7 @@ async def get_reports():
         raise HTTPException(status_code=500, detail=f"Failed to list reports: {str(e)}")
 
 
-@router.post("/api/eval/run")
+@router.post("/eval/run")
 async def run_eval(request: EvalRunRequest):
     """Run evaluators on a prompt/response pair from chat."""
     try:
@@ -732,7 +732,7 @@ async def run_eval(request: EvalRunRequest):
 # Test generation endpoint
 
 
-@router.post("/api/tests/generate")
+@router.post("/tests/generate")
 async def generate_tests(request: GenerateTestsRequest):
     """Generate tests for an MCP tool using LLM."""
     model = request.model or config.default_model

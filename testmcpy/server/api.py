@@ -119,7 +119,7 @@ async def get_mcp_clients_for_profile(profile_id: str) -> list[tuple[str, MCPCli
             continue
 
         # Create client with auth configuration
-        auth_dict = mcp_server.auth.to_dict()
+        auth_dict = mcp_server.auth.to_dict() if mcp_server.auth else None
         client = MCPClient(mcp_server.mcp_url, auth=auth_dict)
         await client.initialize()
 
@@ -169,7 +169,7 @@ async def get_mcp_client_for_server(profile_id: str, mcp_name: str) -> MCPClient
         return mcp_clients[cache_key]
 
     # Create client with auth configuration
-    auth_dict = mcp_server.auth.to_dict()
+    auth_dict = mcp_server.auth.to_dict() if mcp_server.auth else None
     client = MCPClient(mcp_server.mcp_url, auth=auth_dict)
     await client.initialize()
 

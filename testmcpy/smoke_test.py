@@ -132,9 +132,10 @@ class SmokeTestRunner:
         """Check if a tool can be tested with simple parameter generation.
 
         Returns False if the tool has:
-        - Complex nested object parameters
+        - Complex nested object parameters (including $ref or anyOf with $ref)
         - Required ID parameters (chart_id, dashboard_id, etc.) that need real values
         - Required string parameters that can't have sensible defaults
+        - Required "request" parameters (common pattern for complex inputs)
         """
         input_schema = tool_schema.get("inputSchema", {})
         properties = input_schema.get("properties", {})
@@ -143,13 +144,32 @@ class SmokeTestRunner:
         # Common ID parameter patterns that need real values
         id_param_patterns = ["_id", "id", "_uuid", "uuid", "_key", "key"]
 
+        # Common complex request parameter names
+        complex_param_names = ["request", "payload", "body", "data", "input"]
+
         for param_name in required:
             param_def = properties.get(param_name, {})
 
+            # Check if this is a required parameter with a complex name pattern
+            if param_name.lower() in complex_param_names:
+                return False
+
             # Check if this is a complex object with $ref
             if "$ref" in param_def:
-                # Has $ref reference - too complex for smoke test
                 return False
+
+            # Check if it uses anyOf (union type) - often indicates complex schemas
+            if "anyOf" in param_def:
+                # Check if any option in anyOf has $ref
+                for option in param_def.get("anyOf", []):
+                    if "$ref" in option:
+                        return False
+
+            # Check if it uses oneOf (union type) - similar to anyOf
+            if "oneOf" in param_def:
+                for option in param_def.get("oneOf", []):
+                    if "$ref" in option:
+                        return False
 
             # Check if it's an object type (which might have nested requirements)
             if param_def.get("type") == "object":
@@ -157,7 +177,6 @@ class SmokeTestRunner:
                 nested_props = param_def.get("properties", {})
                 nested_required = param_def.get("required", [])
                 if nested_required or nested_props:
-                    # Has nested structure - too complex
                     return False
 
             # Check if it's a required string parameter that looks like an ID

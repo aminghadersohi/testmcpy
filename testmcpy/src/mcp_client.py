@@ -18,7 +18,6 @@ from fastmcp.client.transports import StreamableHttpTransport
 from mcp.types import Tool as MCPToolDef
 
 from testmcpy.auth_debugger import AuthDebugger
-from testmcpy.config import get_config
 
 
 def create_insecure_httpx_factory():
@@ -94,7 +93,7 @@ async def retry_with_backoff(
         try:
             # Apply timeout to the operation
             return await asyncio.wait_for(func(*args, **kwargs), timeout=timeout)
-        except asyncio.TimeoutError as e:
+        except asyncio.TimeoutError:
             last_exception = MCPTimeoutError(
                 f"Operation timed out after {timeout}s (attempt {attempt + 1}/{max_retries})"
             )
@@ -131,12 +130,16 @@ class MCPTool:
     name: str
     description: str
     input_schema: dict[str, Any]
+    output_schema: dict[str, Any] | None = None
 
     @classmethod
     def from_mcp_tool(cls, tool: MCPToolDef) -> "MCPTool":
         """Create MCPTool from MCP Tool definition."""
         return cls(
-            name=tool.name, description=tool.description or "", input_schema=tool.inputSchema or {}
+            name=tool.name,
+            description=tool.description or "",
+            input_schema=tool.inputSchema or {},
+            output_schema=getattr(tool, "outputSchema", None),
         )
 
     @classmethod
@@ -146,6 +149,7 @@ class MCPTool:
             name=data["name"],
             description=data.get("description", ""),
             input_schema=data.get("inputSchema", {}),
+            output_schema=data.get("outputSchema"),
         )
 
 

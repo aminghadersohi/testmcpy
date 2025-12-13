@@ -32,13 +32,18 @@ def tools(
     with their descriptions and parameter schemas in a readable format.
     """
     # Load config with profile if specified
-    if profile:
-        from testmcpy.config import Config
+    effective_mcp_url = mcp_url or DEFAULT_MCP_URL
+    auth_config = None
 
-        cfg = Config(profile=profile)
-        effective_mcp_url = mcp_url or cfg.get_mcp_url()
-    else:
-        effective_mcp_url = mcp_url or DEFAULT_MCP_URL
+    if profile:
+        from testmcpy.mcp_profiles import get_profile_config
+
+        profile_config = get_profile_config()
+        prof = profile_config.get_profile(profile)
+        if prof and prof.mcps:
+            mcp_server = prof.mcps[0]
+            effective_mcp_url = mcp_url or mcp_server.mcp_url
+            auth_config = mcp_server.auth.to_dict() if mcp_server.auth else None
 
     async def list_tools():
         from testmcpy.src.mcp_client import MCPClient
@@ -52,7 +57,7 @@ def tools(
 
         try:
             with console.status("[bold green]Connecting to MCP service...[/bold green]"):
-                async with MCPClient(effective_mcp_url) as client:
+                async with MCPClient(effective_mcp_url, auth=auth_config) as client:
                     all_tools = await client.list_tools()
 
                     # Apply filter if provided
@@ -84,9 +89,9 @@ def tools(
 
                                 tool_content.append("")
 
-                                # Parameters
+                                # Input Parameters
                                 if tool.input_schema:
-                                    tool_content.append("[bold]Parameters:[/bold]")
+                                    tool_content.append("[bold]Input Parameters:[/bold]")
                                     props = tool.input_schema.get("properties", {})
                                     required = tool.input_schema.get("required", [])
 
@@ -109,7 +114,32 @@ def tools(
                                     else:
                                         tool_content.append("  [dim]No parameters required[/dim]")
                                 else:
-                                    tool_content.append("[dim]No parameter schema[/dim]")
+                                    tool_content.append("[dim]No input schema[/dim]")
+
+                                # Output Schema
+                                tool_content.append("")
+                                if tool.output_schema:
+                                    tool_content.append("[bold]Output Schema:[/bold]")
+                                    out_props = tool.output_schema.get("properties", {})
+                                    out_type = tool.output_schema.get("type", "object")
+
+                                    if out_props:
+                                        for prop_name, prop_info in out_props.items():
+                                            prop_type = prop_info.get("type", "any")
+                                            prop_desc = prop_info.get("description", "")
+
+                                            tool_content.append(
+                                                f"  [cyan]{prop_name}[/cyan]: [yellow]{prop_type}[/yellow]"
+                                            )
+                                            if prop_desc:
+                                                if len(prop_desc) > 60:
+                                                    prop_desc = prop_desc[:60] + "..."
+                                                tool_content.append(f"      [dim]{prop_desc}[/dim]")
+                                    else:
+                                        tool_content.append(f"  [dim]Returns: {out_type}[/dim]")
+                                else:
+                                    tool_content.append("[bold]Output Schema:[/bold]")
+                                    tool_content.append("  [dim]Not specified[/dim]")
 
                                 panel = Panel(
                                     "\n".join(tool_content),
@@ -166,6 +196,7 @@ def tools(
                                 "name": tool.name,
                                 "description": tool.description,
                                 "input_schema": tool.input_schema,
+                                "output_schema": tool.output_schema,
                             }
                             for tool in tools_list
                         ]
@@ -179,6 +210,7 @@ def tools(
                                 "name": tool.name,
                                 "description": tool.description,
                                 "input_schema": tool.input_schema,
+                                "output_schema": tool.output_schema,
                             }
                             for tool in tools_list
                         ]
@@ -241,13 +273,18 @@ def export(
     from testmcpy.formatters import FORMATS
 
     # Load config with profile if specified
-    if profile:
-        from testmcpy.config import Config
+    effective_mcp_url = mcp_url or DEFAULT_MCP_URL
+    auth_config = None
 
-        cfg = Config(profile=profile)
-        effective_mcp_url = mcp_url or cfg.get_mcp_url()
-    else:
-        effective_mcp_url = mcp_url or DEFAULT_MCP_URL
+    if profile:
+        from testmcpy.mcp_profiles import get_profile_config
+
+        profile_config = get_profile_config()
+        prof = profile_config.get_profile(profile)
+        if prof and prof.mcps:
+            mcp_server = prof.mcps[0]
+            effective_mcp_url = mcp_url or mcp_server.mcp_url
+            auth_config = mcp_server.auth.to_dict() if mcp_server.auth else None
 
     # Validate format
     if format not in FORMATS:
@@ -274,7 +311,7 @@ def export(
 
         try:
             with console.status("[bold green]Connecting to MCP service...[/bold green]"):
-                async with MCPClient(effective_mcp_url) as client:
+                async with MCPClient(effective_mcp_url, auth=auth_config) as client:
                     tools_list = await client.list_tools()
 
                     if not tools_list:
@@ -328,6 +365,7 @@ def export(
                                 "name": tool.name,
                                 "description": tool.description,
                                 "input_schema": tool.input_schema,
+                                "output_schema": tool.output_schema,
                             }
                             converted = convert_func(schema_with_metadata)
                         else:

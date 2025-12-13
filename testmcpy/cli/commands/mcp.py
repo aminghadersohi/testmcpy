@@ -73,7 +73,7 @@ def profiles(
             return
 
         try:
-            with open(config_path, "r") as f:
+            with open(config_path) as f:
                 config_data = yaml.safe_load(f) or {}
 
             # Update default
@@ -302,8 +302,9 @@ def explore_cli(
         try:
             from testmcpy.src.mcp_client import MCPClient
 
+            auth_dict = mcp.auth.to_dict() if mcp.auth else None
             with console.status(f"[dim]Connecting to {mcp.name}...[/dim]"):
-                client = MCPClient(mcp.mcp_url)
+                client = MCPClient(mcp.mcp_url, auth=auth_dict)
                 await client.initialize()
                 tools = await client.list_tools()
                 await client.close()
@@ -327,20 +328,38 @@ def explore_cli(
         table.add_column("Description")
 
         for i, tool in enumerate(tools, 1):
+            desc = tool.description if hasattr(tool, "description") else ""
             table.add_row(
                 str(i),
-                tool.get("name", "unknown"),
-                tool.get("description", "")[:80]
-                + ("..." if len(tool.get("description", "")) > 80 else ""),
+                tool.name if hasattr(tool, "name") else "unknown",
+                desc[:80] + ("..." if len(desc) > 80 else ""),
             )
 
         console.print(table)
         console.print(f"\n[dim]Total: {len(tools)} tool(s)[/dim]")
 
     elif output == OutputFormat.json:
-        console.print(json.dumps(tools, indent=2))
+        output_data = [
+            {
+                "name": tool.name,
+                "description": tool.description,
+                "input_schema": tool.input_schema,
+                "output_schema": tool.output_schema,
+            }
+            for tool in tools
+        ]
+        console.print(json.dumps(output_data, indent=2))
 
     elif output == OutputFormat.yaml:
-        console.print(yaml.dump(tools, default_flow_style=False))
+        output_data = [
+            {
+                "name": tool.name,
+                "description": tool.description,
+                "input_schema": tool.input_schema,
+                "output_schema": tool.output_schema,
+            }
+            for tool in tools
+        ]
+        console.print(yaml.dump(output_data, default_flow_style=False))
 
     console.print("\nFor interactive exploration: [cyan]testmcpy explorer[/cyan]")

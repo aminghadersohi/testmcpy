@@ -1,4 +1,12 @@
-"""TUI and interactive commands: dash, explore, chat, interact."""
+"""Interactive commands: chat.
+
+NOTE: TUI (Textual-based) interfaces have been removed from testmcpy.
+We do not want TUI interfaces - they are complex, hard to maintain, and
+often don't work reliably across different terminals.
+
+Use the web UI (testmcpy serve) for visual exploration, or the CLI commands
+for programmatic access. The chat command uses a simple REPL interface.
+"""
 
 import asyncio
 
@@ -13,93 +21,6 @@ from testmcpy.cli.app import (
     app,
     console,
 )
-
-
-@app.command()
-def dash(
-    profile: str = typer.Option(None, "--profile", "-p", help="MCP profile to use"),
-    auto_refresh: bool = typer.Option(False, "--auto-refresh", help="Auto-refresh status"),
-):
-    """
-    Launch interactive TUI dashboard.
-
-    Beautiful terminal-based dashboard for MCP testing and exploration.
-    Navigate with keyboard shortcuts, manage profiles, explore tools, and more.
-
-    Features:
-    - Browse MCP tools and resources
-    - Manage profiles
-    - View connection status
-    - Quick actions and shortcuts
-
-    Press '?' for help once inside the dashboard.
-    """
-    try:
-        from testmcpy.tui.app import run_tui
-    except ImportError:
-        console.print("[red]Error: Textual is required for the TUI dashboard[/red]")
-        console.print("Install with: pip install 'testmcpy[tui]' or pip install textual")
-        console.print("Or upgrade: pip install --upgrade testmcpy")
-        return
-
-    # Launch the TUI
-    try:
-        run_tui(profile=profile, enable_auto_refresh=auto_refresh)
-    except Exception as e:
-        console.print(f"[red]Error launching dashboard:[/red] {e}")
-        import traceback
-
-        console.print(f"[dim]{traceback.format_exc()}[/dim]")
-
-
-@app.command()
-def explore(
-    profile: str | None = typer.Option(
-        None, "--profile", "-p", help="MCP service profile from .mcp_services.yaml"
-    ),
-):
-    """
-    Launch interactive MCP explorer TUI.
-
-    This command starts an interactive terminal interface for browsing and
-    exploring MCP tools, resources, and prompts. Features include:
-
-    - Browse tools organized by categories
-    - View detailed tool documentation and schemas
-    - Search and filter tools
-    - Generate test files from tools
-    - AI-powered documentation optimization
-
-    Navigation:
-    - Arrow keys / hjkl: Navigate tree
-    - Enter: Expand/collapse or show details
-    - /: Search tools
-    - t: Generate test for selected tool
-    - o: Optimize docs for selected tool
-    - h / Esc: Return to home
-    - q: Quit
-    """
-    console.print(
-        Panel.fit(
-            "[bold cyan]MCP Explorer - Interactive TUI[/bold cyan]\n"
-            f"Profile: {profile or 'default'}",
-            border_style="cyan",
-        )
-    )
-
-    try:
-        # Import here to avoid dependency issues if textual not installed
-        from testmcpy.tui.simple_app import run_tui
-
-        run_tui(profile=profile)
-    except ImportError:
-        console.print(
-            "[red]Error: Textual is required for the TUI explorer[/red]\n"
-            "Install with: pip install 'testmcpy[tui]' or pip install textual",
-            markup=False,
-        )
-    except Exception as e:
-        console.print(f"[red]Error launching explorer:[/red] {e}")
 
 
 @app.command()

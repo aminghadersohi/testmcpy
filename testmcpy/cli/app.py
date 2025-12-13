@@ -100,3 +100,4 @@ class ModelProvider(str, Enum):
     anthropic = "anthropic"
     claude_sdk = "claude-sdk"
     claude_cli = "claude-cli"
+    claude_code = "claude-code"

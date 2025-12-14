@@ -287,6 +287,120 @@ class OpenAIProvider(LLMProvider):
                     "OpenAI API key not provided. Set OPENAI_API_KEY in ~/.testmcpy or environment."
                 )
 
+    def _convert_to_openai_tools(self, mcp_tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """
+        Convert MCP tool schemas to OpenAI function calling format.
+
+        MCP format:
+        {
+            "name": "tool_name",
+            "description": "...",
+            "inputSchema": {"type": "object", "properties": {...}}
+        }
+        or
+        {
+            "name": "tool_name",
+            "description": "...",
+            "input_schema": {"type": "object", "properties": {...}}
+        }
+
+        OpenAI format:
+        {
+            "type": "function",
+            "function": {
+                "name": "tool_name",
+                "description": "...",
+                "parameters": {"type": "object", "properties": {...}}
+            }
+        }
+        """
+        openai_tools = []
+        for tool in mcp_tools:
+            # Check if already in OpenAI format
+            if tool.get("type") == "function" and "function" in tool:
+                openai_tools.append(tool)
+                continue
+
+            # Get parameters from various possible keys (MCP uses input_schema or inputSchema)
+            parameters = (
+                tool.get("inputSchema")
+                or tool.get("input_schema")
+                or tool.get("parameters")
+                or {"type": "object"}
+            )
+
+            # Simplify complex schemas that OpenAI can't handle
+            parameters = self._simplify_schema_for_openai(parameters)
+
+            # Convert MCP format to OpenAI format
+            openai_tool = {
+                "type": "function",
+                "function": {
+                    "name": tool.get("name", "unknown"),
+                    "description": tool.get("description", ""),
+                    "parameters": parameters,
+                },
+            }
+            openai_tools.append(openai_tool)
+
+        return openai_tools
+
+    def _simplify_schema_for_openai(self, schema: dict[str, Any]) -> dict[str, Any]:
+        """
+        Simplify complex JSON schemas that OpenAI can't handle.
+
+        OpenAI has issues with:
+        - $defs and $ref (JSON Schema references)
+        - Complex anyOf/oneOf structures
+        - Missing properties on objects
+
+        This method resolves $refs and ensures object types have properties.
+        """
+        if not isinstance(schema, dict):
+            return {"type": "object", "properties": {}}
+
+        # Store $defs for reference resolution
+        defs = schema.pop("$defs", {})
+
+        def resolve_refs(obj: Any) -> Any:
+            """Recursively resolve $ref references."""
+            if isinstance(obj, dict):
+                if "$ref" in obj:
+                    ref_path = obj["$ref"]
+                    # Handle #/$defs/Name format
+                    if ref_path.startswith("#/$defs/"):
+                        def_name = ref_path.split("/")[-1]
+                        if def_name in defs:
+                            resolved = defs[def_name].copy()
+                            # Recursively resolve nested refs
+                            return resolve_refs(resolved)
+                    return {"type": "string"}  # Fallback
+
+                return {k: resolve_refs(v) for k, v in obj.items()}
+            elif isinstance(obj, list):
+                return [resolve_refs(item) for item in obj]
+            return obj
+
+        # Resolve all $refs
+        resolved = resolve_refs(schema)
+
+        # Ensure object types have properties
+        if resolved.get("type") == "object" and "properties" not in resolved:
+            resolved["properties"] = {}
+
+        # Handle anyOf by taking the first valid option or simplifying
+        if "anyOf" in resolved and "type" not in resolved:
+            any_of = resolved.get("anyOf", [])
+            # Find first non-null type
+            for opt in any_of:
+                if isinstance(opt, dict) and opt.get("type") != "null":
+                    # Merge the option into the schema
+                    resolved = {**resolved, **opt}
+                    del resolved["anyOf"]
+                    break
+
+        return resolved
+
     async def generate_with_tools(
         self,
         prompt: str,
@@ -319,7 +433,9 @@ class OpenAIProvider(LLMProvider):
             if is_o1_model:
                 request_data["max_completion_tokens"] = 1000
             else:
-                request_data["tools"] = tools
+                # Convert MCP tool format to OpenAI function calling format
+                openai_tools = self._convert_to_openai_tools(tools)
+                request_data["tools"] = openai_tools
                 request_data["tool_choice"] = "auto"
                 request_data["temperature"] = 0.1
                 request_data["max_tokens"] = 1000
@@ -793,7 +909,7 @@ class AnthropicProvider(LLMProvider):
                 try:
                     tool_result = await self.tool_discovery.execute_tool_call(tool_call)
                     # Tool results are returned separately, not appended to response text
-                except Exception as e:
+                except Exception:
                     pass  # Errors are handled by the tool execution
 
             # Calculate usage and cost
@@ -1284,7 +1400,7 @@ class ClaudeCodeProvider(LLMProvider):
             )
 
             try:
-                print(f"[ClaudeCode] Waiting for response...")
+                print("[ClaudeCode] Waiting for response...")
                 stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
                 print(f"[ClaudeCode] Got response, returncode={process.returncode}")
             except asyncio.TimeoutError:
@@ -1306,7 +1422,7 @@ class ClaudeCodeProvider(LLMProvider):
                 try:
                     result = await self.tool_discovery.execute_tool_call(tool_call)
                     # Tool results are returned separately, not appended to response text
-                except Exception as e:
+                except Exception:
                     pass  # Errors are handled by the tool execution
 
             return LLMResult(

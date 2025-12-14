@@ -384,7 +384,7 @@ function AppContent() {
                 }}
               />
             } />
-            <Route path="/llm-profiles" element={<LLMProfiles selectedProfile={selectedLlmProfile} onSelectProfile={setSelectedLlmProfile} />} />
+            <Route path="/llm-profiles" element={<LLMProfiles selectedProfile={selectedLlmProfile} onSelectProfile={setSelectedLlmProfile} onProfilesChange={loadLlmProfiles} />} />
           </Routes>
         </main>
 

@@ -445,7 +445,7 @@ function ProviderEditorModal({ provider, availableModels, onSave, onCancel }) {
   )
 }
 
-function LLMProfiles({ selectedProfile, onSelectProfile, hideHeader = false }) {
+function LLMProfiles({ selectedProfile, onSelectProfile, onProfilesChange, hideHeader = false }) {
   const [profiles, setProfiles] = useState([])
   const [defaultProfile, setDefaultProfile] = useState(null)
   const [availableModels, setAvailableModels] = useState([])
@@ -472,7 +472,7 @@ function LLMProfiles({ selectedProfile, onSelectProfile, hideHeader = false }) {
     }
   }, [profiles])
 
-  const loadProfiles = async () => {
+  const loadProfiles = async (notifyParent = false) => {
     setLoading(true)
     setError(null)
     try {
@@ -484,6 +484,10 @@ function LLMProfiles({ selectedProfile, onSelectProfile, hideHeader = false }) {
       } else {
         setProfiles(data.profiles || [])
         setDefaultProfile(data.default)
+        // Notify parent component to refresh its state
+        if (notifyParent && onProfilesChange) {
+          onProfilesChange()
+        }
       }
     } catch (error) {
       console.error('Failed to load LLM profiles:', error)
@@ -570,7 +574,7 @@ function LLMProfiles({ selectedProfile, onSelectProfile, hideHeader = false }) {
       const data = await res.json()
 
       if (data.success) {
-        await loadProfiles()
+        await loadProfiles(true)
         setProfileEditor(null)
         showToast('Profile created successfully')
       } else {
@@ -599,7 +603,7 @@ function LLMProfiles({ selectedProfile, onSelectProfile, hideHeader = false }) {
       const data = await res.json()
 
       if (data.success) {
-        await loadProfiles()
+        await loadProfiles(true)
         setProfileEditor(null)
         showToast('Profile updated successfully')
       } else {
@@ -619,7 +623,7 @@ function LLMProfiles({ selectedProfile, onSelectProfile, hideHeader = false }) {
       const data = await res.json()
 
       if (data.success) {
-        await loadProfiles()
+        await loadProfiles(true)
         setConfirmDialog(null)
         showToast('Profile deleted successfully')
       } else {
@@ -639,7 +643,7 @@ function LLMProfiles({ selectedProfile, onSelectProfile, hideHeader = false }) {
       const data = await res.json()
 
       if (data.success) {
-        await loadProfiles()
+        await loadProfiles(true)
         if (onSelectProfile) {
           onSelectProfile(profileId)
         }
@@ -678,7 +682,7 @@ function LLMProfiles({ selectedProfile, onSelectProfile, hideHeader = false }) {
       const data = await res.json()
 
       if (data.success) {
-        await loadProfiles()
+        await loadProfiles(true)
         setProviderEditor(null)
         showToast('Provider added successfully')
       } else {
@@ -716,7 +720,7 @@ function LLMProfiles({ selectedProfile, onSelectProfile, hideHeader = false }) {
       const data = await res.json()
 
       if (data.success) {
-        await loadProfiles()
+        await loadProfiles(true)
         setProviderEditor(null)
         showToast('Provider updated successfully')
       } else {
@@ -750,7 +754,7 @@ function LLMProfiles({ selectedProfile, onSelectProfile, hideHeader = false }) {
       const data = await res.json()
 
       if (data.success) {
-        await loadProfiles()
+        await loadProfiles(true)
         showToast(`${currentProfile.providers[providerIndex].name} set as default`)
       } else {
         showToast(data.detail || 'Failed to set default provider', 'error')
@@ -778,7 +782,7 @@ function LLMProfiles({ selectedProfile, onSelectProfile, hideHeader = false }) {
       const data = await res.json()
 
       if (data.success) {
-        await loadProfiles()
+        await loadProfiles(true)
         setConfirmDialog(null)
         showToast('Provider removed successfully')
       } else {
@@ -811,7 +815,7 @@ function LLMProfiles({ selectedProfile, onSelectProfile, hideHeader = false }) {
       const data = await res.json()
 
       if (data.success) {
-        await loadProfiles()
+        await loadProfiles(true)
         showToast('Default configuration created')
       } else {
         showToast(data.detail || 'Failed to create configuration', 'error')

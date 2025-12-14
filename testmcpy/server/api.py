@@ -40,6 +40,7 @@ class LLMProvider(str, Enum):
     ANTHROPIC = "anthropic"
     CLAUDE_SDK = "claude-sdk"
     CLAUDE_CLI = "claude-cli"
+    CODEX_CLI = "codex-cli"
 
 
 class AuthType(str, Enum):
@@ -80,6 +81,8 @@ class ChatResponse(BaseModel):
     token_usage: dict[str, int] | None = None
     cost: float = 0.0
     duration: float = 0.0
+    model: str | None = None  # Model used for this response
+    provider: str | None = None  # Provider used (anthropic, openai, etc.)
 
 
 # Global state
@@ -178,6 +181,53 @@ async def get_mcp_client_for_server(profile_id: str, mcp_name: str) -> MCPClient
     print(f"MCP client initialized for '{profile_id}:{mcp_server.name}' at {mcp_server.mcp_url}")
 
     return client
+
+
+async def clear_cached_client(cache_key: str) -> bool:
+    """
+    Clear a cached MCP client by its cache key.
+
+    Args:
+        cache_key: Cache key in format "{profile_id}:{mcp_name}"
+
+    Returns:
+        True if a client was cleared, False if no client was cached
+    """
+    global mcp_clients
+
+    client = mcp_clients.pop(cache_key, None)
+    if client:
+        try:
+            await client.close()
+            print(f"Cleared cached client '{cache_key}' (stale JWT token)")
+        except Exception as e:
+            print(f"Warning: Failed to close cached client '{cache_key}': {e}")
+        return True
+    return False
+
+
+def is_auth_error(error_msg: str) -> bool:
+    """Check if an error message indicates an authentication failure."""
+    error_lower = error_msg.lower()
+    return (
+        "401" in error_lower
+        or "403" in error_lower
+        or "unauthorized" in error_lower
+        or "forbidden" in error_lower
+        or "not connect" in error_lower
+    )
+
+
+def is_connection_error(error_msg: str) -> bool:
+    """Check if an error message indicates a connection issue (auth, timeout, or connection failure)."""
+    error_lower = error_msg.lower()
+    return (
+        is_auth_error(error_msg)
+        or "timeout" in error_lower
+        or "timed out" in error_lower
+        or "connection" in error_lower
+        or "refused" in error_lower
+    )
 
 
 @asynccontextmanager
@@ -403,6 +453,7 @@ async def list_models():
 @app.get("/api/mcp/tools")
 async def list_mcp_tools(profiles: list[str] = Query(default=None)):
     """List all MCP tools with their schemas. Supports optional ?profiles=xxx&profiles=yyy parameters."""
+    accessed_servers = []  # Track servers accessed for cache invalidation on error
     try:
         all_tools = []
 
@@ -412,6 +463,7 @@ async def list_mcp_tools(profiles: list[str] = Query(default=None)):
                 if ":" in server_id:
                     # New format: specific server selection
                     profile_id, mcp_name = server_id.split(":", 1)
+                    accessed_servers.append(f"{profile_id}:{mcp_name}")
                     client = await get_mcp_client_for_server(profile_id, mcp_name)
                     if client:
                         tools = await client.list_tools()
@@ -429,6 +481,7 @@ async def list_mcp_tools(profiles: list[str] = Query(default=None)):
                     # Legacy format: entire profile (load all servers from profile)
                     clients = await get_mcp_clients_for_profile(server_id)
                     for mcp_name, client in clients:
+                        accessed_servers.append(f"{server_id}:{mcp_name}")
                         tools = await client.list_tools()
                         for tool in tools:
                             all_tools.append(
@@ -445,25 +498,22 @@ async def list_mcp_tools(profiles: list[str] = Query(default=None)):
     except HTTPException:
         raise
     except Exception as e:
-        # Check if it's a connection error
-        error_msg = str(e).lower()
-        if (
-            "401" in error_msg
-            or "403" in error_msg
-            or "unauthorized" in error_msg
-            or "forbidden" in error_msg
-            or "not connect" in error_msg
-        ):
+        error_msg = str(e)
+        if is_connection_error(error_msg):
+            # Clear stale cached clients so retry can get fresh connection
+            for cache_key in accessed_servers:
+                await clear_cached_client(cache_key)
             raise HTTPException(
                 status_code=503,
-                detail=f"Service unavailable: Unable to connect to MCP server. {str(e)}",
+                detail=f"Service unavailable: Unable to connect to MCP server. {error_msg}",
             )
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=error_msg)
 
 
 @app.get("/api/mcp/resources")
 async def list_mcp_resources(profiles: list[str] = Query(default=None)):
     """List all MCP resources. Supports optional ?profiles=xxx&profiles=yyy parameters."""
+    accessed_servers = []  # Track servers accessed for cache invalidation on error
     try:
         all_resources = []
 
@@ -473,6 +523,7 @@ async def list_mcp_resources(profiles: list[str] = Query(default=None)):
                 if ":" in server_id:
                     # New format: specific server selection
                     profile_id, mcp_name = server_id.split(":", 1)
+                    accessed_servers.append(f"{profile_id}:{mcp_name}")
                     client = await get_mcp_client_for_server(profile_id, mcp_name)
                     if client:
                         resources = await client.list_resources()
@@ -484,6 +535,7 @@ async def list_mcp_resources(profiles: list[str] = Query(default=None)):
                     # Legacy format: entire profile
                     clients = await get_mcp_clients_for_profile(server_id)
                     for mcp_name, client in clients:
+                        accessed_servers.append(f"{server_id}:{mcp_name}")
                         resources = await client.list_resources()
                         for resource in resources:
                             if isinstance(resource, dict):
@@ -494,25 +546,22 @@ async def list_mcp_resources(profiles: list[str] = Query(default=None)):
     except HTTPException:
         raise
     except Exception as e:
-        # Check if it's a connection error
-        error_msg = str(e).lower()
-        if (
-            "401" in error_msg
-            or "403" in error_msg
-            or "unauthorized" in error_msg
-            or "forbidden" in error_msg
-            or "not connect" in error_msg
-        ):
+        error_msg = str(e)
+        if is_connection_error(error_msg):
+            # Clear stale cached clients so retry can get fresh connection
+            for cache_key in accessed_servers:
+                await clear_cached_client(cache_key)
             raise HTTPException(
                 status_code=503,
-                detail=f"Service unavailable: Unable to connect to MCP server. {str(e)}",
+                detail=f"Service unavailable: Unable to connect to MCP server. {error_msg}",
             )
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=error_msg)
 
 
 @app.get("/api/mcp/prompts")
 async def list_mcp_prompts(profiles: list[str] = Query(default=None)):
     """List all MCP prompts. Supports optional ?profiles=xxx&profiles=yyy parameters."""
+    accessed_servers = []  # Track servers accessed for cache invalidation on error
     try:
         all_prompts = []
 
@@ -522,6 +571,7 @@ async def list_mcp_prompts(profiles: list[str] = Query(default=None)):
                 if ":" in server_id:
                     # New format: specific server selection
                     profile_id, mcp_name = server_id.split(":", 1)
+                    accessed_servers.append(f"{profile_id}:{mcp_name}")
                     client = await get_mcp_client_for_server(profile_id, mcp_name)
                     if client:
                         prompts = await client.list_prompts()
@@ -533,6 +583,7 @@ async def list_mcp_prompts(profiles: list[str] = Query(default=None)):
                     # Legacy format: entire profile
                     clients = await get_mcp_clients_for_profile(server_id)
                     for mcp_name, client in clients:
+                        accessed_servers.append(f"{server_id}:{mcp_name}")
                         prompts = await client.list_prompts()
                         for prompt in prompts:
                             if isinstance(prompt, dict):
@@ -543,20 +594,16 @@ async def list_mcp_prompts(profiles: list[str] = Query(default=None)):
     except HTTPException:
         raise
     except Exception as e:
-        # Check if it's a connection error
-        error_msg = str(e).lower()
-        if (
-            "401" in error_msg
-            or "403" in error_msg
-            or "unauthorized" in error_msg
-            or "forbidden" in error_msg
-            or "not connect" in error_msg
-        ):
+        error_msg = str(e)
+        if is_connection_error(error_msg):
+            # Clear stale cached clients so retry can get fresh connection
+            for cache_key in accessed_servers:
+                await clear_cached_client(cache_key)
             raise HTTPException(
                 status_code=503,
-                detail=f"Service unavailable: Unable to connect to MCP server. {str(e)}",
+                detail=f"Service unavailable: Unable to connect to MCP server. {error_msg}",
             )
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=error_msg)
 
 
 # Chat endpoint
@@ -565,19 +612,34 @@ async def list_mcp_prompts(profiles: list[str] = Query(default=None)):
 @app.post("/api/chat")
 async def chat(request: ChatRequest) -> ChatResponse:
     """Send a message to the LLM with MCP tools."""
-    # Get model and provider from LLM profile if specified
+    # Get model, provider, and api_key from LLM profile if specified
+    api_key = None
     if request.llm_profile:
         from testmcpy.llm_profiles import load_llm_profile
 
         llm_profile = load_llm_profile(request.llm_profile)
         if llm_profile:
-            default_provider_config = llm_profile.get_default_provider()
-            if default_provider_config:
-                model = request.model or default_provider_config.model
-                provider = request.provider or default_provider_config.provider
+            # If specific model/provider requested, find matching config
+            if request.model and request.provider:
+                # Find provider config matching the request
+                for provider_config in llm_profile.providers:
+                    if provider_config.model == request.model and provider_config.provider == str(
+                        request.provider.value
+                    ):
+                        api_key = provider_config.api_key
+                        break
+                model = request.model
+                provider = request.provider
             else:
-                model = request.model or config.default_model
-                provider = request.provider or config.default_provider
+                # Use default provider
+                default_provider_config = llm_profile.get_default_provider()
+                if default_provider_config:
+                    model = request.model or default_provider_config.model
+                    provider = request.provider or default_provider_config.provider
+                    api_key = default_provider_config.api_key
+                else:
+                    model = request.model or config.default_model
+                    provider = request.provider or config.default_provider
         else:
             model = request.model or config.default_model
             provider = request.provider or config.default_provider
@@ -591,15 +653,32 @@ async def chat(request: ChatRequest) -> ChatResponse:
             detail="Model and provider must be specified or configured in LLM profile",
         )
 
+    print(f"[Chat] Using provider={provider}, model={model}")
+
+    accessed_servers = []  # Track servers accessed for cache invalidation on error
     try:
         # Determine which MCP clients to use
         clients_to_use = []  # List of (profile_id, mcp_name, client) tuples
-        if request.profiles:
+
+        # Use specified profiles or fall back to default profile
+        profiles_to_use = request.profiles
+        if not profiles_to_use:
+            # Load default profile from config
+            from testmcpy.server.helpers.mcp_config import load_mcp_yaml
+
+            mcp_config = load_mcp_yaml()
+            default_profile = mcp_config.get("default")
+            if default_profile:
+                profiles_to_use = [default_profile]
+                print(f"[Chat] Using default profile: {default_profile}")
+
+        if profiles_to_use:
             # Parse server IDs in format "profileId:mcpName"
-            for server_id in request.profiles:
+            for server_id in profiles_to_use:
                 if ":" in server_id:
                     # New format: specific server selection
                     profile_id, mcp_name = server_id.split(":", 1)
+                    accessed_servers.append(f"{profile_id}:{mcp_name}")
                     client = await get_mcp_client_for_server(profile_id, mcp_name)
                     if client:
                         clients_to_use.append((profile_id, mcp_name, client))
@@ -607,6 +686,7 @@ async def chat(request: ChatRequest) -> ChatResponse:
                     # Legacy format: entire profile (load all servers from profile)
                     profile_clients = await get_mcp_clients_for_profile(server_id)
                     for mcp_name, client in profile_clients:
+                        accessed_servers.append(f"{server_id}:{mcp_name}")
                         clients_to_use.append((server_id, mcp_name, client))
 
         # Gather tools from all clients
@@ -632,13 +712,23 @@ async def chat(request: ChatRequest) -> ChatResponse:
                 )
 
         # Initialize LLM provider
-        llm_provider = create_llm_provider(provider, model)
+        print(f"[Chat] Creating LLM provider: {provider}")
+        provider_kwargs = {}
+        if api_key:
+            provider_kwargs["api_key"] = api_key
+        llm_provider = create_llm_provider(provider, model, **provider_kwargs)
+        print(f"[Chat] Initializing LLM provider...")
         await llm_provider.initialize()
+        print(
+            f"[Chat] LLM provider initialized. Generating response with {len(all_tools)} tools..."
+        )
 
         # Generate response with optional history
+        # Use longer timeout (120s) for Claude CLI with MCP tools
         result = await llm_provider.generate_with_tools(
-            prompt=request.message, tools=all_tools, timeout=30.0, messages=request.history
+            prompt=request.message, tools=all_tools, timeout=120.0, messages=request.history
         )
+        print(f"[Chat] Response generated. Tool calls: {len(result.tool_calls)}")
 
         # Execute tool calls if any
         tool_calls_with_results = []
@@ -714,10 +804,21 @@ async def chat(request: ChatRequest) -> ChatResponse:
             token_usage=result.token_usage,
             cost=result.cost,
             duration=result.duration,
+            model=model,
+            provider=str(provider.value) if hasattr(provider, "value") else str(provider),
         )
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        error_msg = str(e)
+        if is_connection_error(error_msg):
+            # Clear stale cached clients so retry can get fresh connection
+            for cache_key in accessed_servers:
+                await clear_cached_client(cache_key)
+            raise HTTPException(
+                status_code=503,
+                detail=f"Service unavailable: Unable to connect to MCP server. {error_msg}",
+            )
+        raise HTTPException(status_code=500, detail=error_msg)
 
 
 # Catch-all route for React Router (must be before static files)

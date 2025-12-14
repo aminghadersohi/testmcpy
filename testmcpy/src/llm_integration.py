@@ -307,14 +307,22 @@ class OpenAIProvider(LLMProvider):
             # Format for OpenAI API
             messages = [{"role": "user", "content": prompt}]
 
+            # o1 models don't support tools, temperature, or max_tokens
+            is_o1_model = self.model.startswith("o1")
+
             request_data = {
                 "model": self.model,
                 "messages": messages,
-                "tools": tools,
-                "tool_choice": "auto",
-                "temperature": 0.1,
-                "max_tokens": 1000,
             }
+
+            # o1 models use max_completion_tokens, don't support tools/temperature
+            if is_o1_model:
+                request_data["max_completion_tokens"] = 1000
+            else:
+                request_data["tools"] = tools
+                request_data["tool_choice"] = "auto"
+                request_data["temperature"] = 0.1
+                request_data["max_tokens"] = 1000
 
             response = await self.client.post(
                 f"{self.base_url}/chat/completions",
@@ -356,7 +364,7 @@ class OpenAIProvider(LLMProvider):
             tti_ms = int(duration * 1000)  # Non-streaming: TTI = total duration
 
             return LLMResult(
-                response=message.get("content", ""),
+                response=message.get("content") or "",
                 tool_calls=tool_calls,
                 token_usage=token_usage,
                 cost=cost,
@@ -545,8 +553,9 @@ class MCPURLFilter:
 class ToolDiscoveryService:
     """Discovers MCP tools locally and creates sanitized schemas."""
 
-    def __init__(self, mcp_url: str):
+    def __init__(self, mcp_url: str, auth: dict[str, Any] | None = None):
         self.mcp_url = mcp_url
+        self.auth = auth
         self._tools_cache: list[ToolSchema] | None = None
         self._mcp_client: MCPClient | None = None
 
@@ -556,7 +565,7 @@ class ToolDiscoveryService:
             return self._tools_cache
 
         if not self._mcp_client:
-            self._mcp_client = MCPClient(self.mcp_url)
+            self._mcp_client = MCPClient(self.mcp_url, auth=self.auth)
             await self._mcp_client.initialize()
 
         try:
@@ -612,10 +621,15 @@ class AnthropicProvider(LLMProvider):
         self.api_key = api_key or config.get("ANTHROPIC_API_KEY", "")
         self.base_url = base_url
         self.client = httpx.AsyncClient(timeout=60.0)
-        # Use MCP_URL from config if not provided
+        # Use MCP_URL and auth from default profile if not provided
         if mcp_url is None:
             mcp_url = config.get_mcp_url()
-        self.tool_discovery = ToolDiscoveryService(mcp_url)
+        # Get auth from default MCP server
+        auth = None
+        default_mcp = config.get_default_mcp_server()
+        if default_mcp and default_mcp.auth:
+            auth = default_mcp.auth.to_dict()
+        self.tool_discovery = ToolDiscoveryService(mcp_url, auth=auth)
 
     async def initialize(self):
         """Initialize Anthropic provider."""
@@ -852,11 +866,17 @@ class ClaudeSDKProvider(LLMProvider):
         # Use config system for API key
         config = get_config()
         self.api_key = api_key or config.get("ANTHROPIC_API_KEY", "")
-        # Use MCP_URL from config if not provided
+        # Use MCP_URL and auth from default profile if not provided
         if mcp_url is None:
             mcp_url = config.get_mcp_url()
         self.mcp_url = mcp_url
-        self.tool_discovery = ToolDiscoveryService(mcp_url)
+        # Get auth from default MCP server
+        auth = None
+        default_mcp = config.get_default_mcp_server()
+        if default_mcp and default_mcp.auth:
+            auth = default_mcp.auth.to_dict()
+        self.auth_config = auth  # Store auth config for initialize
+        self.tool_discovery = ToolDiscoveryService(mcp_url, auth=auth)
         self._sdk_tools: list[Any] = []
         self._mcp_server_config: dict[str, Any] | None = None
 
@@ -871,13 +891,22 @@ class ClaudeSDKProvider(LLMProvider):
         try:
             from claude_agent_sdk.types import McpHttpServerConfig
 
-            config = get_config()
-
             # Build HTTP server config
             server_config: McpHttpServerConfig = {"type": "http", "url": self.mcp_url}
 
-            # Add bearer token if configured
-            token = config.mcp_auth_token
+            # Fetch auth token based on auth config type
+            token = None
+            if self.auth_config:
+                auth_type = self.auth_config.get("type", "")
+                if auth_type == "jwt":
+                    # Fetch JWT token dynamically
+                    token = await self._fetch_jwt_token()
+                elif auth_type == "bearer":
+                    token = self.auth_config.get("token", "")
+                elif auth_type == "oauth":
+                    # Fetch OAuth token dynamically
+                    token = await self._fetch_oauth_token()
+
             if token:
                 server_config["headers"] = {"Authorization": f"Bearer {token}"}
                 print("[SDK] Configured MCP HTTP server with auth token")
@@ -890,6 +919,80 @@ class ClaudeSDKProvider(LLMProvider):
         except Exception as e:
             print(f"[SDK] ❌ Failed to configure MCP server: {e}")
             self._mcp_server_config = None
+
+    async def _fetch_jwt_token(self) -> str | None:
+        """Fetch JWT token from API."""
+        if not self.auth_config:
+            return None
+
+        api_url = self.auth_config.get("api_url", "")
+        api_token = self.auth_config.get("api_token", "")
+        api_secret = self.auth_config.get("api_secret", "")
+
+        if not all([api_url, api_token, api_secret]):
+            print("[SDK] JWT auth config incomplete")
+            return None
+
+        try:
+            import httpx
+
+            print(f"[SDK] Fetching JWT token from: {api_url}")
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    api_url,
+                    headers={
+                        "Content-Type": "application/json",
+                        "Accept": "application/json",
+                    },
+                    json={"name": api_token, "secret": api_secret},
+                    timeout=30.0,
+                )
+                response.raise_for_status()
+                data = response.json()
+                token = data.get("payload", {}).get("access_token", "")
+                if token:
+                    print(f"[SDK] JWT token fetched successfully (length: {len(token)})")
+                return token
+        except Exception as e:
+            print(f"[SDK] Failed to fetch JWT token: {e}")
+            return None
+
+    async def _fetch_oauth_token(self) -> str | None:
+        """Fetch OAuth token using client credentials."""
+        if not self.auth_config:
+            return None
+
+        token_url = self.auth_config.get("token_url", "")
+        client_id = self.auth_config.get("client_id", "")
+        client_secret = self.auth_config.get("client_secret", "")
+
+        if not all([token_url, client_id, client_secret]):
+            print("[SDK] OAuth auth config incomplete")
+            return None
+
+        try:
+            import httpx
+
+            print(f"[SDK] Fetching OAuth token from: {token_url}")
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    token_url,
+                    data={
+                        "grant_type": "client_credentials",
+                        "client_id": client_id,
+                        "client_secret": client_secret,
+                    },
+                    timeout=30.0,
+                )
+                response.raise_for_status()
+                data = response.json()
+                token = data.get("access_token", "")
+                if token:
+                    print(f"[SDK] OAuth token fetched successfully (length: {len(token)})")
+                return token
+        except Exception as e:
+            print(f"[SDK] Failed to fetch OAuth token: {e}")
+            return None
 
     def _create_sdk_tool(self, tool_schema: ToolSchema):
         """Create an SDK tool wrapper for an MCP tool."""
@@ -1083,14 +1186,25 @@ class ClaudeSDKProvider(LLMProvider):
 class ClaudeCodeProvider(LLMProvider):
     """Claude Code CLI provider via subprocess."""
 
-    def __init__(self, model: str, claude_cli_path: str | None = None, mcp_url: str | None = None):
+    def __init__(
+        self,
+        model: str,
+        claude_cli_path: str | None = None,
+        mcp_url: str | None = None,
+        auth: dict[str, Any] | None = None,
+    ):
         self.model = model
         self.claude_cli_path = claude_cli_path or self._find_claude_cli()
-        # Use MCP_URL from config if not provided
+        # Use MCP_URL and auth from default profile if not provided
         config = get_config()
         if mcp_url is None:
             mcp_url = config.get_mcp_url()
-        self.tool_discovery = ToolDiscoveryService(mcp_url)
+        if auth is None:
+            # Get auth from default MCP server
+            default_mcp = config.get_default_mcp_server()
+            if default_mcp and default_mcp.auth:
+                auth = default_mcp.auth.to_dict()
+        self.tool_discovery = ToolDiscoveryService(mcp_url, auth=auth)
 
     def _find_claude_cli(self) -> str:
         """Find Claude CLI in PATH or common locations."""
@@ -1142,7 +1256,7 @@ class ClaudeCodeProvider(LLMProvider):
         self,
         prompt: str,
         tools: list[dict[str, Any]],
-        timeout: float = 30.0,
+        timeout: float = 120.0,  # Longer timeout for Claude CLI with MCP tools
         messages: list[dict[str, Any]] | None = None,
     ) -> LLMResult:
         """Generate response using Claude Code CLI."""
@@ -1151,19 +1265,30 @@ class ClaudeCodeProvider(LLMProvider):
         try:
             # Create tool-aware prompt template
             enhanced_prompt = self._create_tool_prompt(prompt, tools)
+            print(f"[ClaudeCode] Running claude CLI with timeout={timeout}s")
+            print(
+                f"[ClaudeCode] Command: {self.claude_cli_path} -p <prompt> --dangerously-skip-permissions"
+            )
 
-            # Execute Claude CLI
+            # Execute Claude CLI with tool permissions
+            # Use --dangerously-skip-permissions to bypass all permission checks
+            # Use DEVNULL for stdin to prevent hanging on input
             process = await asyncio.create_subprocess_exec(
                 self.claude_cli_path,
                 "-p",
                 enhanced_prompt,
+                "--dangerously-skip-permissions",
+                stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
 
             try:
+                print(f"[ClaudeCode] Waiting for response...")
                 stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
+                print(f"[ClaudeCode] Got response, returncode={process.returncode}")
             except asyncio.TimeoutError:
+                print(f"[ClaudeCode] TIMEOUT after {timeout}s - killing process")
                 process.kill()
                 await process.wait()
                 raise Exception(f"Claude CLI timeout after {timeout}s")
@@ -1266,9 +1391,15 @@ class GeminiProvider(LLMProvider):
         )
         self.base_url = "https://generativelanguage.googleapis.com/v1beta"
         self.client = httpx.AsyncClient(timeout=60.0)
+        # Use MCP_URL and auth from default profile if not provided
         if mcp_url is None:
             mcp_url = config.get_mcp_url()
-        self.tool_discovery = ToolDiscoveryService(mcp_url)
+        # Get auth from default MCP server
+        auth = None
+        default_mcp = config.get_default_mcp_server()
+        if default_mcp and default_mcp.auth:
+            auth = default_mcp.auth.to_dict()
+        self.tool_discovery = ToolDiscoveryService(mcp_url, auth=auth)
 
     async def initialize(self):
         """Initialize Gemini provider."""
@@ -1437,12 +1568,213 @@ class GeminiProvider(LLMProvider):
 # Factory function to create providers
 
 
+class CodexCLIProvider(LLMProvider):
+    """OpenAI Codex CLI provider via subprocess (similar to Claude Code)."""
+
+    def __init__(
+        self,
+        model: str,
+        codex_cli_path: str | None = None,
+        mcp_url: str | None = None,
+        auth: dict[str, Any] | None = None,
+    ):
+        self.model = model
+        self.codex_cli_path = codex_cli_path or self._find_codex_cli()
+        # Use MCP_URL and auth from default profile if not provided
+        config = get_config()
+        if mcp_url is None:
+            mcp_url = config.get_mcp_url()
+        if auth is None:
+            # Get auth from default MCP server
+            default_mcp = config.get_default_mcp_server()
+            if default_mcp and default_mcp.auth:
+                auth = default_mcp.auth.to_dict()
+        self.tool_discovery = ToolDiscoveryService(mcp_url, auth=auth)
+
+    def _find_codex_cli(self) -> str:
+        """Find Codex CLI in PATH or common locations."""
+        # Check environment variable first
+        cli_path = os.environ.get("CODEX_CLI_PATH")
+        if cli_path and os.path.exists(cli_path):
+            return cli_path
+
+        # Check common locations
+        common_paths = [
+            "/usr/local/bin/codex",
+            "/opt/homebrew/bin/codex",
+            os.path.expanduser("~/.local/bin/codex"),
+            os.path.expanduser("~/.npm-global/bin/codex"),
+            "codex",  # In PATH
+        ]
+
+        for path in common_paths:
+            try:
+                result = subprocess.run([path, "--version"], capture_output=True, timeout=5)
+                if result.returncode == 0:
+                    return path
+            except (subprocess.TimeoutExpired, FileNotFoundError):
+                continue
+
+        raise Exception(
+            "Codex CLI not found. Install via: npm i -g @openai/codex or brew install --cask codex"
+        )
+
+    async def initialize(self):
+        """Initialize Codex CLI provider."""
+        # Verify Codex CLI is working
+        try:
+            result = subprocess.run(
+                [self.codex_cli_path, "--version"], capture_output=True, timeout=10, text=True
+            )
+            if result.returncode != 0:
+                raise Exception(f"Codex CLI error: {result.stderr}")
+        except subprocess.TimeoutExpired:
+            raise Exception("Codex CLI timeout during initialization")
+
+        # Try to pre-discover tools, but don't fail if MCP service is unavailable
+        try:
+            await self.tool_discovery.discover_tools()
+            print(f"✅ Successfully connected to MCP service at {self.tool_discovery.mcp_url}")
+        except Exception as e:
+            print(f"⚠️  Warning: Failed to initialize MCP tools: {e}")
+            print(f"   MCP URL: {self.tool_discovery.mcp_url}")
+            print("   The provider will work without MCP tools (direct API calls only)")
+
+    async def generate_with_tools(
+        self,
+        prompt: str,
+        tools: list[dict[str, Any]],
+        timeout: float = 120.0,
+        messages: list[dict[str, Any]] | None = None,
+    ) -> LLMResult:
+        """Generate response using Codex CLI."""
+        start_time = time.time()
+
+        try:
+            # Create tool-aware prompt template
+            enhanced_prompt = self._create_tool_prompt(prompt, tools)
+
+            # Run codex CLI with prompt
+            # Codex CLI uses stdin for prompts similar to Claude
+            cmd = [
+                self.codex_cli_path,
+                "--print",  # Print response only, no interactive mode
+                "--model",
+                self.model,
+                "--dangerously-skip-permissions",  # Skip permission prompts for automation
+            ]
+
+            # Run as subprocess
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+
+            # Send prompt and wait for response
+            stdout, stderr = await asyncio.wait_for(
+                process.communicate(input=enhanced_prompt.encode()), timeout=timeout
+            )
+
+            response_text = stdout.decode("utf-8").strip()
+
+            if process.returncode != 0:
+                error_text = stderr.decode("utf-8").strip()
+                return LLMResult(
+                    response=f"Codex CLI error: {error_text}",
+                    tool_calls=[],
+                    duration=time.time() - start_time,
+                )
+
+            # Parse tool calls from CLI output
+            tool_calls = self._parse_tool_calls(response_text)
+
+            # Execute tool calls locally
+            for tool_call in tool_calls:
+                try:
+                    await self.tool_discovery.execute_tool_call(tool_call)
+                except Exception:
+                    pass  # Errors are handled by the tool execution
+
+            return LLMResult(
+                response=response_text,
+                tool_calls=tool_calls,
+                token_usage=None,  # CLI doesn't provide token counts
+                cost=0.0,  # CLI usage varies by subscription
+                duration=time.time() - start_time,
+                raw_response={"stdout": response_text},
+            )
+
+        except asyncio.TimeoutError:
+            return LLMResult(
+                response=f"Error: Codex CLI timed out after {timeout}s",
+                tool_calls=[],
+                duration=time.time() - start_time,
+            )
+        except Exception as e:
+            return LLMResult(
+                response=f"Error: {str(e)}", tool_calls=[], duration=time.time() - start_time
+            )
+
+    def _create_tool_prompt(self, prompt: str, tools: list[dict[str, Any]]) -> str:
+        """Create enhanced prompt with tool descriptions."""
+        if not tools:
+            return prompt
+
+        tool_descriptions = []
+        for tool in tools:
+            name = tool.get("name", "unknown")
+            desc = tool.get("description", "")
+            params = tool.get("inputSchema", tool.get("parameters", {}))
+
+            tool_desc = f"**{name}**: {desc}"
+            if params.get("properties"):
+                param_list = ", ".join(params["properties"].keys())
+                tool_desc += f" (parameters: {param_list})"
+
+            tool_descriptions.append(tool_desc)
+
+        return f"""You have access to the following tools:
+
+{chr(10).join(tool_descriptions)}
+
+When you need to use a tool, format your response like this:
+TOOL_CALL: {{"name": "tool_name", "arguments": {{"param": "value"}}}}
+
+User request: {prompt}"""
+
+    def _parse_tool_calls(self, response: str) -> list[dict[str, Any]]:
+        """Parse tool calls from Codex CLI response."""
+        tool_calls = []
+
+        # Look for TOOL_CALL: patterns
+        tool_call_pattern = r"TOOL_CALL:\s*(\{[^}]+\}|\{[^}]*\{[^}]*\}[^}]*\})"
+        matches = re.findall(tool_call_pattern, response)
+
+        for match in matches:
+            try:
+                call_data = json.loads(match)
+                if "name" in call_data:
+                    tool_calls.append(
+                        {"name": call_data["name"], "arguments": call_data.get("arguments", {})}
+                    )
+            except json.JSONDecodeError:
+                continue
+
+        return tool_calls
+
+    async def close(self):
+        """Close connections."""
+        await self.tool_discovery.close()
+
+
 def create_llm_provider(provider: str, model: str, **kwargs) -> LLMProvider:
     """
     Create an LLM provider instance.
 
     Args:
-        provider: Provider name (ollama, openai, local, anthropic, claude-cli)
+        provider: Provider name (ollama, openai, local, anthropic, claude-cli, codex-cli)
         model: Model name/path
         **kwargs: Additional provider-specific arguments
 
@@ -1459,6 +1791,8 @@ def create_llm_provider(provider: str, model: str, **kwargs) -> LLMProvider:
         "claude-sdk": ClaudeSDKProvider,
         "claude-cli": ClaudeCodeProvider,
         "claude-code": ClaudeCodeProvider,  # Alias for claude-cli
+        "codex-cli": CodexCLIProvider,
+        "codex": CodexCLIProvider,  # Alias
     }
 
     if provider not in providers:

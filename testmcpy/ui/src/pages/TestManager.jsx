@@ -89,6 +89,9 @@ function TestManager({ selectedProfiles = [] }) {
   const [selectedMcpProfile, setSelectedMcpProfile] = useState(null)
   const [llmProfiles, setLlmProfiles] = useState([])
   const [selectedLlmProfile, setSelectedLlmProfile] = useState(null)
+  const [selectedLlmProvider, setSelectedLlmProvider] = useState(null) // specific provider within profile
+  const [runAllLlmsMode, setRunAllLlmsMode] = useState(false)
+  const [allLlmsResults, setAllLlmsResults] = useState(null) // results from running all LLMs
 
   useEffect(() => {
     loadTestFiles()
@@ -195,13 +198,26 @@ function TestManager({ selectedProfiles = [] }) {
       const data = await res.json()
       setLlmProfiles(data.profiles || [])
 
-      // Check localStorage for saved LLM profile
+      // Check localStorage for saved LLM profile and provider
       const savedProfile = localStorage.getItem('selectedLLMProfileForTests')
+      const savedProvider = localStorage.getItem('selectedLLMProviderForTests')
+
       if (savedProfile) {
         setSelectedLlmProfile(savedProfile)
+        if (savedProvider) {
+          setSelectedLlmProvider(savedProvider)
+        }
       } else if (data.default) {
         setSelectedLlmProfile(data.default)
         localStorage.setItem('selectedLLMProfileForTests', data.default)
+        // Set default provider from the profile
+        const defaultProfileData = data.profiles?.find(p => p.profile_id === data.default)
+        if (defaultProfileData?.providers?.length > 0) {
+          const defaultProv = defaultProfileData.providers.find(p => p.default) || defaultProfileData.providers[0]
+          const provKey = `${defaultProv.provider}:${defaultProv.model}`
+          setSelectedLlmProvider(provKey)
+          localStorage.setItem('selectedLLMProviderForTests', provKey)
+        }
       }
     } catch (error) {
       console.error('Failed to load LLM profiles:', error)
@@ -216,20 +232,55 @@ function TestManager({ selectedProfiles = [] }) {
   const handleLlmProfileChange = (profileId) => {
     setSelectedLlmProfile(profileId)
     localStorage.setItem('selectedLLMProfileForTests', profileId)
+    // Reset provider selection when profile changes
+    const profile = llmProfiles.find(p => p.profile_id === profileId)
+    if (profile?.providers?.length > 0) {
+      const defaultProv = profile.providers.find(p => p.default) || profile.providers[0]
+      const provKey = `${defaultProv.provider}:${defaultProv.model}`
+      setSelectedLlmProvider(provKey)
+      localStorage.setItem('selectedLLMProviderForTests', provKey)
+    }
   }
 
-  // Get model and provider from selected LLM profile
+  const handleLlmProviderChange = (providerKey) => {
+    setSelectedLlmProvider(providerKey)
+    localStorage.setItem('selectedLLMProviderForTests', providerKey)
+  }
+
+  // Get all providers across all profiles for "Run All" mode
+  const getAllProviders = () => {
+    const providers = []
+    llmProfiles.forEach(profile => {
+      profile.providers?.forEach(prov => {
+        providers.push({
+          profileId: profile.profile_id,
+          profileName: profile.name,
+          provider: prov.provider,
+          model: prov.model,
+          name: prov.name,
+          key: `${prov.provider}:${prov.model}`
+        })
+      })
+    })
+    return providers
+  }
+
+  // Get model and provider from selected LLM provider
   const getLlmConfig = () => {
+    if (selectedLlmProvider) {
+      const [provider, model] = selectedLlmProvider.split(':')
+      return { model, provider }
+    }
     if (!selectedLlmProfile || llmProfiles.length === 0) {
-      return { model: 'claude-sonnet-4-5', provider: 'anthropic' }
+      return { model: 'claude-sonnet-4-20250514', provider: 'anthropic' }
     }
     const profile = llmProfiles.find(p => p.profile_id === selectedLlmProfile)
     if (!profile || !profile.providers || profile.providers.length === 0) {
-      return { model: 'claude-sonnet-4-5', provider: 'anthropic' }
+      return { model: 'claude-sonnet-4-20250514', provider: 'anthropic' }
     }
     const defaultProvider = profile.providers.find(p => p.default) || profile.providers[0]
     return {
-      model: defaultProvider.model || 'claude-sonnet-4-5',
+      model: defaultProvider.model || 'claude-sonnet-4-20250514',
       provider: defaultProvider.provider || 'anthropic'
     }
   }
@@ -642,11 +693,87 @@ tests:
     }
   }
 
+  // Run tests with ALL LLM providers
+  const runTestsWithAllLlms = async () => {
+    if (!selectedFile) return
+
+    const allProviders = getAllProviders()
+    if (allProviders.length === 0) {
+      alert('No LLM providers configured')
+      return
+    }
+
+    setRunning(true)
+    setRunAllLlmsMode(true)
+    setAllLlmsResults({})
+    setTestResults(null)
+
+    const results = {}
+    let completedCount = 0
+
+    for (const prov of allProviders) {
+      setRunningTests({
+        current: `${prov.name || prov.model} (${prov.provider})`,
+        total: allProviders.length,
+        completed: completedCount,
+        status: 'running'
+      })
+
+      try {
+        const res = await fetch('/api/tests/run', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            test_path: selectedFile.path,
+            model: prov.model,
+            provider: prov.provider,
+            profile: selectedMcpProfile,
+          }),
+        })
+
+        if (res.ok) {
+          const data = await res.json()
+          results[prov.key] = {
+            provider: prov,
+            success: true,
+            data: data,
+            summary: data.summary
+          }
+        } else {
+          const errorData = await res.json().catch(() => ({ detail: 'Unknown error' }))
+          results[prov.key] = {
+            provider: prov,
+            success: false,
+            error: errorData.detail || `HTTP ${res.status}`
+          }
+        }
+      } catch (error) {
+        results[prov.key] = {
+          provider: prov,
+          success: false,
+          error: error.message
+        }
+      }
+
+      completedCount++
+      setAllLlmsResults({ ...results })
+    }
+
+    setRunning(false)
+    setRunAllLlmsMode(false)
+    setRunningTests({
+      current: null,
+      total: 0,
+      completed: 0,
+      status: 'idle'
+    })
+  }
+
   return (
     <div className="h-full flex flex-col">
       {/* Profile Selectors */}
       <div className="px-6 py-3 border-b border-border bg-surface-elevated">
-        <div className="grid grid-cols-3 gap-4">
+        <div className="grid grid-cols-4 gap-4">
           {/* MCP Profile Selector */}
           <div className="flex flex-col gap-1">
             <label className="text-xs font-medium text-text-tertiary uppercase tracking-wide">
@@ -688,22 +815,23 @@ tests:
             </select>
           </div>
 
-          {/* Test Profile Selector */}
+          {/* LLM Provider Selector (within selected profile) */}
           <div className="flex flex-col gap-1">
             <label className="text-xs font-medium text-text-tertiary uppercase tracking-wide">
-              Test Environment
+              LLM Provider
             </label>
             <select
-              value={selectedTestProfile || ''}
-              onChange={(e) => handleTestProfileChange(e.target.value)}
+              value={selectedLlmProvider || ''}
+              onChange={(e) => handleLlmProviderChange(e.target.value)}
               className="input text-sm"
+              disabled={!selectedLlmProfile}
             >
-              {!selectedTestProfile && <option value="">Select environment...</option>}
-              {testProfiles.map(profile => {
-                const defaultConfig = profile.test_configs?.find(c => c.default) || profile.test_configs?.[0]
+              {!selectedLlmProvider && <option value="">Select provider...</option>}
+              {selectedLlmProfile && llmProfiles.find(p => p.profile_id === selectedLlmProfile)?.providers?.map(prov => {
+                const provKey = `${prov.provider}:${prov.model}`
                 return (
-                  <option key={profile.profile_id} value={profile.profile_id}>
-                    {profile.name} {defaultConfig ? `(${defaultConfig.tests_dir})` : ''}
+                  <option key={provKey} value={provKey}>
+                    {prov.name || prov.model} ({prov.provider})
                   </option>
                 )
               })}
@@ -922,11 +1050,20 @@ tests:
                   className="btn btn-primary"
                 >
                   <Play size={16} />
-                  <span>{running ? 'Running...' : 'Run Tests'}</span>
+                  <span>{running && !runAllLlmsMode ? 'Running...' : 'Run Tests'}</span>
                 </button>
-                {selectedLlmProfile && llmProfiles.length > 0 && (
+                <button
+                  onClick={runTestsWithAllLlms}
+                  disabled={running || !selectedFile}
+                  className="btn btn-secondary"
+                  title="Run tests with all configured LLM providers"
+                >
+                  <Play size={16} />
+                  <span>{running && runAllLlmsMode ? `Running All (${runningTests.completed}/${runningTests.total})` : 'Run All LLMs'}</span>
+                </button>
+                {selectedLlmProvider && (
                   <div className="text-xs text-text-tertiary">
-                    Using: {llmProfiles.find(p => p.profile_id === selectedLlmProfile)?.name || 'Default'} profile
+                    Using: {selectedLlmProvider.split(':')[1]} ({selectedLlmProvider.split(':')[0]})
                   </div>
                 )}
               </div>
@@ -1022,6 +1159,87 @@ tests:
                         <p className="text-text-tertiary">No test results available</p>
                       </div>
                     )}
+                  </div>
+                </div>
+              )}
+
+              {/* All LLMs Results Panel */}
+              {allLlmsResults && Object.keys(allLlmsResults).length > 0 && !running && (
+                <div className="h-1/2 border-t border-border overflow-hidden flex flex-col animate-slide-up">
+                  <div className="p-4 border-b border-border bg-surface-elevated">
+                    <div className="flex items-center justify-between">
+                      <h3 className="font-semibold text-lg text-text-primary">All LLMs Comparison</h3>
+                      <button
+                        onClick={() => setAllLlmsResults(null)}
+                        className="p-1.5 hover:bg-surface-hover rounded text-text-tertiary hover:text-text-primary"
+                        title="Clear results"
+                      >
+                        <X size={16} />
+                      </button>
+                    </div>
+                    <p className="text-sm text-text-tertiary mt-1">
+                      Results from {Object.keys(allLlmsResults).length} provider{Object.keys(allLlmsResults).length !== 1 ? 's' : ''}
+                    </p>
+                  </div>
+
+                  <div className="flex-1 overflow-auto p-4 bg-surface">
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-sm">
+                        <thead>
+                          <tr className="border-b border-border">
+                            <th className="text-left py-2 px-3 text-text-secondary font-medium">Provider</th>
+                            <th className="text-left py-2 px-3 text-text-secondary font-medium">Model</th>
+                            <th className="text-center py-2 px-3 text-text-secondary font-medium">Status</th>
+                            <th className="text-center py-2 px-3 text-text-secondary font-medium">Passed</th>
+                            <th className="text-center py-2 px-3 text-text-secondary font-medium">Failed</th>
+                            <th className="text-right py-2 px-3 text-text-secondary font-medium">Cost</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {Object.values(allLlmsResults).map((result, idx) => (
+                            <tr key={idx} className="border-b border-border/50 hover:bg-surface-hover">
+                              <td className="py-2 px-3 text-text-primary">
+                                <span className="inline-flex items-center gap-1.5">
+                                  {result.provider.provider}
+                                  {['claude-cli', 'codex-cli'].includes(result.provider.provider) && (
+                                    <span className="px-1.5 py-0.5 text-xs bg-amber-500/20 text-amber-400 rounded">CLI</span>
+                                  )}
+                                  {['claude-sdk'].includes(result.provider.provider) && (
+                                    <span className="px-1.5 py-0.5 text-xs bg-cyan-500/20 text-cyan-400 rounded">SDK</span>
+                                  )}
+                                  {['anthropic', 'openai'].includes(result.provider.provider) && (
+                                    <span className="px-1.5 py-0.5 text-xs bg-emerald-500/20 text-emerald-400 rounded">API</span>
+                                  )}
+                                </span>
+                              </td>
+                              <td className="py-2 px-3 text-text-secondary font-mono text-xs">
+                                {result.provider.model}
+                              </td>
+                              <td className="py-2 px-3 text-center">
+                                {result.success ? (
+                                  <CheckCircle size={16} className="inline text-success" />
+                                ) : (
+                                  <XCircle size={16} className="inline text-error" />
+                                )}
+                              </td>
+                              <td className="py-2 px-3 text-center text-success font-medium">
+                                {result.success ? result.summary?.passed || 0 : '-'}
+                              </td>
+                              <td className="py-2 px-3 text-center text-error font-medium">
+                                {result.success ? result.summary?.failed || 0 : '-'}
+                              </td>
+                              <td className="py-2 px-3 text-right text-text-tertiary">
+                                {result.success && result.summary?.total_cost
+                                  ? `$${result.summary.total_cost.toFixed(4)}`
+                                  : result.error
+                                    ? <span className="text-error text-xs" title={result.error}>Error</span>
+                                    : '-'}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
                   </div>
                 </div>
               )}

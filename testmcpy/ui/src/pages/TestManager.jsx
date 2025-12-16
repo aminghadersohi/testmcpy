@@ -24,7 +24,8 @@ function parseTestLocations(content) {
   const lines = content.split('\n')
   const tests = []
   let inTestsArray = false
-  let currentIndent = 0
+  let testsIndent = 0
+  let testItemIndent = null // The indentation level of test items (first "- name:" found)
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]
@@ -33,7 +34,8 @@ function parseTestLocations(content) {
     // Detect start of tests array
     if (trimmed === 'tests:') {
       inTestsArray = true
-      currentIndent = line.indexOf('tests:')
+      testsIndent = line.indexOf('tests:')
+      testItemIndent = null // Reset for each tests: block
       continue
     }
 
@@ -42,8 +44,14 @@ function parseTestLocations(content) {
       const match = line.match(/^(\s*)- name:\s*["']?([^"'\n]+)["']?/)
       if (match) {
         const indent = match[1].length
-        // Make sure it's at the right indentation level (inside tests array)
-        if (indent > currentIndent) {
+
+        // First time we see "- name:", record that indentation as the test level
+        if (testItemIndent === null && indent > testsIndent) {
+          testItemIndent = indent
+        }
+
+        // Only capture names at the test indentation level (not evaluators which are deeper)
+        if (indent === testItemIndent) {
           tests.push({
             name: match[2].trim(),
             lineNumber: i + 1, // Monaco uses 1-based line numbers

@@ -290,7 +290,8 @@ class CSPMiddleware(BaseHTTPMiddleware):
         # In production, you'd want to tighten this up
         response.headers["Content-Security-Policy"] = (
             "default-src * 'unsafe-inline' 'unsafe-eval' data: blob:; "
-            "script-src * 'unsafe-inline' 'unsafe-eval'; "
+            "script-src * 'unsafe-inline' 'unsafe-eval' blob:; "
+            "worker-src * blob:; "
             "style-src * 'unsafe-inline'; "
             "img-src * data: blob:; "
             "font-src * data:; "

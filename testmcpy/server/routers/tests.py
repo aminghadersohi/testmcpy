@@ -486,7 +486,12 @@ async def run_specific_test_case(
 
 
 @router.post("/tests/run-tool/{tool_name}")
-async def run_tool_tests(tool_name: str, model: str | None = None, provider: str | None = None):
+async def run_tool_tests(
+    tool_name: str,
+    model: str | None = None,
+    provider: str | None = None,
+    profile: str | None = None,
+):
     """Run all tests for a specific tool."""
     # Sanitize tool name for folder lookup
     safe_tool_name = "".join(c if c.isalnum() or c in ("_", "-") else "_" for c in tool_name)
@@ -511,6 +516,19 @@ async def run_tool_tests(tool_name: str, model: str | None = None, provider: str
     provider = provider or config.default_provider
 
     try:
+        # Get MCP client - use profile or default
+        mcp_client = None
+        effective_profile = profile
+        if not effective_profile:
+            # Try to get default profile from config
+            from testmcpy.server.helpers.mcp_config import load_mcp_yaml
+
+            mcp_config = load_mcp_yaml()
+            effective_profile = mcp_config.get("default")
+
+        if effective_profile:
+            mcp_client = await get_or_create_mcp_client(effective_profile)
+
         all_results = []
         total_summary = {
             "total": 0,
@@ -532,15 +550,17 @@ async def run_tool_tests(tool_name: str, model: str | None = None, provider: str
             else:
                 test_cases.append(TestCase.from_dict(data))
 
-            # Run tests
+            # Run tests with MCP client
             runner = TestRunner(
                 model=model,
                 provider=provider,
                 mcp_url=config.get_mcp_url(),
+                mcp_client=mcp_client,
                 verbose=True,
                 hide_tool_output=False,
             )
 
+            await runner.initialize()
             results = await runner.run_tests(test_cases)
 
             # Aggregate results

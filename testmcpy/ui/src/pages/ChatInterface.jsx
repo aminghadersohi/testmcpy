@@ -418,17 +418,26 @@ function ChatInterface({ selectedProfiles = [], selectedLlmProfile, llmProfiles 
 
     const testName = `test_${Date.now()}`
 
+    // Helper to strip MCP prefix from tool names
+    const stripMcpPrefix = (name) => {
+      if (name && name.includes('__')) {
+        return name.split('__').pop()
+      }
+      return name
+    }
+
     // Build evaluators based on actual tool calls
     let evaluators = `      - name: execution_successful`
 
     if (assistantMessage.tool_calls && assistantMessage.tool_calls.length > 0) {
       const firstTool = assistantMessage.tool_calls[0]
+      const toolName = stripMcpPrefix(firstTool.name)
 
       // Check specific tool was called
       evaluators += `
       - name: was_mcp_tool_called
         args:
-          tool_name: "${firstTool.name}"`
+          tool_name: "${toolName}"`
 
       // Check tool call count if multiple tools
       if (assistantMessage.tool_calls.length > 1) {
@@ -438,35 +447,40 @@ function ChatInterface({ selectedProfiles = [], selectedLlmProfile, llmProfiles 
           expected_count: ${assistantMessage.tool_calls.length}`
       }
 
-      // Add parameter validation for important parameters
+      // Add parameter validation only for simple primitive parameters
+      // Skip empty objects, complex nested structures that cause matching issues
       if (firstTool.arguments && Object.keys(firstTool.arguments).length > 0) {
-        const params = Object.entries(firstTool.arguments)
-          .slice(0, 3) // Limit to first 3 params to keep test manageable
-          .map(([key, value]) => {
-            // Properly escape and format values for YAML
-            let yamlValue
-            if (typeof value === 'string') {
-              // Escape quotes and wrap in quotes
-              yamlValue = `"${value.replace(/"/g, '\\"')}"`
-            } else if (typeof value === 'boolean' || typeof value === 'number') {
-              yamlValue = value
-            } else if (value === null) {
-              yamlValue = 'null'
-            } else {
-              // For objects/arrays, stringify and escape
-              yamlValue = `"${JSON.stringify(value).replace(/"/g, '\\"')}"`
-            }
-            return `            ${key}: ${yamlValue}`
+        const validParams = Object.entries(firstTool.arguments)
+          .filter(([key, value]) => {
+            // Only include string, number, boolean with actual values
+            if (typeof value === 'string' && value.length > 0 && value !== '{}') return true
+            if (typeof value === 'number') return true
+            if (typeof value === 'boolean') return true
+            return false
           })
-          .join('\n')
+          .slice(0, 3) // Limit to first 3 params
 
-        evaluators += `
+        if (validParams.length > 0) {
+          const params = validParams
+            .map(([key, value]) => {
+              let yamlValue
+              if (typeof value === 'string') {
+                yamlValue = `"${value.replace(/"/g, '\\"')}"`
+              } else {
+                yamlValue = value
+              }
+              return `            ${key}: ${yamlValue}`
+            })
+            .join('\n')
+
+          evaluators += `
       - name: tool_called_with_parameters
         args:
-          tool_name: "${firstTool.name}"
+          tool_name: "${toolName}"
           parameters:
 ${params}
           partial_match: true`
+        }
       }
     }
 

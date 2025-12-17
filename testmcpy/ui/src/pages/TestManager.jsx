@@ -108,6 +108,9 @@ function TestManager({ selectedProfiles = [] }) {
   const [selectedLlmProvider, setSelectedLlmProvider] = useState(null) // specific provider within profile
   const [runAllLlmsMode, setRunAllLlmsMode] = useState(false)
   const [allLlmsResults, setAllLlmsResults] = useState(null) // results from running all LLMs
+  const [resultsHistory, setResultsHistory] = useState([])
+  const [showHistory, setShowHistory] = useState(false)
+  const [selectedHistoryRun, setSelectedHistoryRun] = useState(null)
 
   useEffect(() => {
     loadTestFiles()
@@ -269,6 +272,27 @@ function TestManager({ selectedProfiles = [] }) {
     setSelectedLlmProvider(providerKey)
     localStorage.setItem('selectedLLMProviderForTests', providerKey)
   }
+
+  // Load results history for current file
+  const loadResultsHistory = async (testFile) => {
+    if (!testFile) return
+    try {
+      const res = await fetch(`/api/results/history/${encodeURIComponent(testFile)}`)
+      const data = await res.json()
+      setResultsHistory(data.history || [])
+    } catch (error) {
+      console.error('Failed to load results history:', error)
+      setResultsHistory([])
+    }
+  }
+
+  // Load history when file changes
+  useEffect(() => {
+    if (selectedFile?.relative_path || selectedFile?.filename) {
+      const testFile = selectedFile.relative_path || selectedFile.filename
+      loadResultsHistory(testFile)
+    }
+  }, [selectedFile])
 
   // Get all providers across all profiles for "Run All" mode
   const getAllProviders = () => {
@@ -814,6 +838,11 @@ tests:
               status: 'completed'
             }))
             setRunning(false)
+            // Refresh history after test completes
+            if (selectedFile) {
+              const testFile = selectedFile.relative_path || selectedFile.filename
+              loadResultsHistory(testFile)
+            }
             ws.close()
             break
 
@@ -1259,6 +1288,17 @@ tests:
                     )}
                     <span>{running && runAllLlmsMode ? `${runningTests.completed}/${runningTests.total}` : 'All LLMs'}</span>
                   </button>
+                  {resultsHistory.length > 0 && (
+                    <button
+                      onClick={() => setShowHistory(!showHistory)}
+                      className={`btn ${showHistory ? 'btn-primary' : 'btn-ghost'} text-sm`}
+                      title="View test run history"
+                    >
+                      <History size={14} />
+                      <span>History</span>
+                      <span className="px-1.5 py-0.5 rounded bg-surface text-[10px]">{resultsHistory.length}</span>
+                    </button>
+                  )}
                 </div>
 
                 {selectedLlmProvider && (
@@ -1443,6 +1483,160 @@ tests:
                     total={runningTests.total}
                     status={runningTests.status}
                   />
+                </div>
+              )}
+
+              {/* History Panel */}
+              {showHistory && resultsHistory.length > 0 && (
+                <div className="h-[320px] flex-shrink-0 border-t border-border overflow-hidden flex flex-col bg-surface">
+                  <div className="px-4 py-2 border-b border-border bg-surface-elevated flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                      <History size={14} className="text-primary" />
+                      <h3 className="font-medium text-sm text-text-primary">Run History</h3>
+                      <span className="px-2 py-0.5 text-xs rounded bg-surface text-text-tertiary">
+                        {resultsHistory.length} run{resultsHistory.length !== 1 ? 's' : ''}
+                      </span>
+                    </div>
+                    <button
+                      onClick={() => setShowHistory(false)}
+                      className="p-1.5 hover:bg-surface-hover rounded text-text-tertiary hover:text-text-primary transition-colors"
+                    >
+                      <X size={14} />
+                    </button>
+                  </div>
+
+                  <div className="flex-1 flex overflow-hidden">
+                    {/* Timeline Chart */}
+                    <div className="w-64 flex-shrink-0 border-r border-border p-3 overflow-hidden">
+                      <div className="text-xs text-text-tertiary mb-2 font-medium">Pass Rate Timeline</div>
+                      <div className="h-full flex flex-col justify-end pb-6">
+                        <div className="flex items-end gap-1 h-32">
+                          {resultsHistory.slice(0, 12).reverse().map((run, idx) => {
+                            const passRate = run.pass_rate * 100
+                            const height = Math.max(4, passRate)
+                            return (
+                              <div key={idx} className="flex-1 flex flex-col items-center gap-1">
+                                <div
+                                  className={`w-full rounded-t transition-all cursor-pointer hover:opacity-80 ${
+                                    passRate === 100 ? 'bg-green-500' : passRate >= 50 ? 'bg-yellow-500' : 'bg-red-500'
+                                  }`}
+                                  style={{ height: `${height}%` }}
+                                  title={`${passRate.toFixed(0)}% - ${new Date(run.timestamp).toLocaleDateString()}`}
+                                  onClick={() => setSelectedHistoryRun(run)}
+                                />
+                              </div>
+                            )
+                          })}
+                        </div>
+                        <div className="flex justify-between text-[10px] text-text-disabled mt-1">
+                          <span>Older</span>
+                          <span>Recent</span>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Run List */}
+                    <div className="flex-1 overflow-auto">
+                      <table className="w-full text-xs">
+                        <thead className="sticky top-0 bg-surface-elevated">
+                          <tr className="border-b border-border">
+                            <th className="text-left py-2 px-3 text-text-tertiary font-medium">Date</th>
+                            <th className="text-left py-2 px-3 text-text-tertiary font-medium">Provider</th>
+                            <th className="text-left py-2 px-3 text-text-tertiary font-medium">Model</th>
+                            <th className="text-center py-2 px-3 text-text-tertiary font-medium">Pass</th>
+                            <th className="text-right py-2 px-3 text-text-tertiary font-medium">Cost</th>
+                            <th className="text-right py-2 px-3 text-text-tertiary font-medium">Time</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {resultsHistory.map((run, idx) => (
+                            <tr
+                              key={idx}
+                              className={`border-b border-border/30 cursor-pointer transition-colors ${
+                                selectedHistoryRun?.run_id === run.run_id
+                                  ? 'bg-primary/10'
+                                  : 'hover:bg-surface-hover'
+                              }`}
+                              onClick={() => setSelectedHistoryRun(selectedHistoryRun?.run_id === run.run_id ? null : run)}
+                            >
+                              <td className="py-2 px-3 text-text-secondary">
+                                {new Date(run.timestamp).toLocaleDateString()} {new Date(run.timestamp).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
+                              </td>
+                              <td className="py-2 px-3">
+                                <span className="px-1.5 py-0.5 rounded text-[10px] bg-blue-500/20 text-blue-400">
+                                  {run.provider}
+                                </span>
+                              </td>
+                              <td className="py-2 px-3 text-text-secondary font-mono truncate max-w-[120px]" title={run.model}>
+                                {run.model?.split('-').slice(-2).join('-') || run.model}
+                              </td>
+                              <td className="py-2 px-3 text-center">
+                                <span className={`font-semibold ${
+                                  run.pass_rate === 1 ? 'text-green-400' : run.pass_rate >= 0.5 ? 'text-yellow-400' : 'text-red-400'
+                                }`}>
+                                  {run.passed}/{run.total}
+                                </span>
+                              </td>
+                              <td className="py-2 px-3 text-right text-text-tertiary font-mono">
+                                ${run.total_cost?.toFixed(4) || '0.00'}
+                              </td>
+                              <td className="py-2 px-3 text-right text-text-tertiary">
+                                {run.total_duration?.toFixed(1)}s
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+
+                    {/* Selected Run Details */}
+                    {selectedHistoryRun && (
+                      <div className="w-72 flex-shrink-0 border-l border-border p-3 overflow-auto bg-surface-elevated/50">
+                        <div className="text-xs font-medium text-text-primary mb-2">Run Details</div>
+                        <div className="space-y-2 text-xs">
+                          <div className="flex justify-between">
+                            <span className="text-text-tertiary">Run ID</span>
+                            <span className="text-text-secondary font-mono">{selectedHistoryRun.run_id?.slice(0, 12)}</span>
+                          </div>
+                          <div className="flex justify-between">
+                            <span className="text-text-tertiary">Pass Rate</span>
+                            <span className={`font-semibold ${
+                              selectedHistoryRun.pass_rate === 1 ? 'text-green-400' : 'text-yellow-400'
+                            }`}>
+                              {(selectedHistoryRun.pass_rate * 100).toFixed(0)}%
+                            </span>
+                          </div>
+                          <div className="flex justify-between">
+                            <span className="text-text-tertiary">Tests</span>
+                            <span className="text-text-secondary">{selectedHistoryRun.passed} / {selectedHistoryRun.total}</span>
+                          </div>
+                          <div className="flex justify-between">
+                            <span className="text-text-tertiary">Cost</span>
+                            <span className="text-text-secondary font-mono">${selectedHistoryRun.total_cost?.toFixed(4)}</span>
+                          </div>
+                          <div className="flex justify-between">
+                            <span className="text-text-tertiary">Duration</span>
+                            <span className="text-text-secondary">{selectedHistoryRun.total_duration?.toFixed(1)}s</span>
+                          </div>
+                          {selectedHistoryRun.test_scores && (
+                            <div className="mt-3 pt-3 border-t border-border">
+                              <div className="text-text-tertiary mb-2">Per-Test Results</div>
+                              {Object.entries(selectedHistoryRun.test_scores).map(([name, score]) => (
+                                <div key={name} className="flex items-center justify-between py-1">
+                                  <span className="text-text-secondary truncate max-w-[140px]" title={name}>{name}</span>
+                                  {score.passed ? (
+                                    <CheckCircle size={12} className="text-green-400" />
+                                  ) : (
+                                    <XCircle size={12} className="text-red-400" />
+                                  )}
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    )}
+                  </div>
                 </div>
               )}
 

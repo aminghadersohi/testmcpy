@@ -884,7 +884,7 @@ ${evaluators}
                               </span>
                             </div>
 
-                            {/* Arguments */}
+                            {/* Arguments - shown as collapsible object */}
                             {call.arguments && Object.keys(call.arguments).length > 0 && (
                               <div className="mb-2">
                                 <div className="text-xs text-white/60 mb-1">Arguments:</div>
@@ -892,11 +892,11 @@ ${evaluators}
                                   <ReactJson
                                     src={call.arguments}
                                     theme="monokai"
-                                    collapsed={false}
+                                    collapsed={1}
                                     displayDataTypes={false}
-                                    displayObjectSize={false}
+                                    displayObjectSize={true}
                                     enableClipboard={true}
-                                    name={false}
+                                    name="request"
                                     indentWidth={2}
                                     iconStyle="triangle"
                                     style={{
@@ -909,7 +909,7 @@ ${evaluators}
                               </div>
                             )}
 
-                            {/* Result - always show, with clear label */}
+                            {/* Result - shown as collapsible object (same as arguments) */}
                             {call.result && (
                               <div className="mt-3">
                                 <div className="text-xs text-white/60 mb-2 font-semibold">Raw Tool Output:</div>
@@ -945,11 +945,11 @@ ${evaluators}
                                       return parseJsonStrings(call.result)
                                     })()}
                                     theme="monokai"
-                                    collapsed={3}
+                                    collapsed={1}
                                     displayDataTypes={false}
                                     displayObjectSize={true}
                                     enableClipboard={true}
-                                    name={false}
+                                    name="response"
                                     indentWidth={2}
                                     iconStyle="triangle"
                                     style={{

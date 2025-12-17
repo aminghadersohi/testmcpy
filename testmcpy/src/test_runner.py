@@ -190,6 +190,7 @@ class TestResult:
     auth_error: str | None = None
     auth_error_message: str | None = None
     auth_flow_steps: list[str] = field(default_factory=list)
+    logs: list[str] = field(default_factory=list)  # Provider execution logs
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary."""
@@ -207,6 +208,7 @@ class TestRunner:
         mcp_client: MCPClient | None = None,
         verbose: bool = False,
         hide_tool_output: bool = False,
+        log_callback=None,
     ):
         self.model = model
         self.provider = provider
@@ -218,11 +220,45 @@ class TestRunner:
         self.mcp_client: MCPClient | None = mcp_client
         # Track if we own the client (created it ourselves) vs external
         self._owns_mcp_client = mcp_client is None
+        # Optional callback for real-time log streaming
+        self.log_callback = log_callback
+
+    def _log(self, message: str, force: bool = False):
+        """Log a message to console and optionally via callback."""
+        if self.verbose or force:
+            print(message)
+        if self.log_callback:
+            # Call the callback (might be async, so we handle both)
+            import asyncio
+
+            try:
+                if asyncio.iscoroutinefunction(self.log_callback):
+                    # Schedule async callback
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        asyncio.create_task(self.log_callback(message))
+                    else:
+                        loop.run_until_complete(self.log_callback(message))
+                else:
+                    self.log_callback(message)
+            except RuntimeError:
+                # No event loop, skip callback
+                pass
 
     async def initialize(self):
         """Initialize LLM provider and MCP client."""
         if not self.llm_provider:
-            self.llm_provider = create_llm_provider(provider=self.provider, model=self.model)
+            # Get auth config dict from mcp_client if available
+            auth = None
+            if self.mcp_client and hasattr(self.mcp_client, "auth_config"):
+                auth = self.mcp_client.auth_config
+            self.llm_provider = create_llm_provider(
+                provider=self.provider,
+                model=self.model,
+                mcp_url=self.mcp_url,
+                auth=auth,
+                log_callback=self.log_callback,
+            )
             await self.llm_provider.initialize()
 
         if not self.mcp_client:
@@ -230,9 +266,21 @@ class TestRunner:
             await self.mcp_client.initialize()
 
     async def _call_llm_with_rate_limiting(
-        self, prompt: str, tools: list[dict], timeout: float, max_retries: int = 3
+        self, prompt: str, tools: list[dict], timeout: float, max_retries: int = 3, **kwargs
     ):
         """Call LLM with intelligent rate limiting and retry logic."""
+        # Skip rate limiting for CLI providers (they use subscription, not API)
+        is_cli_provider = self.provider in ("claude-cli", "claude-code", "codex-cli", "codex")
+
+        if is_cli_provider:
+            # For CLI providers, just make the call directly
+            llm_result = await self.llm_provider.generate_with_tools(
+                prompt=prompt, tools=tools, timeout=timeout, **kwargs
+            )
+            llm_result.wait_time = 0.0
+            return llm_result
+
+        # API rate limiting logic below
         # Conservative token estimation - we know cache tokens are ~46K from previous runs
         # Use fixed conservative estimates to avoid 429 errors
         estimated_request_tokens = len(prompt) // 3  # More conservative ratio
@@ -260,7 +308,7 @@ class TestRunner:
 
                 # Make the LLM call
                 llm_result = await self.llm_provider.generate_with_tools(
-                    prompt=prompt, tools=tools, timeout=timeout
+                    prompt=prompt, tools=tools, timeout=timeout, **kwargs
                 )
 
                 # Record successful token usage - include cache tokens for rate limiting
@@ -395,37 +443,52 @@ class TestRunner:
             ]
 
             if self.verbose:
-                print(f"Running test: {test_case.name}")
-                print(f"Prompt: {test_case.prompt}")
-                print(f"Available tools: {len(formatted_tools)}")
-                print(f"Provider: {self.provider}, Model: {self.model}")
-                print(f"MCP URL: {self.mcp_url}")
+                self._log(f"Running test: {test_case.name}")
+                self._log(f"Prompt: {test_case.prompt}")
+                self._log(f"Available tools: {len(formatted_tools)}")
+                self._log(f"Provider: {self.provider}, Model: {self.model}")
+                self._log(f"MCP URL: {self.mcp_url}")
+
+            # Determine timeout - CLI providers need more time
+            # Use at least 120s for claude-cli and codex-cli
+            effective_timeout = test_case.timeout
+            if self.provider in ("claude-cli", "claude-code", "codex-cli", "codex"):
+                effective_timeout = max(test_case.timeout, 120.0)
+                if self.verbose and effective_timeout > test_case.timeout:
+                    self._log(f"  Using extended timeout {effective_timeout}s for CLI provider")
 
             # Get LLM response with tool calls (with rate limiting)
             llm_result = await self._call_llm_with_rate_limiting(
-                prompt=test_case.prompt, tools=formatted_tools, timeout=test_case.timeout
+                prompt=test_case.prompt, tools=formatted_tools, timeout=effective_timeout
             )
 
             # Show requested tool calls before executing them
             if self.verbose and not self.hide_tool_output and llm_result.tool_calls:
-                print(f"  LLM requested {len(llm_result.tool_calls)} tool call(s):")
+                self._log(f"  LLM requested {len(llm_result.tool_calls)} tool call(s):")
                 for i, tool_call in enumerate(llm_result.tool_calls, 1):
                     name = tool_call.get("name", "unknown")
                     args = tool_call.get("arguments", {})
                     # Pretty print arguments as JSON
                     if args:
                         args_json = json.dumps(args, indent=6)
-                        print(f"    {i}. {name}(")
-                        print(f"      {args_json}")
-                        print("    )")
+                        self._log(f"    {i}. {name}(")
+                        self._log(f"      {args_json}")
+                        self._log("    )")
                     else:
-                        print(f"    {i}. {name}()")
+                        self._log(f"    {i}. {name}()")
 
-            # Execute tool calls if any
+            # Execute tool calls if any (skip if already executed by provider like Claude CLI)
             tool_results = []
-            if llm_result.tool_calls:
+            if llm_result.tool_results:
+                # Use pre-executed results from providers like Claude CLI
+                tool_results = llm_result.tool_results
                 if self.verbose and not self.hide_tool_output:
-                    print("  Executing tool calls...")
+                    self._log(
+                        f"  Using {len(tool_results)} pre-executed tool results from provider"
+                    )
+            elif llm_result.tool_calls:
+                if self.verbose and not self.hide_tool_output:
+                    self._log("  Executing tool calls...")
                 for tool_call in llm_result.tool_calls:
                     mcp_tool_call = MCPToolCall(
                         name=tool_call["name"], arguments=tool_call.get("arguments", {})
@@ -475,12 +538,12 @@ class TestRunner:
 
                 if self.verbose:
                     status = "PASS" if eval_result.passed else "FAIL"
-                    print(
+                    self._log(
                         f"  Evaluator {evaluator.name}: {status} (score: {eval_result.score:.2f})"
                     )
-                    print(f"    Reason: {eval_result.reason}")
+                    self._log(f"    Reason: {eval_result.reason}")
                     if eval_result.details:
-                        print(f"    Details: {eval_result.details}")
+                        self._log(f"    Details: {eval_result.details}")
 
                 if not eval_result.passed:
                     all_passed = False
@@ -488,36 +551,36 @@ class TestRunner:
 
             if self.verbose and not self.hide_tool_output:
                 # Display LLM response
-                print("  LLM Response:")
+                self._log("  LLM Response:")
                 response_lines = llm_result.response.split("\n")
                 for line in response_lines:
-                    print(f"    {line}")
+                    self._log(f"    {line}")
 
                 # Display tool calls if any
                 if llm_result.tool_calls:
-                    print(f"  Tool Calls: {len(llm_result.tool_calls)}")
+                    self._log(f"  Tool Calls: {len(llm_result.tool_calls)}")
                     for i, tool_call in enumerate(llm_result.tool_calls, 1):
-                        print(
+                        self._log(
                             f"    {i}. {tool_call.get('name', 'unknown')}({tool_call.get('arguments', {})})"
                         )
 
                 # Display token usage and cost information
                 tokens = llm_result.token_usage
                 if tokens:
-                    print("  Token Usage:")
+                    self._log("  Token Usage:")
                     if "prompt" in tokens:
-                        print(f"    Input: {tokens['prompt']} tokens")
+                        self._log(f"    Input: {tokens['prompt']} tokens")
                     if "completion" in tokens:
-                        print(f"    Output: {tokens['completion']} tokens")
+                        self._log(f"    Output: {tokens['completion']} tokens")
                     if tokens.get("cache_creation", 0) > 0:
-                        print(f"    Cache Creation: {tokens['cache_creation']} tokens")
+                        self._log(f"    Cache Creation: {tokens['cache_creation']} tokens")
                     if tokens.get("cache_read", 0) > 0:
-                        print(f"    Cache Read: {tokens['cache_read']} tokens (FREE!)")
+                        self._log(f"    Cache Read: {tokens['cache_read']} tokens (FREE!)")
                     if "total" in tokens:
-                        print(f"    Total: {tokens['total']} tokens")
+                        self._log(f"    Total: {tokens['total']} tokens")
 
                 if llm_result.cost > 0:
-                    print(f"  Cost: ${llm_result.cost:.4f}")
+                    self._log(f"  Cost: ${llm_result.cost:.4f}")
 
             avg_score = total_score / len(test_case.evaluators) if test_case.evaluators else 0.0
 
@@ -527,7 +590,7 @@ class TestRunner:
             actual_duration = max(0.0, total_duration - wait_time)  # Ensure non-negative
 
             if self.verbose and wait_time > 0:
-                print(
+                self._log(
                     f"  Timing: {actual_duration:.2f}s execution + {wait_time:.2f}s wait = {total_duration:.2f}s total"
                 )
 
@@ -559,6 +622,7 @@ class TestRunner:
                 auth_error=auth_error,
                 auth_error_message=auth_error_message,
                 auth_flow_steps=auth_flow_steps,
+                logs=llm_result.logs if hasattr(llm_result, "logs") else [],
             )
 
         except Exception as e:
@@ -566,8 +630,12 @@ class TestRunner:
             total_duration = time.time() - start_time
             # Try to get wait time from any partial LLM result, default to 0
             wait_time = 0.0
-            if "llm_result" in locals() and hasattr(llm_result, "wait_time"):
-                wait_time = llm_result.wait_time
+            logs = []
+            if "llm_result" in locals():
+                if hasattr(llm_result, "wait_time"):
+                    wait_time = llm_result.wait_time
+                if hasattr(llm_result, "logs"):
+                    logs = llm_result.logs
             actual_duration = max(0.0, total_duration - wait_time)
 
             return TestResult(
@@ -582,6 +650,7 @@ class TestRunner:
                 auth_error=auth_error,
                 auth_error_message=auth_error_message,
                 auth_flow_steps=auth_flow_steps,
+                logs=logs,
             )
 
         finally:
@@ -636,17 +705,25 @@ class TestRunner:
                 if self.verbose:
                     print(f"  Step {step_idx + 1}/{len(test_case.steps)}: {step.prompt[:50]}...")
 
+                # Determine timeout - CLI providers need more time
+                effective_timeout = step.timeout
+                if self.provider in ("claude-cli", "claude-code", "codex-cli", "codex"):
+                    effective_timeout = max(step.timeout, 120.0)
+
                 # Call LLM with conversation history
                 llm_result = await self._call_llm_with_rate_limiting(
                     prompt=step.prompt,
                     tools=formatted_tools,
-                    timeout=step.timeout,
+                    timeout=effective_timeout,
                     messages=conversation_history if conversation_history else None,
                 )
 
-                # Execute tool calls
+                # Execute tool calls (skip if already executed by provider like Claude CLI)
                 tool_results = []
-                if llm_result.tool_calls:
+                if llm_result.tool_results:
+                    # Use pre-executed results from providers like Claude CLI
+                    tool_results = llm_result.tool_results
+                elif llm_result.tool_calls:
                     for tool_call in llm_result.tool_calls:
                         mcp_tool_call = MCPToolCall(
                             name=tool_call["name"],
@@ -781,9 +858,13 @@ class TestRunner:
                     )
 
                 # Add minimum delay between tests to prevent rate limiting bursts
+                # Skip delay for CLI providers (they use subscription, not API rate limits)
                 if i < len(test_cases) - 1:  # Don't wait after the last test
-                    min_delay = 15  # 15 seconds minimum between tests
-                    if self.verbose:
+                    if self.provider in ("claude-cli", "claude-code", "codex-cli", "codex"):
+                        min_delay = 1  # Minimal delay for CLI providers
+                    else:
+                        min_delay = 15  # 15 seconds for API providers
+                    if self.verbose and min_delay > 1:
                         print(
                             f"  Waiting {min_delay}s before next test to prevent rate limiting..."
                         )

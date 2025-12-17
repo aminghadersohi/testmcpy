@@ -1,14 +1,19 @@
 """
-WebSocket support for streaming chat responses.
+WebSocket support for streaming chat responses and test execution.
 """
 
 import asyncio
+import time
+from pathlib import Path
 
+import yaml
 from fastapi import WebSocket, WebSocketDisconnect
 
 from testmcpy.config import get_config
+from testmcpy.server.state import get_or_create_mcp_client
 from testmcpy.src.llm_integration import create_llm_provider
 from testmcpy.src.mcp_client import MCPClient, MCPToolCall
+from testmcpy.src.test_runner import TestCase, TestRunner
 
 
 class ConnectionManager:
@@ -164,4 +169,201 @@ async def handle_chat_websocket(websocket: WebSocket, mcp_client: MCPClient):
         manager.disconnect(websocket)
     except Exception as e:
         print(f"WebSocket error: {e}")
+        manager.disconnect(websocket)
+
+
+async def handle_test_websocket(websocket: WebSocket):
+    """
+    Handle WebSocket for streaming test execution with real-time logs.
+
+    Message format from client:
+    {
+        "type": "run_test",
+        "test_path": "/path/to/test.yaml",
+        "test_name": "optional_specific_test",
+        "model": "claude-sonnet-4-20250514",
+        "provider": "claude-cli",
+        "profile": "mcp_profile_id"
+    }
+
+    Message format to client:
+    {
+        "type": "log" | "test_start" | "test_complete" | "all_complete" | "error",
+        "message": "...",
+        "test_name": "...",
+        "result": {...}
+    }
+    """
+    await manager.connect(websocket)
+    config = get_config()
+
+    async def send_log(msg: str):
+        """Send a log message to the client."""
+        await manager.send_message({"type": "log", "message": msg}, websocket)
+
+    try:
+        while True:
+            data = await websocket.receive_json()
+
+            if data.get("type") == "run_test":
+                test_path = Path(data.get("test_path", ""))
+                test_name = data.get("test_name")
+                model = data.get("model") or config.default_model
+                provider = data.get("provider") or config.default_provider
+                profile = data.get("profile")
+
+                if not test_path.exists():
+                    await manager.send_message(
+                        {"type": "error", "message": f"Test file not found: {test_path}"},
+                        websocket,
+                    )
+                    continue
+
+                await send_log(f"📁 Loading test file: {test_path}")
+
+                try:
+                    # Load test cases
+                    with open(test_path) as f:
+                        file_data = yaml.safe_load(f)
+
+                    test_cases = []
+                    if "tests" in file_data:
+                        for test_data in file_data["tests"]:
+                            test_cases.append(TestCase.from_dict(test_data))
+                    else:
+                        test_cases.append(TestCase.from_dict(file_data))
+
+                    # Filter to specific test if requested
+                    if test_name:
+                        test_cases = [tc for tc in test_cases if tc.name == test_name]
+                        if not test_cases:
+                            await manager.send_message(
+                                {"type": "error", "message": f"Test '{test_name}' not found"},
+                                websocket,
+                            )
+                            continue
+
+                    await send_log(f"📋 Found {len(test_cases)} test(s) to run")
+                    await send_log(f"🤖 Provider: {provider}, Model: {model}")
+
+                    # Get MCP client - use profile or default
+                    mcp_client = None
+                    effective_profile = profile
+                    if not effective_profile:
+                        # Try to get default profile from config
+                        from testmcpy.server.helpers.mcp_config import load_mcp_yaml
+
+                        mcp_config = load_mcp_yaml()
+                        effective_profile = mcp_config.get("default")
+                        if effective_profile:
+                            await send_log(f"🔌 Using default MCP profile: {effective_profile}")
+
+                    if effective_profile:
+                        await send_log(f"🔌 Loading MCP profile: {effective_profile}")
+                        mcp_client = await get_or_create_mcp_client(effective_profile)
+
+                    # Create runner with streaming log callback
+                    runner = TestRunner(
+                        model=model,
+                        provider=provider,
+                        mcp_url=config.get_mcp_url(),
+                        mcp_client=mcp_client,
+                        verbose=True,
+                        hide_tool_output=False,
+                        log_callback=send_log,
+                    )
+
+                    await send_log("⚙️ Initializing test runner...")
+                    await runner.initialize()
+                    await send_log("✅ Test runner ready")
+
+                    # Run each test one at a time
+                    all_results = []
+                    for i, tc in enumerate(test_cases):
+                        await manager.send_message(
+                            {
+                                "type": "test_start",
+                                "test_name": tc.name,
+                                "index": i,
+                                "total": len(test_cases),
+                            },
+                            websocket,
+                        )
+
+                        await send_log(f"\n{'=' * 50}")
+                        await send_log(f"🧪 Running test {i + 1}/{len(test_cases)}: {tc.name}")
+                        await send_log(f"📝 Prompt: {tc.prompt[:100]}...")
+                        await send_log(f"⏱️ Timeout: {tc.timeout}s")
+
+                        start_time = time.time()
+                        result = await runner.run_test(tc)
+                        elapsed = time.time() - start_time
+
+                        # Send logs from the result
+                        if hasattr(result, "logs") and result.logs:
+                            for log_line in result.logs:
+                                await send_log(log_line)
+
+                        # Send test result
+                        status = "✅ PASSED" if result.passed else "❌ FAILED"
+                        await send_log(f"{status} in {elapsed:.2f}s")
+
+                        if result.tool_calls:
+                            await send_log(f"🔧 Tool calls: {len(result.tool_calls)}")
+                            for tc_call in result.tool_calls:
+                                await send_log(f"   - {tc_call.get('name', 'unknown')}")
+
+                        if result.error:
+                            await send_log(f"⚠️ Error: {result.error}")
+
+                        await manager.send_message(
+                            {
+                                "type": "test_complete",
+                                "test_name": tc.name,
+                                "result": result.to_dict(),
+                            },
+                            websocket,
+                        )
+
+                        all_results.append(result)
+
+                    # Send final summary
+                    passed = sum(1 for r in all_results if r.passed)
+                    failed = len(all_results) - passed
+                    total_cost = sum(r.cost for r in all_results)
+
+                    await send_log(f"\n{'=' * 50}")
+                    await send_log(f"📊 SUMMARY: {passed} passed, {failed} failed")
+                    if total_cost > 0:
+                        await send_log(f"💰 Total cost: ${total_cost:.4f}")
+
+                    await manager.send_message(
+                        {
+                            "type": "all_complete",
+                            "summary": {
+                                "total": len(all_results),
+                                "passed": passed,
+                                "failed": failed,
+                                "total_cost": total_cost,
+                            },
+                            "results": [r.to_dict() for r in all_results],
+                        },
+                        websocket,
+                    )
+
+                except Exception as e:
+                    import traceback
+
+                    tb = traceback.format_exc()
+                    await send_log(f"❌ Error: {str(e)}")
+                    await send_log(f"Traceback:\n{tb}")
+                    await manager.send_message(
+                        {"type": "error", "message": str(e), "traceback": tb},
+                        websocket,
+                    )
+
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
+    except Exception as e:
+        print(f"Test WebSocket error: {e}")
         manager.disconnect(websocket)

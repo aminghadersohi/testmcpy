@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react'
 import { ChevronDown, ChevronRight, Copy, Check, EyeOff, Sparkles, Code2, Search, Command, HelpCircle, CheckSquare, Square, MessageSquare, Wand2, TestTube2, Play, Clock, Bug, AlertCircle, GitCompare, LayoutList, LayoutGrid } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
+import ReactJson from '@microlink/react-json-view'
 import ParameterCard from '../components/ParameterCard'
 import TestGenerationModal from '../components/TestGenerationModal'
 import SchemaCodeViewer from '../components/SchemaCodeViewer'
@@ -30,6 +31,8 @@ function MCPExplorer({ selectedProfiles = [] }) {
   const [toolTests, setToolTests] = useState({}) // Map of tool name -> test info
   const [runningTests, setRunningTests] = useState(new Set()) // Set of tool names currently running tests
   const [viewMode, setViewMode] = useState(() => localStorage.getItem('explorerViewMode') || 'grid') // 'list' or 'grid'
+  const [expandedToolModal, setExpandedToolModal] = useState(null) // Tool object for expanded modal in grid view
+  const [codeViewerSchema, setCodeViewerSchema] = useState({}) // Map of tool name -> 'request' or 'response'
 
   // Smoke test state
   const [smokeTestReport, setSmokeTestReport] = useState(null)
@@ -85,6 +88,7 @@ function MCPExplorer({ selectedProfiles = [] }) {
         setSearchQuery('')
         setSelectedToolForGeneration(null)
         setSelectedToolForOptimization(null)
+        setExpandedToolModal(null)
       }
 
       // "c" - Copy first visible tool
@@ -725,7 +729,7 @@ function MCPExplorer({ selectedProfiles = [] }) {
                     <div
                       key={idx}
                       className="relative bg-gradient-to-br from-surface to-surface-elevated border border-border rounded-xl overflow-hidden hover:border-primary/50 hover:shadow-lg hover:shadow-primary/5 transition-all duration-300 cursor-pointer group"
-                      onClick={() => setSelectedToolForDebug(tool)}
+                      onClick={() => setExpandedToolModal(tool)}
                     >
                       {/* Top accent bar */}
                       <div className={`h-1 w-full ${hasTests ? 'bg-gradient-to-r from-primary to-primary/50' : 'bg-gradient-to-r from-border to-transparent'}`} />
@@ -1078,21 +1082,26 @@ function MCPExplorer({ selectedProfiles = [] }) {
                       </div>
                     )}
 
-                    {/* Parameters - Smart Display with ParameterCard */}
+                    {/* Request Schema */}
                     <div>
                       <div className="flex items-center justify-between mb-3">
                         <h4 className="text-sm font-semibold text-text-secondary">
-                          Parameters
+                          Request Schema
                         </h4>
-                        {tool.input_schema?.properties && (
+                        {tool.input_schema && (
                           <button
                             onClick={() => {
+                              setCodeViewerSchema(prev => ({ ...prev, [tool.name]: 'request' }))
                               if (!showCodeViewer.has(tool.name)) {
                                 toggleCodeViewer(tool.name)
                               }
                             }}
-                            className="flex items-center gap-1.5 text-xs text-text-tertiary hover:text-text-primary transition-colors px-2 py-1 rounded hover:bg-surface-hover"
-                            title="Click any parameter to view code exports"
+                            className={`flex items-center gap-1.5 text-xs transition-colors px-2 py-1 rounded hover:bg-surface-hover ${
+                              showCodeViewer.has(tool.name) && codeViewerSchema[tool.name] === 'request'
+                                ? 'text-primary bg-primary/10'
+                                : 'text-text-tertiary hover:text-text-primary'
+                            }`}
+                            title="View request schema as code"
                           >
                             <Code2 size={14} />
                             <span>View as Code</span>
@@ -1100,41 +1109,24 @@ function MCPExplorer({ selectedProfiles = [] }) {
                         )}
                       </div>
 
-                      {tool.input_schema?.properties ? (
-                        <div className="space-y-2">
-                          {Object.entries(tool.input_schema.properties).map(
-                            ([param, info]) => (
-                              <div
-                                key={param}
-                                onClick={() => {
-                                  if (!showCodeViewer.has(tool.name)) {
-                                    toggleCodeViewer(tool.name)
-                                  }
-                                }}
-                                className="cursor-pointer transition-all hover:scale-[1.01] hover:shadow-sm"
-                                title="Click to view code exports"
-                              >
-                                <ParameterCard
-                                  name={param}
-                                  type={info.type}
-                                  required={tool.input_schema.required?.includes(param)}
-                                  description={info.description}
-                                  default={info.default}
-                                  enum={info.enum}
-                                  items={info.items}
-                                  properties={info.properties}
-                                  minimum={info.minimum}
-                                  maximum={info.maximum}
-                                  pattern={info.pattern}
-                                  format={info.format}
-                                  minLength={info.minLength}
-                                  maxLength={info.maxLength}
-                                  minItems={info.minItems}
-                                  maxItems={info.maxItems}
-                                />
-                              </div>
-                            )
-                          )}
+                      {tool.input_schema ? (
+                        <div className="bg-black/40 rounded-lg p-4 border border-border">
+                          <ReactJson
+                            src={tool.input_schema}
+                            theme="monokai"
+                            collapsed={true}
+                            displayDataTypes={false}
+                            displayObjectSize={true}
+                            enableClipboard={true}
+                            name="request"
+                            indentWidth={2}
+                            iconStyle="triangle"
+                            style={{
+                              backgroundColor: 'transparent',
+                              fontSize: '12px',
+                              fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace'
+                            }}
+                          />
                         </div>
                       ) : (
                         <p className="text-sm text-text-tertiary italic bg-surface-elevated border border-border rounded-lg p-4">
@@ -1143,69 +1135,100 @@ function MCPExplorer({ selectedProfiles = [] }) {
                       )}
                     </div>
 
-                    {/* Output Schema */}
+                    {/* Response Schema */}
                     {tool.output_schema && (
                       <div>
-                        <h4 className="text-sm font-semibold text-text-secondary mb-3">
-                          Output Schema
-                        </h4>
-                        {tool.output_schema?.properties ? (
-                          <div className="space-y-2">
-                            {Object.entries(tool.output_schema.properties).map(
-                              ([param, info]) => (
-                                <ParameterCard
-                                  key={param}
-                                  name={param}
-                                  type={info.type}
-                                  required={tool.output_schema.required?.includes(param)}
-                                  description={info.description}
-                                  default={info.default}
-                                  enum={info.enum}
-                                  items={info.items}
-                                  properties={info.properties}
-                                />
-                              )
-                            )}
-                          </div>
-                        ) : (
-                          <p className="text-sm text-text-tertiary italic bg-surface-elevated border border-border rounded-lg p-4">
-                            Returns: {tool.output_schema.type || 'object'}
-                          </p>
-                        )}
+                        <div className="flex items-center justify-between mb-3">
+                          <h4 className="text-sm font-semibold text-text-secondary">
+                            Response Schema
+                          </h4>
+                          <button
+                            onClick={() => {
+                              setCodeViewerSchema(prev => ({ ...prev, [tool.name]: 'response' }))
+                              if (!showCodeViewer.has(tool.name)) {
+                                toggleCodeViewer(tool.name)
+                              }
+                            }}
+                            className={`flex items-center gap-1.5 text-xs transition-colors px-2 py-1 rounded hover:bg-surface-hover ${
+                              showCodeViewer.has(tool.name) && codeViewerSchema[tool.name] === 'response'
+                                ? 'text-primary bg-primary/10'
+                                : 'text-text-tertiary hover:text-text-primary'
+                            }`}
+                            title="View response schema as code"
+                          >
+                            <Code2 size={14} />
+                            <span>View as Code</span>
+                          </button>
+                        </div>
+
+                        <div className="bg-black/40 rounded-lg p-4 border border-border">
+                          <ReactJson
+                            src={tool.output_schema}
+                            theme="monokai"
+                            collapsed={true}
+                            displayDataTypes={false}
+                            displayObjectSize={true}
+                            enableClipboard={true}
+                            name="response"
+                            indentWidth={2}
+                            iconStyle="triangle"
+                            style={{
+                              backgroundColor: 'transparent',
+                              fontSize: '12px',
+                              fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace'
+                            }}
+                          />
+                        </div>
                       </div>
                     )}
 
                     {/* IDE-like Code Viewer for Export */}
-                    {tool.input_schema && (
-                      <div>
-                        <div className="mb-3">
+                    {(tool.input_schema || tool.output_schema) && showCodeViewer.has(tool.name) && (
+                      <div className="animate-fade-in">
+                        <div className="flex items-center justify-between mb-3">
+                          <div className="flex items-center gap-2">
+                            <h4 className="text-sm font-semibold text-text-secondary">
+                              Code Export
+                            </h4>
+                            <div className="flex items-center gap-1 bg-surface-elevated rounded-lg border border-border p-0.5">
+                              <button
+                                onClick={() => setCodeViewerSchema(prev => ({ ...prev, [tool.name]: 'request' }))}
+                                className={`px-2 py-1 text-xs rounded transition-colors ${
+                                  (codeViewerSchema[tool.name] || 'request') === 'request'
+                                    ? 'bg-primary text-white'
+                                    : 'text-text-secondary hover:text-text-primary'
+                                }`}
+                              >
+                                Request
+                              </button>
+                              {tool.output_schema && (
+                                <button
+                                  onClick={() => setCodeViewerSchema(prev => ({ ...prev, [tool.name]: 'response' }))}
+                                  className={`px-2 py-1 text-xs rounded transition-colors ${
+                                    codeViewerSchema[tool.name] === 'response'
+                                      ? 'bg-primary text-white'
+                                      : 'text-text-secondary hover:text-text-primary'
+                                  }`}
+                                >
+                                  Response
+                                </button>
+                              )}
+                            </div>
+                          </div>
                           <button
                             onClick={() => toggleCodeViewer(tool.name)}
                             className="flex items-center gap-1.5 text-xs text-text-tertiary hover:text-text-primary transition-colors px-2 py-1 rounded hover:bg-surface-hover"
                           >
-                            {showCodeViewer.has(tool.name) ? (
-                              <>
-                                <EyeOff size={14} />
-                                <span>Hide Code Viewer</span>
-                              </>
-                            ) : (
-                              <>
-                                <Code2 size={14} />
-                                <span>Show Code Viewer</span>
-                              </>
-                            )}
+                            <EyeOff size={14} />
+                            <span>Hide</span>
                           </button>
                         </div>
 
-                        {showCodeViewer.has(tool.name) && (
-                          <div className="animate-fade-in">
-                            <SchemaCodeViewer
-                              schema={tool.input_schema}
-                              toolName={tool.name}
-                              profile={activeProfile}
-                            />
-                          </div>
-                        )}
+                        <SchemaCodeViewer
+                          schema={(codeViewerSchema[tool.name] || 'request') === 'request' ? tool.input_schema : tool.output_schema}
+                          toolName={tool.name}
+                          profile={activeProfile}
+                        />
                       </div>
                     )}
                   </div>
@@ -1291,6 +1314,339 @@ function MCPExplorer({ selectedProfiles = [] }) {
           profile={activeProfile}
           onClose={() => setSelectedToolForDebug(null)}
         />
+      )}
+
+      {/* Expanded Tool Modal (Grid View) */}
+      {expandedToolModal && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => setExpandedToolModal(null)}>
+          <div className="bg-surface border border-border rounded-xl shadow-strong max-w-3xl w-full max-h-[90vh] overflow-hidden" onClick={(e) => e.stopPropagation()}>
+            {/* Header */}
+            <div className="p-4 border-b border-border bg-surface-elevated flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <h2 className="text-xl font-bold">{expandedToolModal.name}</h2>
+                <button
+                  onClick={() => copyToClipboard(expandedToolModal.name, `modal-${expandedToolModal.name}`)}
+                  className="p-1.5 hover:bg-surface-hover rounded-lg transition-all"
+                  title="Copy tool name"
+                >
+                  {copiedId === `modal-${expandedToolModal.name}` ? (
+                    <Check size={16} className="text-success" />
+                  ) : (
+                    <Copy size={16} className="text-text-tertiary" />
+                  )}
+                </button>
+                {(() => {
+                  const safeName = sanitizeToolName(expandedToolModal.name)
+                  const testInfo = toolTests[safeName]
+                  if (testInfo && testInfo.count > 0) {
+                    return (
+                      <div className="flex items-center gap-1.5" title={`${testInfo.count} test files available`}>
+                        <TestTube2 size={14} className="text-primary" />
+                        <span className="text-xs font-semibold text-primary">{testInfo.count}</span>
+                      </div>
+                    )
+                  }
+                  return null
+                })()}
+              </div>
+              <button
+                onClick={() => setExpandedToolModal(null)}
+                className="text-text-tertiary hover:text-text-primary transition-colors"
+              >
+                <span className="text-2xl leading-none">&times;</span>
+              </button>
+            </div>
+
+            {/* Content */}
+            <div className="p-6 overflow-y-auto max-h-[calc(90vh-80px)] space-y-6">
+              {/* Actions */}
+              <div className="flex flex-wrap gap-2">
+                <button
+                  onClick={() => {
+                    setSelectedToolForGeneration(expandedToolModal)
+                    setExpandedToolModal(null)
+                  }}
+                  className="btn btn-primary text-sm"
+                >
+                  <Sparkles size={16} />
+                  <span>Generate Tests</span>
+                </button>
+                <button
+                  onClick={() => {
+                    setSelectedToolForOptimization(expandedToolModal)
+                    setExpandedToolModal(null)
+                  }}
+                  className="btn btn-secondary text-sm"
+                  title="Optimize tool description for better LLM understanding"
+                >
+                  <Wand2 size={16} />
+                  <span>Optimize LLM Docs</span>
+                </button>
+                <button
+                  onClick={() => {
+                    tryInChat(expandedToolModal)
+                    setExpandedToolModal(null)
+                  }}
+                  className="btn btn-secondary text-sm"
+                  title="Try this tool in the chat interface"
+                >
+                  <MessageSquare size={16} />
+                  <span>Try in Chat</span>
+                </button>
+                <button
+                  onClick={() => {
+                    setSelectedToolForDebug(expandedToolModal)
+                    setExpandedToolModal(null)
+                  }}
+                  className="btn btn-secondary text-sm"
+                  title="Debug this tool with trace visualization"
+                >
+                  <Bug size={16} />
+                  <span>Debug</span>
+                </button>
+              </div>
+
+              {/* Test Information */}
+              {(() => {
+                const safeName = sanitizeToolName(expandedToolModal.name)
+                const testInfo = toolTests[safeName]
+
+                if (testInfo && testInfo.count > 0) {
+                  const lastRun = testInfo.lastRun
+                  const isRunning = runningTests.has(expandedToolModal.name)
+
+                  return (
+                    <div className="bg-surface-elevated border border-border rounded-lg p-4">
+                      <div className="flex items-center justify-between mb-3">
+                        <div className="flex items-center gap-2">
+                          <TestTube2 size={16} className="text-primary" />
+                          <h4 className="text-sm font-semibold text-text-secondary">
+                            Tests for this tool
+                          </h4>
+                          <span className="text-xs bg-primary/10 text-primary px-2 py-0.5 rounded border border-primary/20">
+                            {testInfo.count} test file{testInfo.count !== 1 ? 's' : ''}
+                          </span>
+                        </div>
+                        <button
+                          onClick={() => runToolTests(expandedToolModal.name)}
+                          disabled={isRunning}
+                          className="btn btn-primary text-xs px-3 py-1.5 flex items-center gap-1.5"
+                          title="Run all tests for this tool"
+                        >
+                          {isRunning ? (
+                            <>
+                              <div className="w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                              <span>Running...</span>
+                            </>
+                          ) : (
+                            <>
+                              <Play size={14} />
+                              <span>Run All Tests</span>
+                            </>
+                          )}
+                        </button>
+                      </div>
+
+                      {lastRun && (
+                        <div className="flex items-center gap-4 text-xs">
+                          <div className="flex items-center gap-1.5">
+                            <Clock size={12} className="text-text-tertiary" />
+                            <span className="text-text-secondary">
+                              Last run: {new Date(lastRun.timestamp).toLocaleString()}
+                            </span>
+                          </div>
+                          <div className={`flex items-center gap-1 px-2 py-0.5 rounded ${
+                            lastRun.failed === 0
+                              ? 'bg-success/10 text-success border border-success/20'
+                              : 'bg-error/10 text-error border border-error/20'
+                          }`}>
+                            <span className="font-semibold">
+                              {lastRun.passed}/{lastRun.total} passed
+                            </span>
+                          </div>
+                        </div>
+                      )}
+
+                      <div className="mt-3 space-y-1">
+                        {testInfo.files.map((file, idx) => (
+                          <div
+                            key={idx}
+                            className="text-xs text-text-tertiary font-mono bg-surface hover:bg-surface-hover px-2 py-1 rounded cursor-pointer transition-colors"
+                            title={file.relative_path}
+                          >
+                            {file.filename} ({file.test_count} test{file.test_count !== 1 ? 's' : ''})
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )
+                }
+
+                return null
+              })()}
+
+              {/* Full description */}
+              <div>
+                <h4 className="text-sm font-semibold text-text-secondary mb-2">
+                  Description
+                </h4>
+                <pre className="text-sm text-text-primary whitespace-pre-wrap leading-relaxed bg-surface-elevated border border-border rounded-lg p-4">
+                  {expandedToolModal.description}
+                </pre>
+              </div>
+
+              {/* Request Schema */}
+              <div>
+                <div className="flex items-center justify-between mb-3">
+                  <h4 className="text-sm font-semibold text-text-secondary">
+                    Request Schema
+                  </h4>
+                  {expandedToolModal.input_schema && (
+                    <button
+                      onClick={() => {
+                        setCodeViewerSchema(prev => ({ ...prev, [expandedToolModal.name]: 'request' }))
+                        if (!showCodeViewer.has(expandedToolModal.name)) {
+                          toggleCodeViewer(expandedToolModal.name)
+                        }
+                      }}
+                      className={`flex items-center gap-1.5 text-xs transition-colors px-2 py-1 rounded hover:bg-surface-hover ${
+                        showCodeViewer.has(expandedToolModal.name) && codeViewerSchema[expandedToolModal.name] === 'request'
+                          ? 'text-primary bg-primary/10'
+                          : 'text-text-tertiary hover:text-text-primary'
+                      }`}
+                      title="View request schema as code"
+                    >
+                      <Code2 size={14} />
+                      <span>View as Code</span>
+                    </button>
+                  )}
+                </div>
+
+                {expandedToolModal.input_schema ? (
+                  <div className="bg-black/40 rounded-lg p-4 border border-border">
+                    <ReactJson
+                      src={expandedToolModal.input_schema}
+                      theme="monokai"
+                      collapsed={true}
+                      displayDataTypes={false}
+                      displayObjectSize={true}
+                      enableClipboard={true}
+                      name="request"
+                      indentWidth={2}
+                      iconStyle="triangle"
+                      style={{
+                        backgroundColor: 'transparent',
+                        fontSize: '12px',
+                        fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace'
+                      }}
+                    />
+                  </div>
+                ) : (
+                  <p className="text-sm text-text-tertiary italic bg-surface-elevated border border-border rounded-lg p-4">
+                    No parameters
+                  </p>
+                )}
+              </div>
+
+              {/* Response Schema */}
+              {expandedToolModal.output_schema && (
+                <div>
+                  <div className="flex items-center justify-between mb-3">
+                    <h4 className="text-sm font-semibold text-text-secondary">
+                      Response Schema
+                    </h4>
+                    <button
+                      onClick={() => {
+                        setCodeViewerSchema(prev => ({ ...prev, [expandedToolModal.name]: 'response' }))
+                        if (!showCodeViewer.has(expandedToolModal.name)) {
+                          toggleCodeViewer(expandedToolModal.name)
+                        }
+                      }}
+                      className={`flex items-center gap-1.5 text-xs transition-colors px-2 py-1 rounded hover:bg-surface-hover ${
+                        showCodeViewer.has(expandedToolModal.name) && codeViewerSchema[expandedToolModal.name] === 'response'
+                          ? 'text-primary bg-primary/10'
+                          : 'text-text-tertiary hover:text-text-primary'
+                      }`}
+                      title="View response schema as code"
+                    >
+                      <Code2 size={14} />
+                      <span>View as Code</span>
+                    </button>
+                  </div>
+
+                  <div className="bg-black/40 rounded-lg p-4 border border-border">
+                    <ReactJson
+                      src={expandedToolModal.output_schema}
+                      theme="monokai"
+                      collapsed={true}
+                      displayDataTypes={false}
+                      displayObjectSize={true}
+                      enableClipboard={true}
+                      name="response"
+                      indentWidth={2}
+                      iconStyle="triangle"
+                      style={{
+                        backgroundColor: 'transparent',
+                        fontSize: '12px',
+                        fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace'
+                      }}
+                    />
+                  </div>
+                </div>
+              )}
+
+              {/* IDE-like Code Viewer for Export */}
+              {(expandedToolModal.input_schema || expandedToolModal.output_schema) && showCodeViewer.has(expandedToolModal.name) && (
+                <div className="animate-fade-in">
+                  <div className="flex items-center justify-between mb-3">
+                    <div className="flex items-center gap-2">
+                      <h4 className="text-sm font-semibold text-text-secondary">
+                        Code Export
+                      </h4>
+                      <div className="flex items-center gap-1 bg-surface-elevated rounded-lg border border-border p-0.5">
+                        <button
+                          onClick={() => setCodeViewerSchema(prev => ({ ...prev, [expandedToolModal.name]: 'request' }))}
+                          className={`px-2 py-1 text-xs rounded transition-colors ${
+                            (codeViewerSchema[expandedToolModal.name] || 'request') === 'request'
+                              ? 'bg-primary text-white'
+                              : 'text-text-secondary hover:text-text-primary'
+                          }`}
+                        >
+                          Request
+                        </button>
+                        {expandedToolModal.output_schema && (
+                          <button
+                            onClick={() => setCodeViewerSchema(prev => ({ ...prev, [expandedToolModal.name]: 'response' }))}
+                            className={`px-2 py-1 text-xs rounded transition-colors ${
+                              codeViewerSchema[expandedToolModal.name] === 'response'
+                                ? 'bg-primary text-white'
+                                : 'text-text-secondary hover:text-text-primary'
+                            }`}
+                          >
+                            Response
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => toggleCodeViewer(expandedToolModal.name)}
+                      className="flex items-center gap-1.5 text-xs text-text-tertiary hover:text-text-primary transition-colors px-2 py-1 rounded hover:bg-surface-hover"
+                    >
+                      <EyeOff size={14} />
+                      <span>Hide</span>
+                    </button>
+                  </div>
+
+                  <SchemaCodeViewer
+                    schema={(codeViewerSchema[expandedToolModal.name] || 'request') === 'request' ? expandedToolModal.input_schema : expandedToolModal.output_schema}
+                    toolName={expandedToolModal.name}
+                    profile={activeProfile}
+                  />
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Keyboard Shortcuts Modal */}

@@ -1384,7 +1384,7 @@ function AuthDebugger() {
                                       Object.entries(step.data).filter(([k]) => !['raw_request', 'raw_response'].includes(k))
                                     )}
                                     theme="monokai"
-                                    collapsed={false}
+                                    collapsed={3}
                                     displayDataTypes={false}
                                     displayObjectSize={true}
                                     enableClipboard={(copy) => {
@@ -1392,7 +1392,7 @@ function AuthDebugger() {
                                       const textToCopy = typeof value === 'string' ? value : JSON.stringify(value, null, 2)
                                       navigator.clipboard.writeText(textToCopy)
                                     }}
-                                    name={false}
+                                    name="data"
                                     indentWidth={2}
                                     iconStyle="triangle"
                                     style={{

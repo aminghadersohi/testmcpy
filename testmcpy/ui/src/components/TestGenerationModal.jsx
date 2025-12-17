@@ -32,37 +32,22 @@ function TestGenerationModal({ tool, onClose, onSuccess }) {
         }
       }
 
-      // Priority order for selecting profile:
-      // 1. Test-specific saved selection (from TestManager)
-      // 2. Global LLM profile selection (from sidebar)
-      // 3. API default
-      // 4. First available profile
+      // Priority: Use global profile selection from sidebar, then API default
+      const globalProfile = localStorage.getItem('selectedLLMProfile')
 
-      const savedTestProfile = localStorage.getItem('selectedLLMProfileForTests')
-      const savedTestProvider = localStorage.getItem('selectedLLMProviderForTests')
-      const globalProfile = localStorage.getItem('selectedLLMProfile') // Global sidebar selection
-
-      if (savedTestProfile && data.profiles?.find(p => p.profile_id === savedTestProfile)) {
-        // Use test-specific selection
-        setSelectedProfile(savedTestProfile)
-        if (savedTestProvider) {
-          setSelectedProvider(savedTestProvider)
-        } else {
-          setProviderFromProfile(data.profiles.find(p => p.profile_id === savedTestProfile))
-        }
-      } else if (globalProfile && data.profiles?.find(p => p.profile_id === globalProfile)) {
-        // Use global sidebar selection
-        setSelectedProfile(globalProfile)
-        setProviderFromProfile(data.profiles.find(p => p.profile_id === globalProfile))
+      let profileToUse = null
+      if (globalProfile && data.profiles?.find(p => p.profile_id === globalProfile)) {
+        profileToUse = data.profiles.find(p => p.profile_id === globalProfile)
       } else if (data.default && data.profiles?.find(p => p.profile_id === data.default)) {
-        // Use API default
-        setSelectedProfile(data.default)
-        setProviderFromProfile(data.profiles.find(p => p.profile_id === data.default))
+        profileToUse = data.profiles.find(p => p.profile_id === data.default)
       } else if (data.profiles?.length > 0) {
-        // Fallback to first profile
-        const firstProfile = data.profiles[0]
-        setSelectedProfile(firstProfile.profile_id)
-        setProviderFromProfile(firstProfile)
+        profileToUse = data.profiles[0]
+      }
+
+      if (profileToUse) {
+        setSelectedProfile(profileToUse.profile_id)
+        // Always use the profile's default provider (the one with default: true)
+        setProviderFromProfile(profileToUse)
       }
     } catch (error) {
       console.error('Failed to load LLM profiles:', error)

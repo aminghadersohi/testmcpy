@@ -13,6 +13,7 @@ import {
   ChevronRight,
   ChevronDown,
   Loader2,
+  Terminal,
 } from 'lucide-react'
 import Editor from '@monaco-editor/react'
 import TestStatusIndicator from '../components/TestStatusIndicator'
@@ -91,6 +92,9 @@ function TestManager({ selectedProfiles = [] }) {
     completed: 0,
     status: 'idle'
   })
+  const [streamingLogs, setStreamingLogs] = useState([])
+  const wsRef = useRef(null)
+  const logsEndRef = useRef(null)
   const [testProfiles, setTestProfiles] = useState([])
   const [selectedTestProfile, setSelectedTestProfile] = useState(null)
   const [mcpProfiles, setMcpProfiles] = useState([])
@@ -207,24 +211,31 @@ function TestManager({ selectedProfiles = [] }) {
       setLlmProfiles(data.profiles || [])
 
       // Check localStorage for saved LLM profile and provider
-      const savedProfile = localStorage.getItem('selectedLLMProfileForTests')
-      const savedProvider = localStorage.getItem('selectedLLMProviderForTests')
+      // First check test-specific settings, then fall back to global settings
+      const savedProfile = localStorage.getItem('selectedLLMProfileForTests') || localStorage.getItem('selectedLLMProfile')
+      const savedProvider = localStorage.getItem('selectedLLMProviderForTests') || localStorage.getItem('selectedLLMProvider')
 
       if (savedProfile) {
         setSelectedLlmProfile(savedProfile)
         if (savedProvider) {
           setSelectedLlmProvider(savedProvider)
+        } else {
+          // Set provider from the profile's default
+          const profileData = data.profiles?.find(p => p.profile_id === savedProfile)
+          if (profileData?.providers?.length > 0) {
+            const defaultProv = profileData.providers.find(p => p.default) || profileData.providers[0]
+            const provKey = `${defaultProv.provider}:${defaultProv.model}`
+            setSelectedLlmProvider(provKey)
+          }
         }
       } else if (data.default) {
         setSelectedLlmProfile(data.default)
-        localStorage.setItem('selectedLLMProfileForTests', data.default)
         // Set default provider from the profile
         const defaultProfileData = data.profiles?.find(p => p.profile_id === data.default)
         if (defaultProfileData?.providers?.length > 0) {
           const defaultProv = defaultProfileData.providers.find(p => p.default) || defaultProfileData.providers[0]
           const provKey = `${defaultProv.provider}:${defaultProv.model}`
           setSelectedLlmProvider(provKey)
-          localStorage.setItem('selectedLLMProviderForTests', provKey)
         }
       }
     } catch (error) {
@@ -313,15 +324,17 @@ function TestManager({ selectedProfiles = [] }) {
   // Update editor decorations when test statuses change
   const updateEditorDecorations = useCallback(() => {
     if (!editorRef.current || !monacoRef.current) return
-    if (testLocations.length === 0) return
+
+    // Use ref to get the latest test locations (avoids stale closure issues)
+    const currentTestLocations = testLocationsRef.current
+    if (currentTestLocations.length === 0) return
 
     const editor = editorRef.current
     const monaco = monacoRef.current
     const decorations = []
 
-    console.log('Updating decorations for tests:', testLocations.map(t => t.name))
 
-    testLocations.forEach(test => {
+    currentTestLocations.forEach(test => {
       const status = testStatuses[test.name] || 'idle'
       let className = ''
       let glyphClassName = ''
@@ -361,11 +374,19 @@ function TestManager({ selectedProfiles = [] }) {
       decorations
     )
     editor._testDecorationIds = ids
-  }, [testLocations, testStatuses])
+  }, [testStatuses])  // Only depends on testStatuses since we use testLocationsRef.current
 
   // Update decorations when statuses or locations change
   useEffect(() => {
-    updateEditorDecorations()
+    // Small delay to ensure editor is fully rendered
+    const timer = setTimeout(() => {
+      updateEditorDecorations()
+      // Force editor layout refresh to ensure glyphs render
+      if (editorRef.current) {
+        editorRef.current.layout()
+      }
+    }, 50)
+    return () => clearTimeout(timer)
   }, [testStatuses, testLocations, updateEditorDecorations])
 
   // Handle editor mount
@@ -373,61 +394,66 @@ function TestManager({ selectedProfiles = [] }) {
     editorRef.current = editor
     monacoRef.current = monaco
 
-    // Add custom CSS for test decorations
-    const styleEl = document.createElement('style')
-    styleEl.textContent = `
-      .test-line-idle { background: transparent; }
-      .test-line-running { background: rgba(234, 179, 8, 0.15) !important; }
-      .test-line-passed { background: rgba(34, 197, 94, 0.15) !important; }
-      .test-line-failed { background: rgba(239, 68, 68, 0.15) !important; }
+    // Add custom CSS for test decorations - using !important to ensure visibility
+    const styleId = 'test-decorations-style'
+    if (!document.getElementById(styleId)) {
+      const styleEl = document.createElement('style')
+      styleEl.id = styleId
+      styleEl.textContent = `
+        .test-line-idle { background: transparent !important; }
+        .test-line-running { background: rgba(234, 179, 8, 0.15) !important; }
+        .test-line-passed { background: rgba(34, 197, 94, 0.15) !important; }
+        .test-line-failed { background: rgba(239, 68, 68, 0.15) !important; }
 
-      .test-glyph-idle::before {
-        content: '\\25B6';
-        color: #6b7280;
-        font-size: 10px;
-        cursor: pointer;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        height: 100%;
-      }
-      .test-glyph-idle:hover::before { color: #22c55e; }
-      .test-glyph-running::before {
-        content: '';
-        width: 10px;
-        height: 10px;
-        border: 2px solid #eab308;
-        border-top-color: transparent;
-        border-radius: 50%;
-        animation: spin 1s linear infinite;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        margin: auto;
-      }
-      .test-glyph-passed::before {
-        content: '\\2713';
-        color: #22c55e;
-        font-size: 12px;
-        font-weight: bold;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        height: 100%;
-      }
-      .test-glyph-failed::before {
-        content: '\\2717';
-        color: #ef4444;
-        font-size: 12px;
-        font-weight: bold;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        height: 100%;
-      }
-      @keyframes spin { to { transform: rotate(360deg); } }
-    `
-    document.head.appendChild(styleEl)
+        .test-glyph-idle {
+          cursor: pointer !important;
+        }
+        .test-glyph-idle::before {
+          content: '▶' !important;
+          color: #6b7280 !important;
+          font-size: 12px !important;
+          cursor: pointer !important;
+          display: block !important;
+          text-align: center !important;
+          line-height: 19px !important;
+        }
+        .test-glyph-idle:hover::before {
+          color: #22c55e !important;
+        }
+        .test-glyph-running::before {
+          content: '●' !important;
+          color: #eab308 !important;
+          font-size: 14px !important;
+          display: block !important;
+          text-align: center !important;
+          line-height: 19px !important;
+          animation: pulse 1s ease-in-out infinite !important;
+        }
+        .test-glyph-passed::before {
+          content: '✓' !important;
+          color: #22c55e !important;
+          font-size: 14px !important;
+          font-weight: bold !important;
+          display: block !important;
+          text-align: center !important;
+          line-height: 19px !important;
+        }
+        .test-glyph-failed::before {
+          content: '✗' !important;
+          color: #ef4444 !important;
+          font-size: 14px !important;
+          font-weight: bold !important;
+          display: block !important;
+          text-align: center !important;
+          line-height: 19px !important;
+        }
+        @keyframes pulse {
+          0%, 100% { opacity: 1; }
+          50% { opacity: 0.5; }
+        }
+      `
+      document.head.appendChild(styleEl)
+    }
 
     // Handle click on glyph margin to run individual test
     editor.onMouseDown((e) => {
@@ -441,68 +467,116 @@ function TestManager({ selectedProfiles = [] }) {
       }
     })
 
-    // Initial decoration update
-    setTimeout(updateEditorDecorations, 100)
+    // Initial decoration update - multiple attempts to ensure it works
+    // This handles the case where fileContent/testLocations aren't populated yet on mount
+    const attemptDecorations = (attempts = 0) => {
+      if (attempts > 8) return
+      const delay = attempts === 0 ? 200 : 150 * attempts  // Longer initial delay
+      setTimeout(() => {
+        updateEditorDecorations()
+        editor.layout()
+        // If no decorations were applied and testLocations might still be loading, try again
+        if (!editor._testDecorationIds || editor._testDecorationIds.length === 0) {
+          attemptDecorations(attempts + 1)
+        }
+      }, delay)
+    }
+    attemptDecorations()
   }
 
-  // Run a single test by name
+  // Run a single test by name (uses WebSocket for streaming logs)
   const runSingleTest = async (testName) => {
     if (!selectedFile || running) return
 
     setRunning(true)
     setRunningTestName(testName)
     setTestStatuses(prev => ({ ...prev, [testName]: 'running' }))
+    setStreamingLogs([`🚀 Running test: ${testName}`])
 
+    const llmConfig = getLlmConfig()
+
+    // Use WebSocket for streaming logs
+    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+    const wsUrl = `${wsProtocol}//${window.location.host}/ws/tests`
     try {
-      const llmConfig = getLlmConfig()
-      const res = await fetch('/api/tests/run', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      const ws = new WebSocket(wsUrl)
+      wsRef.current = ws
+
+      ws.onopen = () => {
+        setStreamingLogs(prev => [...prev, '🔌 Connected to test runner'])
+        ws.send(JSON.stringify({
+          type: 'run_test',
           test_path: selectedFile.path,
+          test_name: testName,
           model: llmConfig.model,
           provider: llmConfig.provider,
           profile: selectedMcpProfile,
-          test_name: testName, // Run only this test
-        }),
-      })
-
-      if (!res.ok) {
-        const errorData = await res.json().catch(() => ({ detail: 'Unknown error' }))
-        throw new Error(errorData.detail || `HTTP ${res.status}`)
-      }
-
-      const data = await res.json()
-
-      // Update status based on result
-      const testResult = data.results?.find(r => r.test_name === testName)
-      if (testResult) {
-        setTestStatuses(prev => ({
-          ...prev,
-          [testName]: testResult.passed ? 'passed' : 'failed'
         }))
       }
 
-      // Merge with existing results or set new results
-      setTestResults(prev => {
-        if (!prev) return data
-        // Merge results
-        const existingResults = prev.results.filter(r => r.test_name !== testName)
-        return {
-          ...data,
-          results: [...existingResults, ...(data.results || [])],
-          summary: {
-            total: existingResults.length + (data.results?.length || 0),
-            passed: existingResults.filter(r => r.passed).length + (data.summary?.passed || 0),
-            failed: existingResults.filter(r => !r.passed).length + (data.summary?.failed || 0),
-            total_cost: (prev.summary?.total_cost || 0) + (data.summary?.total_cost || 0)
-          }
+      ws.onmessage = (event) => {
+        const data = JSON.parse(event.data)
+
+        switch (data.type) {
+          case 'log':
+            setStreamingLogs(prev => [...prev, data.message])
+            break
+          case 'test_start':
+            setStreamingLogs(prev => [...prev, `🧪 Starting: ${data.test_name}`])
+            break
+          case 'test_complete':
+            const result = data.result
+            setTestStatuses(prev => ({
+              ...prev,
+              [testName]: result.passed ? 'passed' : 'failed'
+            }))
+            setTestResults(prev => {
+              if (!prev) return { results: [result], summary: { total: 1, passed: result.passed ? 1 : 0, failed: result.passed ? 0 : 1 } }
+              const existingResults = prev.results.filter(r => r.test_name !== testName)
+              const newResults = [...existingResults, result]
+              return {
+                results: newResults,
+                summary: {
+                  total: newResults.length,
+                  passed: newResults.filter(r => r.passed).length,
+                  failed: newResults.filter(r => !r.passed).length,
+                  total_cost: newResults.reduce((sum, r) => sum + (r.cost || 0), 0)
+                }
+              }
+            })
+            break
+          case 'all_complete':
+            setStreamingLogs(prev => [...prev, `✅ Test complete`])
+            setRunning(false)
+            setRunningTestName(null)
+            ws.close()
+            break
+          case 'error':
+            setStreamingLogs(prev => [...prev, `❌ ERROR: ${data.message}`])
+            setTestStatuses(prev => ({ ...prev, [testName]: 'failed' }))
+            setRunning(false)
+            setRunningTestName(null)
+            ws.close()
+            break
         }
-      })
+      }
+
+      ws.onerror = (error) => {
+        console.error('WebSocket error:', error)
+        setStreamingLogs(prev => [...prev, `❌ WebSocket error`])
+        setTestStatuses(prev => ({ ...prev, [testName]: 'failed' }))
+        setRunning(false)
+        setRunningTestName(null)
+      }
+
+      ws.onclose = () => {
+        wsRef.current = null
+      }
+
     } catch (error) {
       console.error('Failed to run test:', error)
+      setStreamingLogs(prev => [...prev, `❌ Failed: ${error.message}`])
       setTestStatuses(prev => ({ ...prev, [testName]: 'failed' }))
-    } finally {
       setRunning(false)
       setRunningTestName(null)
     }
@@ -556,17 +630,32 @@ function TestManager({ selectedProfiles = [] }) {
 
     try {
       const pathToUse = selectedFile.relative_path || selectedFile.filename
-      await fetch(`/api/tests/${pathToUse}`, {
+
+      const response = await fetch(`/api/tests/${pathToUse}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ content: fileContent }),
       })
+
+      const responseText = await response.text()
+
+      if (!response.ok) {
+        let errorDetail = responseText
+        try {
+          const errorData = JSON.parse(responseText)
+          errorDetail = errorData.detail || responseText
+        } catch (e) {}
+        throw new Error(`HTTP ${response.status}: ${errorDetail}`)
+      }
+
+      // Update the selected file's content to match what was saved
+      setSelectedFile(prev => ({ ...prev, content: fileContent }))
       setEditMode(false)
       loadTestFiles()
       alert('File saved successfully')
     } catch (error) {
       console.error('Failed to save test file:', error)
-      alert('Failed to save file')
+      alert(`Failed to save file: ${error.message}`)
     }
   }
 
@@ -628,69 +717,127 @@ tests:
 
     setRunning(true)
     setTestResults(null)
+    setStreamingLogs(['🚀 Starting test run...'])
 
-    // Initialize running tests state and set all tests to running
-    const totalTests = selectedFile.test_count || 1
+    const tests = testLocations.length > 0 ? testLocations : [{ name: 'test' }]
+    const totalTests = tests.length
+
+    // Initialize running tests state
     setRunningTests({
-      current: 'Initializing...',
+      current: 'Connecting...',
       total: totalTests,
       completed: 0,
       status: 'running'
     })
 
-    // Mark all tests as running
-    const runningStatuses = {}
-    testLocations.forEach(t => runningStatuses[t.name] = 'running')
-    setTestStatuses(runningStatuses)
+    // Reset all test statuses to idle
+    const initialStatuses = {}
+    tests.forEach(t => initialStatuses[t.name] = 'idle')
+    setTestStatuses(initialStatuses)
 
+    // Get LLM config
+    const llmConfig = getLlmConfig()
+
+    // Create WebSocket connection
+    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+    const wsUrl = `${wsProtocol}//${window.location.host}/ws/tests`
     try {
-      const llmConfig = getLlmConfig()
-      const res = await fetch('/api/tests/run', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      const ws = new WebSocket(wsUrl)
+      wsRef.current = ws
+
+      ws.onopen = () => {
+        setStreamingLogs(prev => [...prev, '🔌 Connected to test runner'])
+
+        // Send run_test message
+        ws.send(JSON.stringify({
+          type: 'run_test',
           test_path: selectedFile.path,
           model: llmConfig.model,
           provider: llmConfig.provider,
           profile: selectedMcpProfile,
-        }),
-      })
-
-      if (!res.ok) {
-        const errorData = await res.json().catch(() => ({ detail: 'Unknown error' }))
-        throw new Error(errorData.detail || `HTTP ${res.status}`)
+        }))
       }
 
-      const data = await res.json()
-      console.log('Test results received:', data)
-      setTestResults(data)
+      ws.onmessage = (event) => {
+        const data = JSON.parse(event.data)
 
-      // Update test statuses based on results
-      if (data.results) {
-        const newStatuses = {}
-        data.results.forEach(result => {
-          newStatuses[result.test_name] = result.passed ? 'passed' : 'failed'
-        })
-        setTestStatuses(prev => ({ ...prev, ...newStatuses }))
+        switch (data.type) {
+          case 'log':
+            setStreamingLogs(prev => [...prev, data.message])
+            break
+
+          case 'test_start':
+            setRunningTests(prev => ({
+              ...prev,
+              current: data.test_name,
+              completed: data.index,
+              total: data.total,
+            }))
+            setTestStatuses(prev => ({ ...prev, [data.test_name]: 'running' }))
+            break
+
+          case 'test_complete':
+            const result = data.result
+            setTestStatuses(prev => ({
+              ...prev,
+              [data.test_name]: result.passed ? 'passed' : 'failed'
+            }))
+            setTestResults(prev => {
+              const prevResults = prev?.results || []
+              const newResults = [...prevResults, result]
+              return {
+                summary: {
+                  total: newResults.length,
+                  passed: newResults.filter(r => r.passed).length,
+                  failed: newResults.filter(r => !r.passed).length,
+                  total_cost: newResults.reduce((sum, r) => sum + (r.cost || 0), 0),
+                  total_tokens: newResults.reduce((sum, r) => sum + (r.token_usage?.total || 0), 0),
+                },
+                results: newResults
+              }
+            })
+            break
+
+          case 'all_complete':
+            setTestResults({
+              summary: data.summary,
+              results: data.results
+            })
+            setRunningTests(prev => ({
+              ...prev,
+              current: null,
+              completed: data.summary.total,
+              status: 'completed'
+            }))
+            setRunning(false)
+            ws.close()
+            break
+
+          case 'error':
+            setStreamingLogs(prev => [...prev, `❌ ERROR: ${data.message}`])
+            if (data.traceback) {
+              setStreamingLogs(prev => [...prev, data.traceback])
+            }
+            setRunning(false)
+            ws.close()
+            break
+        }
       }
+
+      ws.onerror = (error) => {
+        console.error('WebSocket error:', error)
+        setStreamingLogs(prev => [...prev, `❌ WebSocket error: ${error.message || 'Connection failed'}`])
+        setRunning(false)
+      }
+
+      ws.onclose = () => {
+        setStreamingLogs(prev => [...prev, '🔌 Disconnected'])
+        wsRef.current = null
+      }
+
     } catch (error) {
       console.error('Failed to run tests:', error)
-      setTestResults({
-        summary: {
-          total: 0,
-          passed: 0,
-          failed: 0,
-          total_cost: 0
-        },
-        results: [],
-        error: error.message
-      })
-      // Mark all tests as failed on error
-      const failedStatuses = {}
-      testLocations.forEach(t => failedStatuses[t.name] = 'failed')
-      setTestStatuses(failedStatuses)
-      alert(`Failed to run tests: ${error.message}`)
-    } finally {
+      setStreamingLogs(prev => [...prev, `❌ Failed: ${error.message}`])
       setRunning(false)
       setRunningTests({
         current: null,
@@ -700,6 +847,13 @@ tests:
       })
     }
   }
+
+  // Auto-scroll logs to bottom
+  useEffect(() => {
+    if (logsEndRef.current) {
+      logsEndRef.current.scrollIntoView({ behavior: 'smooth' })
+    }
+  }, [streamingLogs])
 
   // Run tests with ALL LLM providers
   const runTestsWithAllLlms = async () => {
@@ -1018,69 +1172,109 @@ tests:
         {selectedFile ? (
           <>
             {/* Editor Header */}
-            <div className="p-4 border-b border-border flex items-center justify-between bg-surface-elevated">
-              <div className="flex items-center gap-4">
-                <h2 className="font-semibold text-lg text-text-primary">{selectedFile.filename}</h2>
-                {editMode ? (
-                  <div className="flex gap-2">
-                    <button
-                      onClick={saveTestFile}
-                      className="btn btn-primary text-sm"
-                    >
-                      <Save size={16} />
-                      <span>Save</span>
-                    </button>
-                    <button
-                      onClick={() => {
-                        setEditMode(false)
-                        setFileContent(selectedFile.content)
-                      }}
-                      className="btn btn-secondary text-sm"
-                    >
-                      <span>Cancel</span>
-                    </button>
+            <div className="border-b border-border bg-surface-elevated">
+              {/* Top row: File info and edit controls */}
+              <div className="px-4 py-3 flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <div className="p-2 rounded-lg bg-primary/10">
+                    <FileText size={18} className="text-primary" />
                   </div>
-                ) : (
-                  <button
-                    onClick={() => setEditMode(true)}
-                    className="btn btn-secondary text-sm"
-                  >
-                    <Edit size={16} />
-                    <span>Edit</span>
-                  </button>
-                )}
+                  <div>
+                    <h2 className="font-semibold text-text-primary">{selectedFile.filename}</h2>
+                    {selectedFile.relative_path && selectedFile.relative_path.includes('/') && (
+                      <p className="text-xs text-text-tertiary mt-0.5">
+                        {selectedFile.relative_path.split('/').slice(0, -1).join('/')}
+                      </p>
+                    )}
+                  </div>
+                  {testLocations.length > 0 && (
+                    <span className="px-2 py-0.5 text-xs rounded-full bg-surface text-text-secondary border border-border">
+                      {testLocations.length} test{testLocations.length !== 1 ? 's' : ''}
+                    </span>
+                  )}
+                </div>
+
+                <div className="flex items-center gap-2">
+                  {editMode ? (
+                    <>
+                      <button
+                        onClick={() => {
+                          setEditMode(false)
+                          setFileContent(selectedFile.content)
+                        }}
+                        className="btn btn-ghost text-sm"
+                      >
+                        <X size={16} />
+                        <span>Cancel</span>
+                      </button>
+                      <button
+                        onClick={saveTestFile}
+                        className="btn btn-primary text-sm"
+                      >
+                        <Save size={16} />
+                        <span>Save Changes</span>
+                      </button>
+                    </>
+                  ) : (
+                    <button
+                      onClick={() => setEditMode(true)}
+                      className="btn btn-ghost text-sm"
+                    >
+                      <Edit size={16} />
+                      <span>Edit</span>
+                    </button>
+                  )}
+                </div>
               </div>
 
-              <div className="flex items-center gap-3 mt-3">
-                <button
-                  onClick={runTests}
-                  disabled={running || !selectedFile}
-                  className="btn btn-primary"
-                >
-                  <Play size={16} />
-                  <span>{running && !runAllLlmsMode ? 'Running...' : 'Run Tests'}</span>
-                </button>
-                <button
-                  onClick={runTestsWithAllLlms}
-                  disabled={running || !selectedFile}
-                  className="btn btn-secondary"
-                  title="Run tests with all configured LLM providers"
-                >
-                  <Play size={16} />
-                  <span>{running && runAllLlmsMode ? `Running All (${runningTests.completed}/${runningTests.total})` : 'Run All LLMs'}</span>
-                </button>
+              {/* Bottom row: Run controls and LLM info */}
+              <div className="px-4 py-2 flex items-center justify-between border-t border-border/50 bg-surface">
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={runTests}
+                    disabled={running || !selectedFile}
+                    className={`btn ${running && !runAllLlmsMode ? 'btn-warning' : 'btn-primary'} text-sm`}
+                  >
+                    {running && !runAllLlmsMode ? (
+                      <Loader2 size={14} className="animate-spin" />
+                    ) : (
+                      <Play size={14} />
+                    )}
+                    <span>{running && !runAllLlmsMode ? 'Running...' : 'Run Tests'}</span>
+                  </button>
+                  <button
+                    onClick={runTestsWithAllLlms}
+                    disabled={running || !selectedFile}
+                    className="btn btn-secondary text-sm"
+                    title="Run tests with all configured LLM providers"
+                  >
+                    {running && runAllLlmsMode ? (
+                      <Loader2 size={14} className="animate-spin" />
+                    ) : (
+                      <Play size={14} />
+                    )}
+                    <span>{running && runAllLlmsMode ? `${runningTests.completed}/${runningTests.total}` : 'All LLMs'}</span>
+                  </button>
+                </div>
+
                 {selectedLlmProvider && (
-                  <div className="text-xs text-text-tertiary">
-                    Using: {selectedLlmProvider.split(':')[1]} ({selectedLlmProvider.split(':')[0]})
+                  <div className="flex items-center gap-2 text-xs">
+                    <span className="text-text-tertiary">Using:</span>
+                    <span className="px-2 py-1 rounded bg-surface-elevated border border-border text-text-secondary font-mono">
+                      {selectedLlmProvider.split(':')[1]}
+                    </span>
+                    <span className="px-1.5 py-0.5 rounded text-[10px] font-medium uppercase tracking-wide bg-blue-500/20 text-blue-400">
+                      {selectedLlmProvider.split(':')[0]}
+                    </span>
                   </div>
                 )}
               </div>
             </div>
 
-            {/* Split view: Editor + Results */}
-            <div className="flex-1 flex flex-col overflow-hidden">
-              {/* Editor area */}
-              <div className={`${testResults && !running ? 'h-1/2' : 'flex-1'} transition-all duration-300 overflow-hidden`}>
+            {/* Split view: Editor + Bottom Panel */}
+            <div className="flex-1 flex flex-col overflow-hidden relative">
+              {/* Editor area - always takes remaining space */}
+              <div className="flex-1 overflow-hidden min-h-0">
                 <Editor
                   height="100%"
                   defaultLanguage="yaml"
@@ -1102,95 +1296,172 @@ tests:
                 />
               </div>
 
-              {/* Visual Test Execution Status (section 4.1) */}
-              <TestStatusIndicator
-                current={runningTests.current}
-                completed={runningTests.completed}
-                total={runningTests.total}
-                status={runningTests.status}
-              />
-
-              {/* Results panel (slides up from bottom) - section 4.4 */}
-              {testResults && !running && (
-                <div className="h-1/2 border-t border-border overflow-hidden flex flex-col animate-slide-up">
-                  {/* Results Header */}
-                  <div className="p-4 border-b border-border bg-surface-elevated">
-                    {testResults.error && (
-                      <div className="mb-4 p-3 bg-error/10 border border-error/30 rounded-lg">
-                        <p className="text-sm text-error font-medium">
-                          Error: {testResults.error}
-                        </p>
-                      </div>
+              {/* Bottom Panel - Fixed height, doesn't affect editor */}
+              {(running || streamingLogs.length > 0 || testResults) && (
+                <div className="h-[280px] flex-shrink-0 border-t border-border flex flex-col bg-surface">
+                  {/* Tab Bar */}
+                  <div className="flex items-center border-b border-border bg-surface-elevated px-2">
+                    {/* Logs Tab */}
+                    <button
+                      className={`px-3 py-2 text-xs font-medium flex items-center gap-2 border-b-2 transition-colors ${
+                        !testResults || running
+                          ? 'border-primary text-primary'
+                          : 'border-transparent text-text-tertiary hover:text-text-secondary'
+                      }`}
+                      onClick={() => testResults && setTestResults(null)}
+                    >
+                      <Terminal size={12} />
+                      <span>Logs</span>
+                      {running && <Loader2 size={10} className="animate-spin text-yellow-400" />}
+                      {!running && streamingLogs.length > 0 && (
+                        <span className="px-1.5 py-0.5 rounded bg-surface text-[10px]">{streamingLogs.length}</span>
+                      )}
+                    </button>
+                    {/* Results Tab */}
+                    {testResults && !running && (
+                      <button
+                        className="px-3 py-2 text-xs font-medium flex items-center gap-2 border-b-2 border-primary text-primary"
+                      >
+                        <CheckCircle size={12} />
+                        <span>Results</span>
+                        <span className={`px-1.5 py-0.5 rounded text-[10px] ${
+                          testResults.summary.failed > 0 ? 'bg-red-500/20 text-red-400' : 'bg-green-500/20 text-green-400'
+                        }`}>
+                          {testResults.summary.passed}/{testResults.summary.total}
+                        </span>
+                      </button>
                     )}
-
-                    <div className="flex items-center justify-between">
-                      <h3 className="font-semibold text-lg text-text-primary">Test Results</h3>
-                      <div className="flex gap-6 text-sm">
-                        <div className="flex items-center gap-2">
-                          <div className="w-2 h-2 rounded-full bg-success"></div>
-                          <span className="text-text-secondary">Passed:</span>
-                          <span className="font-semibold text-success">{testResults.summary.passed}</span>
-                        </div>
-                        <div className="flex items-center gap-2">
-                          <div className="w-2 h-2 rounded-full bg-error"></div>
-                          <span className="text-text-secondary">Failed:</span>
-                          <span className="font-semibold text-error">{testResults.summary.failed}</span>
-                        </div>
-                        <div className="flex items-center gap-2">
-                          <span className="text-text-secondary">Total:</span>
-                          <span className="font-semibold text-text-primary">{testResults.summary.total}</span>
-                        </div>
-                        {testResults.summary.total_cost > 0 && (
-                          <div className="flex items-center gap-2">
-                            <span className="text-text-secondary">Cost:</span>
-                            <span className="font-semibold text-text-primary">${testResults.summary.total_cost.toFixed(4)}</span>
-                          </div>
-                        )}
-                      </div>
-                    </div>
+                    {/* Spacer */}
+                    <div className="flex-1" />
+                    {/* Clear/Close buttons */}
+                    {!running && streamingLogs.length > 0 && !testResults && (
+                      <button
+                        onClick={() => setStreamingLogs([])}
+                        className="px-2 py-1 text-xs text-text-tertiary hover:text-text-primary hover:bg-surface-hover rounded transition-colors"
+                      >
+                        Clear
+                      </button>
+                    )}
+                    {testResults && !running && (
+                      <button
+                        onClick={() => { setTestResults(null); setStreamingLogs([]); }}
+                        className="p-1.5 text-text-tertiary hover:text-text-primary hover:bg-surface-hover rounded transition-colors"
+                        title="Close panel"
+                      >
+                        <X size={14} />
+                      </button>
+                    )}
                   </div>
 
-                  {/* Results List (section 4.5 - using TestResultPanel) */}
-                  <div className="flex-1 overflow-auto p-4 bg-surface">
-                    {testResults.results && testResults.results.length > 0 ? (
-                      <div className="space-y-2">
-                        {testResults.results.map((result, idx) => (
-                          <TestResultPanel
-                            key={idx}
-                            result={result}
-                            initialExpanded={!result.passed}
-                          />
-                        ))}
+                  {/* Panel Content */}
+                  <div className="flex-1 overflow-hidden">
+                    {/* Show Results if available and not running, otherwise show Logs */}
+                    {testResults && !running ? (
+                      /* Results Content */
+                      <div className="h-full flex flex-col">
+                        {/* Results Summary Bar */}
+                        <div className="px-4 py-2 bg-surface-elevated/50 flex items-center gap-6 text-xs border-b border-border/50">
+                          <div className="flex items-center gap-2">
+                            <div className="w-2 h-2 rounded-full bg-green-500"></div>
+                            <span className="text-text-tertiary">Passed:</span>
+                            <span className="font-semibold text-green-400">{testResults.summary.passed}</span>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <div className="w-2 h-2 rounded-full bg-red-500"></div>
+                            <span className="text-text-tertiary">Failed:</span>
+                            <span className="font-semibold text-red-400">{testResults.summary.failed}</span>
+                          </div>
+                          {testResults.summary.total_cost > 0 && (
+                            <div className="flex items-center gap-2">
+                              <span className="text-text-tertiary">Cost:</span>
+                              <span className="font-mono text-text-secondary">${testResults.summary.total_cost.toFixed(4)}</span>
+                            </div>
+                          )}
+                        </div>
+                        {/* Results List */}
+                        <div className="flex-1 overflow-auto p-3">
+                          {testResults.results && testResults.results.length > 0 ? (
+                            <div className="space-y-2">
+                              {testResults.results.map((result, idx) => (
+                                <TestResultPanel
+                                  key={idx}
+                                  result={result}
+                                  initialExpanded={!result.passed}
+                                />
+                              ))}
+                            </div>
+                          ) : (
+                            <div className="text-center py-4 text-text-tertiary text-sm">
+                              No test results available
+                            </div>
+                          )}
+                        </div>
                       </div>
                     ) : (
-                      <div className="text-center py-8">
-                        <p className="text-text-tertiary">No test results available</p>
+                      /* Logs Content */
+                      <div className="h-full overflow-auto p-3 font-mono text-xs bg-gray-950">
+                        {streamingLogs.length === 0 ? (
+                          <div className="text-gray-500 text-center py-4">
+                            Waiting for test execution...
+                          </div>
+                        ) : (
+                          streamingLogs.map((log, idx) => (
+                            <div
+                              key={idx}
+                              className={`py-0.5 leading-relaxed ${
+                                log.includes('Error') || log.includes('❌') || log.includes('FAILED') ? 'text-red-400' :
+                                log.includes('Tool call') || log.includes('🔧') ? 'text-cyan-400' :
+                                log.includes('✅') || log.includes('PASSED') ? 'text-green-400' :
+                                log.includes('⏱️') || log.includes('Running') || log.includes('🧪') ? 'text-yellow-400' :
+                                log.includes('📁') || log.includes('📋') || log.includes('🤖') || log.includes('🔌') ? 'text-blue-400' :
+                                log.includes('===') || log.includes('---') ? 'text-gray-600' :
+                                log.includes('💰') || log.includes('📊') ? 'text-purple-400' :
+                                'text-gray-300'
+                              }`}
+                            >
+                              {log}
+                            </div>
+                          ))
+                        )}
+                        <div ref={logsEndRef} />
                       </div>
                     )}
                   </div>
                 </div>
               )}
 
+              {/* Visual Test Execution Status - floating indicator */}
+              {running && (
+                <div className="absolute top-2 right-2 z-10">
+                  <TestStatusIndicator
+                    current={runningTests.current}
+                    completed={runningTests.completed}
+                    total={runningTests.total}
+                    status={runningTests.status}
+                  />
+                </div>
+              )}
+
               {/* All LLMs Results Panel */}
               {allLlmsResults && Object.keys(allLlmsResults).length > 0 && !running && (
-                <div className="h-1/2 border-t border-border overflow-hidden flex flex-col animate-slide-up">
-                  <div className="p-4 border-b border-border bg-surface-elevated">
-                    <div className="flex items-center justify-between">
-                      <h3 className="font-semibold text-lg text-text-primary">All LLMs Comparison</h3>
-                      <button
-                        onClick={() => setAllLlmsResults(null)}
-                        className="p-1.5 hover:bg-surface-hover rounded text-text-tertiary hover:text-text-primary"
-                        title="Clear results"
-                      >
-                        <X size={16} />
-                      </button>
+                <div className="h-[280px] flex-shrink-0 border-t border-border overflow-hidden flex flex-col bg-surface">
+                  <div className="px-4 py-3 border-b border-border bg-surface-elevated flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                      <h3 className="font-medium text-sm text-text-primary">All LLMs Comparison</h3>
+                      <span className="px-2 py-0.5 text-xs rounded bg-surface text-text-tertiary">
+                        {Object.keys(allLlmsResults).length} provider{Object.keys(allLlmsResults).length !== 1 ? 's' : ''}
+                      </span>
                     </div>
-                    <p className="text-sm text-text-tertiary mt-1">
-                      Results from {Object.keys(allLlmsResults).length} provider{Object.keys(allLlmsResults).length !== 1 ? 's' : ''}
-                    </p>
+                    <button
+                      onClick={() => setAllLlmsResults(null)}
+                      className="p-1.5 hover:bg-surface-hover rounded text-text-tertiary hover:text-text-primary transition-colors"
+                      title="Close"
+                    >
+                      <X size={14} />
+                    </button>
                   </div>
 
-                  <div className="flex-1 overflow-auto p-4 bg-surface">
+                  <div className="flex-1 overflow-auto p-3 bg-surface">
                     <div className="overflow-x-auto">
                       <table className="w-full text-sm">
                         <thead>

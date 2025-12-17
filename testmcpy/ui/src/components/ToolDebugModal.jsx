@@ -503,11 +503,11 @@ function ToolDebugModal({ tool, profile, onClose }) {
                   <ReactJson
                     src={result.response}
                     theme="monokai"
-                    collapsed={false}
+                    collapsed={3}
                     displayDataTypes={false}
                     displayObjectSize={true}
                     enableClipboard={true}
-                    name={false}
+                    name="response"
                     indentWidth={2}
                     iconStyle="triangle"
                     style={{

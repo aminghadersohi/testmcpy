@@ -41,12 +41,16 @@ class LLMResult:
 
     response: str
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
+    tool_results: list[dict[str, Any]] = field(
+        default_factory=list
+    )  # Pre-executed tool results (for CLI providers)
     thinking: str | None = None  # Extended thinking content (Claude 4 models)
     token_usage: dict[str, int] | None = None
     cost: float = 0.0
     duration: float = 0.0
     tti_ms: int | None = None  # Time to first token in milliseconds
     raw_response: Any | None = None
+    logs: list[str] = field(default_factory=list)  # Provider execution logs
 
 
 @dataclass
@@ -907,7 +911,7 @@ class AnthropicProvider(LLMProvider):
             # Execute tool calls locally (don't append to response_text - tool results shown separately in UI)
             for tool_call in tool_calls:
                 try:
-                    tool_result = await self.tool_discovery.execute_tool_call(tool_call)
+                    await self.tool_discovery.execute_tool_call(tool_call)
                     # Tool results are returned separately, not appended to response text
                 except Exception:
                     pass  # Errors are handled by the tool execution
@@ -1316,10 +1320,12 @@ class ClaudeCodeProvider(LLMProvider):
         mcp_url: str | None = None,
         auth: dict[str, Any] | None = None,
         output_format: str = "json",  # 'json' for structured, 'text' for plain
+        log_callback=None,
     ):
         self.model = model
         self.claude_cli_path = claude_cli_path or self._find_claude_cli()
         self.output_format = output_format
+        self.log_callback = log_callback  # Real-time log streaming callback
         # Use MCP_URL and auth from default profile if not provided
         config = get_config()
         if mcp_url is None:
@@ -1345,8 +1351,25 @@ class ClaudeCodeProvider(LLMProvider):
             "/usr/local/bin/claude",
             "/opt/homebrew/bin/claude",
             os.path.expanduser("~/.local/bin/claude"),
-            "claude",  # In PATH
         ]
+
+        # Add nvm paths - check all installed node versions
+        nvm_dir = os.path.expanduser("~/.nvm/versions/node")
+        if os.path.isdir(nvm_dir):
+            for version_dir in os.listdir(nvm_dir):
+                nvm_claude = os.path.join(nvm_dir, version_dir, "bin", "claude")
+                if os.path.exists(nvm_claude):
+                    common_paths.insert(0, nvm_claude)  # Prioritize nvm paths
+
+        # Also try shutil.which which respects PATH
+        import shutil
+
+        which_result = shutil.which("claude")
+        if which_result:
+            common_paths.insert(0, which_result)
+
+        # Finally add "claude" for PATH lookup
+        common_paths.append("claude")
 
         for path in common_paths:
             try:
@@ -1379,6 +1402,43 @@ class ClaudeCodeProvider(LLMProvider):
         except Exception as e:
             print(f"[ClaudeCode] ⚠️  MCP tools not available: {e}")
 
+    async def _fetch_jwt_token(self) -> str | None:
+        """Fetch JWT token from API."""
+        if not self.auth_config:
+            return None
+
+        api_url = self.auth_config.get("api_url", "")
+        api_token = self.auth_config.get("api_token", "")
+        api_secret = self.auth_config.get("api_secret", "")
+
+        if not all([api_url, api_token, api_secret]):
+            print("[ClaudeCode] JWT auth config incomplete")
+            return None
+
+        try:
+            import httpx
+
+            print(f"[ClaudeCode] Fetching JWT token from: {api_url}")
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    api_url,
+                    headers={
+                        "Content-Type": "application/json",
+                        "Accept": "application/json",
+                    },
+                    json={"name": api_token, "secret": api_secret},
+                    timeout=30.0,
+                )
+                response.raise_for_status()
+                data = response.json()
+                token = data.get("payload", {}).get("access_token", "")
+                if token:
+                    print(f"[ClaudeCode] JWT token fetched successfully (length: {len(token)})")
+                return token
+        except Exception as e:
+            print(f"[ClaudeCode] Failed to fetch JWT token: {e}")
+            return None
+
     async def generate_with_tools(
         self,
         prompt: str,
@@ -1388,19 +1448,41 @@ class ClaudeCodeProvider(LLMProvider):
     ) -> LLMResult:
         """Generate response using Claude Code CLI with JSON output."""
         start_time = time.time()
+        logs = []  # Capture logs for UI display
+
+        def log(msg: str):
+            """Log a message to console, logs list, and optionally via callback."""
+            print(msg)
+            logs.append(msg)
+            # Stream to callback if available (for real-time UI updates)
+            if self.log_callback:
+                import asyncio
+
+                if asyncio.iscoroutinefunction(self.log_callback):
+                    try:
+                        loop = asyncio.get_event_loop()
+                        if loop.is_running():
+                            asyncio.create_task(self.log_callback(msg))
+                        else:
+                            loop.run_until_complete(self.log_callback(msg))
+                    except RuntimeError:
+                        # No event loop, skip callback
+                        pass
+                else:
+                    self.log_callback(msg)
 
         try:
-            print(
-                f"[ClaudeCode] Running with timeout={timeout}s, output_format={self.output_format}"
-            )
+            log(f"[ClaudeCode] Running with timeout={timeout}s, output_format=stream-json")
 
-            # Build command with JSON output for structured responses
+            # Build command with stream-json output for structured responses with tool calls
+            # Note: -p/--print enables non-interactive mode, prompt is positional arg
+            # stream-json + verbose exposes tool_use and tool_result events
             cmd = [
                 self.claude_cli_path,
-                "-p",
-                prompt,
+                "-p",  # --print mode (non-interactive)
                 "--output-format",
-                self.output_format,
+                "stream-json",  # Use stream-json to get tool call details
+                "--verbose",  # Required for stream-json in print mode
                 "--dangerously-skip-permissions",
             ]
 
@@ -1408,22 +1490,92 @@ class ClaudeCodeProvider(LLMProvider):
             if self.model:
                 cmd.extend(["--model", self.model])
 
-            print(f"[ClaudeCode] Command: {' '.join(cmd[:3])} <prompt> {' '.join(cmd[4:])}")
+            # Add MCP server config if we have one AND tools are expected - write to temp file
+            # Only add MCP config when tools are provided (otherwise it's just text generation)
+            mcp_config_file = None
+            if self.mcp_url and tools:
+                import tempfile
+
+                # Build MCP config JSON for the server
+                mcp_config = {
+                    "mcpServers": {
+                        "testmcpy": {
+                            "type": "http",
+                            "url": self.mcp_url,
+                        }
+                    }
+                }
+                # Add auth header based on auth config type
+                auth_token = None
+                if self.auth_config:
+                    auth_type = self.auth_config.get("type", "")
+                    if auth_type == "jwt":
+                        # Fetch JWT token dynamically
+                        auth_token = await self._fetch_jwt_token()
+                        log(
+                            f"[ClaudeCode] Fetched JWT token (length: {len(auth_token) if auth_token else 0})"
+                        )
+                    elif auth_type == "bearer":
+                        auth_token = self.auth_config.get("token", "")
+                    elif self.auth_config.get("token"):
+                        # Legacy: direct token
+                        auth_token = self.auth_config.get("token")
+
+                if auth_token:
+                    mcp_config["mcpServers"]["testmcpy"]["headers"] = {
+                        "Authorization": f"Bearer {auth_token}"
+                    }
+
+                # Write config to temp file
+                mcp_config_file = tempfile.NamedTemporaryFile(
+                    mode="w", suffix=".json", delete=False
+                )
+                json.dump(mcp_config, mcp_config_file)
+                mcp_config_file.close()
+                cmd.extend(["--mcp-config", mcp_config_file.name])
+                log(f"[ClaudeCode] MCP config file: {mcp_config_file.name}")
+                log(f"[ClaudeCode] MCP URL: {self.mcp_url}")
+            elif not tools:
+                log("[ClaudeCode] No tools - skipping MCP config (text generation mode)")
+
+            # Use -- to separate options from positional argument (needed for --mcp-config)
+            cmd.append("--")
+            cmd.append(prompt)
+
+            # Print full command for debugging (mask prompt)
+            cmd_debug = cmd[:-1] + ["<prompt>"]  # Replace actual prompt with placeholder
+            log(f"[ClaudeCode] Full command: {' '.join(cmd_debug)}")
+
+            # Show prompt details
+            prompt_preview = prompt[:500] + "..." if len(prompt) > 500 else prompt
+            log(f"[ClaudeCode] Prompt ({len(prompt)} chars):\n{prompt_preview}")
+            log(f"[ClaudeCode] Tools provided: {len(tools)}")
+            if tools:
+                tool_names = [t.get("function", {}).get("name", "unknown") for t in tools[:10]]
+                log(f"[ClaudeCode] Tool names (first 10): {tool_names}")
 
             # Execute Claude CLI
+            # IMPORTANT: Clear ANTHROPIC_API_KEY from env so CLI uses subscription, not API credits
+            cli_env = os.environ.copy()
+            cli_env.pop("ANTHROPIC_API_KEY", None)  # Remove API key if present
+
             process = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env=cli_env,
             )
 
             try:
-                print("[ClaudeCode] Waiting for response...")
+                log("[ClaudeCode] Waiting for response...")
                 stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
-                print(f"[ClaudeCode] Got response, returncode={process.returncode}")
+                elapsed = time.time() - start_time
+                log(
+                    f"[ClaudeCode] Got response after {elapsed:.1f}s, returncode={process.returncode}"
+                )
             except asyncio.TimeoutError:
-                print(f"[ClaudeCode] TIMEOUT after {timeout}s - killing process")
+                log(f"[ClaudeCode] TIMEOUT after {timeout}s - killing process")
                 process.kill()
                 await process.wait()
                 raise Exception(f"Claude CLI timeout after {timeout}s")
@@ -1431,29 +1583,236 @@ class ClaudeCodeProvider(LLMProvider):
             stdout_text = stdout.decode().strip()
             stderr_text = stderr.decode().strip()
 
+            log(f"[ClaudeCode] Response size: {len(stdout_text)} chars")
             if stderr_text:
-                print(f"[ClaudeCode] stderr: {stderr_text[:200]}...")
+                log(f"[ClaudeCode] stderr: {stderr_text[:500]}...")
 
-            if process.returncode != 0:
-                raise Exception(f"Claude CLI error (exit {process.returncode}): {stderr_text}")
+            # Show raw response preview
+            if stdout_text:
+                response_preview = (
+                    stdout_text[:1000] + "..." if len(stdout_text) > 1000 else stdout_text
+                )
+                log(f"[ClaudeCode] Raw response:\n{response_preview}")
 
-            # Parse response based on output format
-            if self.output_format == "json":
-                return self._parse_json_response(stdout_text, start_time)
-            else:
-                return self._parse_text_response(stdout_text, start_time)
+            # Parse stream-json output (multiple JSON lines)
+            return self._parse_stream_json_response(stdout_text, start_time, logs)
 
         except Exception as e:
             duration = time.time() - start_time
-            print(f"[ClaudeCode] ❌ Error: {type(e).__name__}: {str(e)}")
+            log(f"[ClaudeCode] ❌ Error: {type(e).__name__}: {str(e)}")
             return LLMResult(
                 response=f"Error: {str(e)}",
                 tool_calls=[],
                 duration=duration,
+                logs=logs,
+            )
+        finally:
+            # Clean up temp MCP config file
+            if mcp_config_file and os.path.exists(mcp_config_file.name):
+                try:
+                    os.unlink(mcp_config_file.name)
+                except Exception:
+                    pass
+
+    def _parse_stream_json_response(
+        self, output: str, start_time: float, logs: list[str] | None = None
+    ) -> LLMResult:
+        """Parse stream-json output from Claude CLI.
+
+        Stream-json format outputs multiple JSON lines with different event types:
+        - {"type":"assistant","message":{"content":[{"type":"text","text":"..."},{"type":"tool_use",...}]}}
+        - {"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"...","content":"..."}]}}
+        - {"type":"result","duration_ms":...,"usage":{...},"cost_usd":...}
+        """
+        logs = logs or []
+        response_text = ""
+        thinking_text = ""
+        tool_calls = []
+        tool_results = {}  # Map tool_use_id to result
+        token_usage = None
+        cost = 0.0
+        raw_events = []
+
+        try:
+            # Parse each line as a separate JSON event
+            lines = output.strip().split("\n")
+            logs.append(f"[ClaudeCode] Parsing {len(lines)} stream-json lines")
+            print(f"[ClaudeCode] Parsing {len(lines)} stream-json lines")
+
+            for line_num, line in enumerate(lines):
+                line = line.strip()
+                if not line:
+                    continue
+
+                try:
+                    event = json.loads(line)
+                    raw_events.append(event)
+                    event_type = event.get("type", "")
+
+                    if event_type == "assistant":
+                        # Assistant message with text and/or tool_use blocks
+                        message = event.get("message", {})
+                        content = message.get("content", [])
+
+                        for block in content:
+                            block_type = block.get("type", "")
+
+                            if block_type == "text":
+                                text = block.get("text", "")
+                                response_text += text
+                                logs.append(f"[ClaudeCode] 📝 Text ({len(text)} chars)")
+                                print(f"[ClaudeCode] 📝 Text ({len(text)} chars)")
+
+                            elif block_type == "thinking":
+                                thinking = block.get("thinking", "")
+                                thinking_text += thinking
+                                logs.append(f"[ClaudeCode] 🧠 Thinking ({len(thinking)} chars)")
+                                print(f"[ClaudeCode] 🧠 Thinking ({len(thinking)} chars)")
+
+                            elif block_type == "tool_use":
+                                tool_call = {
+                                    "id": block.get("id", ""),
+                                    "name": block.get("name", ""),
+                                    "arguments": block.get("input", {}),
+                                }
+                                tool_calls.append(tool_call)
+                                logs.append(
+                                    f"[ClaudeCode] 🔧 Tool Call: {tool_call['name']} (id={tool_call['id'][:20]}...)"
+                                )
+                                print(
+                                    f"[ClaudeCode] 🔧 Tool Call: {tool_call['name']} (id={tool_call['id'][:20]}...)"
+                                )
+                                # Log arguments preview
+                                args_str = json.dumps(tool_call["arguments"])
+                                if len(args_str) > 200:
+                                    args_str = args_str[:200] + "..."
+                                logs.append(f"[ClaudeCode]    Args: {args_str}")
+                                print(f"[ClaudeCode]    Args: {args_str}")
+
+                    elif event_type == "user":
+                        # User message containing tool_result blocks
+                        message = event.get("message", {})
+                        content = message.get("content", [])
+
+                        for block in content:
+                            if block.get("type") == "tool_result":
+                                tool_use_id = block.get("tool_use_id", "")
+                                is_error = block.get("is_error", False)
+                                result_content = block.get("content", "")
+
+                                # Store the result
+                                tool_results[tool_use_id] = {
+                                    "content": result_content,
+                                    "is_error": is_error,
+                                }
+
+                                # Log result preview
+                                content_preview = (
+                                    str(result_content)[:200] + "..."
+                                    if len(str(result_content)) > 200
+                                    else str(result_content)
+                                )
+                                status = "❌ Error" if is_error else "✅ Success"
+                                logs.append(
+                                    f"[ClaudeCode] {status} Tool Result (id={tool_use_id[:20]}...)"
+                                )
+                                logs.append(f"[ClaudeCode]    Content: {content_preview}")
+                                print(
+                                    f"[ClaudeCode] {status} Tool Result (id={tool_use_id[:20]}...)"
+                                )
+                                print(f"[ClaudeCode]    Content: {content_preview}")
+
+                    elif event_type == "result":
+                        # Final result with usage and cost
+                        usage = event.get("usage", {})
+                        token_usage = {
+                            "prompt": usage.get("input_tokens", 0),
+                            "completion": usage.get("output_tokens", 0),
+                            "total": usage.get("input_tokens", 0) + usage.get("output_tokens", 0),
+                            "cache_creation": usage.get("cache_creation_input_tokens", 0),
+                            "cache_read": usage.get("cache_read_input_tokens", 0),
+                        }
+
+                        cost = event.get("cost_usd", 0.0)
+                        duration_ms = event.get("duration_ms", 0)
+
+                        logs.append(
+                            f"[ClaudeCode] 📊 Result: {token_usage['total']} tokens, ${cost:.4f}"
+                        )
+                        print(f"[ClaudeCode] 📊 Result: {token_usage['total']} tokens, ${cost:.4f}")
+
+                    elif event_type == "system":
+                        # System messages (usually init info)
+                        system_msg = event.get("message", "")
+                        if system_msg:
+                            logs.append(f"[ClaudeCode] ℹ️ System: {str(system_msg)[:100]}")
+                            print(f"[ClaudeCode] ℹ️ System: {str(system_msg)[:100]}")
+
+                except json.JSONDecodeError as e:
+                    # Not valid JSON - might be plain text output
+                    logs.append(f"[ClaudeCode] ⚠️ Non-JSON line {line_num + 1}: {line[:50]}...")
+                    print(f"[ClaudeCode] ⚠️ Non-JSON line {line_num + 1}: {line[:50]}...")
+                    # Append to response if we haven't parsed any JSON yet
+                    if not raw_events:
+                        response_text += line + "\n"
+
+            # Attach tool results to tool calls for completeness
+            # Also create MCPToolResult objects for evaluators
+            mcp_tool_results = []
+            for tc in tool_calls:
+                tc_id = tc.get("id", "")
+                if tc_id in tool_results:
+                    tc["result"] = tool_results[tc_id]
+                    # Create MCPToolResult for evaluators
+                    result_data = tool_results[tc_id]
+                    mcp_result = MCPToolResult(
+                        tool_call_id=tc_id,
+                        content=result_data.get("content", ""),
+                        is_error=result_data.get("is_error", False),
+                        error_message=str(result_data.get("content", ""))
+                        if result_data.get("is_error")
+                        else None,
+                    )
+                    mcp_tool_results.append(mcp_result)
+
+            # Summary
+            logs.append(
+                f"[ClaudeCode] ✓ Parsed: {len(response_text)} chars response, "
+                f"{len(tool_calls)} tool calls, {len(mcp_tool_results)} tool results, "
+                f"{len(thinking_text)} chars thinking"
+            )
+            print(
+                f"[ClaudeCode] ✓ Parsed: {len(response_text)} chars response, "
+                f"{len(tool_calls)} tool calls, {len(mcp_tool_results)} tool results, "
+                f"{len(thinking_text)} chars thinking"
             )
 
-    def _parse_json_response(self, output: str, start_time: float) -> LLMResult:
+        except Exception as e:
+            logs.append(f"[ClaudeCode] ❌ Parse error: {e}")
+            print(f"[ClaudeCode] ❌ Parse error: {e}")
+            # Fallback to raw output
+            response_text = output
+            mcp_tool_results = []
+
+        duration = time.time() - start_time
+        return LLMResult(
+            response=response_text,
+            tool_calls=tool_calls,
+            tool_results=mcp_tool_results,
+            thinking=thinking_text if thinking_text else None,
+            token_usage=token_usage,
+            cost=cost,
+            duration=duration,
+            tti_ms=int(duration * 1000),
+            raw_response={"events": raw_events} if raw_events else {"stdout": output},
+            logs=logs,
+        )
+
+    def _parse_json_response(
+        self, output: str, start_time: float, logs: list[str] | None = None
+    ) -> LLMResult:
         """Parse structured JSON output from Claude CLI."""
+        logs = logs or []
         response_text = ""
         thinking_text = ""
         tool_calls = []
@@ -1544,13 +1903,32 @@ class ClaudeCodeProvider(LLMProvider):
             if not response_text and not tool_calls:
                 response_text = output
 
+            logs.append(
+                f"[ClaudeCode] Parsed: {len(response_text)} chars, {len(tool_calls)} tool calls"
+            )
             print(f"[ClaudeCode] Parsed: {len(response_text)} chars, {len(tool_calls)} tool calls")
+            if tool_calls:
+                logs.append("[ClaudeCode] Tool calls:")
+                print("[ClaudeCode] Tool calls:")
+                for i, tc in enumerate(tool_calls):
+                    tool_log = f"[ClaudeCode]   {i + 1}. {tc.get('name', 'unknown')}({json.dumps(tc.get('arguments', {}), indent=2)[:200]})"
+                    logs.append(tool_log)
+                    print(tool_log)
+            if response_text:
+                response_preview = (
+                    response_text[:300] + "..." if len(response_text) > 300 else response_text
+                )
+                logs.append(f"[ClaudeCode] Response text: {response_preview}")
+                print(f"[ClaudeCode] Response text: {response_preview}")
             if thinking_text:
+                logs.append(f"[ClaudeCode] Thinking: {len(thinking_text)} chars")
                 print(f"[ClaudeCode] Thinking: {len(thinking_text)} chars")
             if token_usage:
+                logs.append(f"[ClaudeCode] Tokens: {token_usage.get('total', 0)}")
                 print(f"[ClaudeCode] Tokens: {token_usage.get('total', 0)}")
 
         except Exception as e:
+            logs.append(f"[ClaudeCode] JSON parse error: {e}")
             print(f"[ClaudeCode] JSON parse error: {e}")
             response_text = output
 
@@ -1564,10 +1942,14 @@ class ClaudeCodeProvider(LLMProvider):
             duration=duration,
             tti_ms=int(duration * 1000),
             raw_response=raw_data or {"stdout": output},
+            logs=logs,
         )
 
-    def _parse_text_response(self, output: str, start_time: float) -> LLMResult:
+    def _parse_text_response(
+        self, output: str, start_time: float, logs: list[str] | None = None
+    ) -> LLMResult:
         """Parse plain text output from Claude CLI."""
+        logs = logs or []
         # Parse tool calls from text output (legacy format)
         tool_calls = []
         tool_call_pattern = r"TOOL_CALL:\s*(\{[^}]+\}|\{[^}]*\{[^}]*\}[^}]*\})"
@@ -1594,6 +1976,7 @@ class ClaudeCodeProvider(LLMProvider):
             cost=0.0,
             duration=duration,
             raw_response={"stdout": output},
+            logs=logs,
         )
 
     async def close(self):

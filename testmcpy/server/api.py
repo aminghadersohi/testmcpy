@@ -718,7 +718,7 @@ async def chat(request: ChatRequest) -> ChatResponse:
         if api_key:
             provider_kwargs["api_key"] = api_key
         llm_provider = create_llm_provider(provider, model, **provider_kwargs)
-        print(f"[Chat] Initializing LLM provider...")
+        print("[Chat] Initializing LLM provider...")
         await llm_provider.initialize()
         print(
             f"[Chat] LLM provider initialized. Generating response with {len(all_tools)} tools..."
@@ -820,6 +820,16 @@ async def chat(request: ChatRequest) -> ChatResponse:
                 detail=f"Service unavailable: Unable to connect to MCP server. {error_msg}",
             )
         raise HTTPException(status_code=500, detail=error_msg)
+
+
+# WebSocket endpoint for streaming test execution
+from testmcpy.server.websocket import handle_test_websocket
+
+
+@app.websocket("/ws/tests")
+async def websocket_tests(websocket: WebSocket):
+    """WebSocket endpoint for streaming test execution with real-time logs."""
+    await handle_test_websocket(websocket)
 
 
 # Catch-all route for React Router (must be before static files)

@@ -1,5 +1,5 @@
 import React, { useState } from 'react'
-import { CheckCircle, XCircle, ChevronDown, ChevronRight } from 'lucide-react'
+import { CheckCircle, XCircle, ChevronDown, ChevronRight, Terminal } from 'lucide-react'
 
 /**
  * Collapsible test result panel showing test details
@@ -59,15 +59,40 @@ function TestResultPanel({ result, initialExpanded = false }) {
             </div>
           )}
 
+          {/* Provider Logs */}
+          {result.logs && result.logs.length > 0 && (
+            <div>
+              <h4 className="text-xs font-semibold text-text-secondary mb-1.5 flex items-center gap-1.5">
+                <Terminal size={12} />
+                Provider Logs ({result.logs.length})
+              </h4>
+              <div className="p-3 bg-gray-900 rounded-lg border border-border max-h-64 overflow-y-auto">
+                <pre className="text-xs font-mono text-gray-300 whitespace-pre-wrap">
+                  {result.logs.map((log, idx) => (
+                    <div key={idx} className={`leading-relaxed ${
+                      log.includes('Error') || log.includes('❌') ? 'text-red-400' :
+                      log.includes('Tool call') || log.includes('🔧') ? 'text-cyan-400' :
+                      log.includes('✅') || log.includes('Parsed:') ? 'text-green-400' :
+                      log.includes('Waiting') || log.includes('Running') ? 'text-yellow-400' :
+                      'text-gray-300'
+                    }`}>
+                      {log}
+                    </div>
+                  ))}
+                </pre>
+              </div>
+            </div>
+          )}
+
           {/* LLM Response */}
-          {result.llm_response && (
+          {(result.response || result.llm_response) && (
             <div>
               <h4 className="text-xs font-semibold text-text-secondary mb-1.5">LLM Response</h4>
-              <div className="p-3 bg-surface rounded-lg border border-border">
+              <div className="p-3 bg-surface rounded-lg border border-border max-h-48 overflow-y-auto">
                 <pre className="text-xs text-text-primary whitespace-pre-wrap font-mono">
-                  {typeof result.llm_response === 'string'
-                    ? result.llm_response
-                    : JSON.stringify(result.llm_response, null, 2)}
+                  {typeof (result.response || result.llm_response) === 'string'
+                    ? (result.response || result.llm_response)
+                    : JSON.stringify((result.response || result.llm_response), null, 2)}
                 </pre>
               </div>
             </div>

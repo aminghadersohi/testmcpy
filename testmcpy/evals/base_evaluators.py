@@ -20,6 +20,41 @@ class EvalResult:
     details: dict[str, Any] | None = None
 
 
+def _match_tool_name(actual_name: str, expected_name: str) -> bool:
+    """
+    Match tool names with support for MCP prefixes.
+
+    MCP tools often have prefixed names like 'mcp__testmcpy__health_check'.
+    This function matches if:
+    - Exact match: 'health_check' == 'health_check'
+    - Suffix match: 'mcp__testmcpy__health_check' ends with '__health_check'
+    - Contains match: 'mcp__testmcpy__health_check' contains 'health_check'
+
+    Args:
+        actual_name: The actual tool name from the LLM response
+        expected_name: The expected tool name from the test definition
+
+    Returns:
+        True if the names match
+    """
+    if not actual_name or not expected_name:
+        return False
+
+    # Exact match
+    if actual_name == expected_name:
+        return True
+
+    # Suffix match (handles mcp__namespace__tool_name pattern)
+    if actual_name.endswith(f"__{expected_name}"):
+        return True
+
+    # Contains match (for partial tool names)
+    if expected_name in actual_name:
+        return True
+
+    return False
+
+
 class BaseEvaluator(ABC):
     """Base class for all evaluators."""
 
@@ -78,13 +113,14 @@ class WasMCPToolCalled(BaseEvaluator):
             return EvalResult(passed=False, score=0.0, reason="No tool calls found in response")
 
         if self.tool_name:
-            # Check for specific tool
+            # Check for specific tool (with support for MCP prefixed names)
             for call in tool_calls:
-                if call.get("name") == self.tool_name:
+                actual_name = call.get("name", "")
+                if _match_tool_name(actual_name, self.tool_name):
                     return EvalResult(
                         passed=True,
                         score=1.0,
-                        reason=f"Tool '{self.tool_name}' was called",
+                        reason=f"Tool '{self.tool_name}' was called (actual: '{actual_name}')",
                         details={"tool_call": call},
                     )
 
@@ -387,8 +423,10 @@ class ToolCalledWithParameter(BaseEvaluator):
         if not tool_calls:
             return EvalResult(passed=False, score=0.0, reason="No tool calls found in response")
 
-        # Find tool call matching the tool name
-        matching_calls = [call for call in tool_calls if call.get("name") == self.tool_name]
+        # Find tool call matching the tool name (with support for MCP prefixed names)
+        matching_calls = [
+            call for call in tool_calls if _match_tool_name(call.get("name", ""), self.tool_name)
+        ]
 
         if not matching_calls:
             return EvalResult(
@@ -473,8 +511,10 @@ class ToolCalledWithParameters(BaseEvaluator):
         if not tool_calls:
             return EvalResult(passed=False, score=0.0, reason="No tool calls found in response")
 
-        # Find tool call matching the tool name
-        matching_calls = [call for call in tool_calls if call.get("name") == self.tool_name]
+        # Find tool call matching the tool name (with support for MCP prefixed names)
+        matching_calls = [
+            call for call in tool_calls if _match_tool_name(call.get("name", ""), self.tool_name)
+        ]
 
         if not matching_calls:
             return EvalResult(

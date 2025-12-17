@@ -129,6 +129,13 @@ function AppContent() {
     }
   }
 
+  // Helper to get provider key from profile
+  const getProviderKeyFromProfile = (profile) => {
+    if (!profile?.providers?.length) return null
+    const defaultProv = profile.providers.find(p => p.default) || profile.providers[0]
+    return `${defaultProv.provider}:${defaultProv.model}`
+  }
+
   const loadLlmProfiles = async () => {
     try {
       const res = await fetch('/api/llm/profiles')
@@ -139,15 +146,39 @@ function AppContent() {
       // Check localStorage for saved LLM profile selection
       const savedLlmProfile = localStorage.getItem('selectedLLMProfile')
 
-      if (savedLlmProfile) {
+      let profileToUse = null
+      if (savedLlmProfile && data.profiles?.find(p => p.profile_id === savedLlmProfile)) {
         setSelectedLlmProfile(savedLlmProfile)
-      } else if (data.default) {
+        profileToUse = data.profiles.find(p => p.profile_id === savedLlmProfile)
+      } else if (data.default && data.profiles?.find(p => p.profile_id === data.default)) {
         // Use default from API
         setSelectedLlmProfile(data.default)
         localStorage.setItem('selectedLLMProfile', data.default)
+        profileToUse = data.profiles.find(p => p.profile_id === data.default)
+      }
+
+      // Always sync the provider to match the profile's default provider
+      // This ensures consistency between sidebar and modals
+      if (profileToUse) {
+        const providerKey = getProviderKeyFromProfile(profileToUse)
+        if (providerKey) {
+          localStorage.setItem('selectedLLMProvider', providerKey)
+        }
       }
     } catch (error) {
       console.error('Failed to load LLM profiles:', error)
+    }
+  }
+
+  // When profile changes, update the provider too
+  const handleLlmProfileChange = (profileId) => {
+    setSelectedLlmProfile(profileId)
+    localStorage.setItem('selectedLLMProfile', profileId)
+
+    const profile = llmProfiles.find(p => p.profile_id === profileId)
+    const providerKey = getProviderKeyFromProfile(profile)
+    if (providerKey) {
+      localStorage.setItem('selectedLLMProvider', providerKey)
     }
   }
 
@@ -404,7 +435,7 @@ function AppContent() {
                 }}
               />
             } />
-            <Route path="/llm-profiles" element={<LLMProfiles selectedProfile={selectedLlmProfile} onSelectProfile={setSelectedLlmProfile} onProfilesChange={loadLlmProfiles} />} />
+            <Route path="/llm-profiles" element={<LLMProfiles selectedProfile={selectedLlmProfile} onSelectProfile={handleLlmProfileChange} onProfilesChange={loadLlmProfiles} />} />
           </Routes>
         </main>
 

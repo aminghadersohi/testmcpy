@@ -303,8 +303,8 @@ async def run_tests(request: TestRunRequest):
             provider=provider,
             mcp_url=config.get_mcp_url(),
             mcp_client=mcp_client,
-            verbose=False,
-            hide_tool_output=True,
+            verbose=True,
+            hide_tool_output=False,
         )
 
         results = await runner.run_tests(test_cases)
@@ -395,8 +395,8 @@ async def run_specific_test(test_name: str, request: TestRunRequest | None = Non
             model=model,
             provider=provider,
             mcp_url=config.get_mcp_url(),
-            verbose=False,
-            hide_tool_output=True,
+            verbose=True,
+            hide_tool_output=False,
         )
 
         results = await runner.run_tests(test_cases)
@@ -463,8 +463,8 @@ async def run_specific_test_case(
             model=model,
             provider=provider,
             mcp_url=config.get_mcp_url(),
-            verbose=False,
-            hide_tool_output=True,
+            verbose=True,
+            hide_tool_output=False,
         )
 
         results = await runner.run_tests([test_case])
@@ -537,8 +537,8 @@ async def run_tool_tests(tool_name: str, model: str | None = None, provider: str
                 model=model,
                 provider=provider,
                 mcp_url=config.get_mcp_url(),
-                verbose=False,
-                hide_tool_output=True,
+                verbose=True,
+                hide_tool_output=False,
             )
 
             results = await runner.run_tests(test_cases)
@@ -827,33 +827,31 @@ Analysis: {json.dumps(analysis, indent=2)}
 {"Include edge cases and error scenarios." if config_for_level["include_edge_cases"] else "Focus on common use cases."}
 {f"Custom Instructions: {request.custom_instructions}" if request.custom_instructions else ""}
 
-Generate tests in this YAML format:
+YAML FORMAT (follow this structure exactly):
 ```yaml
 version: "1.0"
 tests:
-  - name: test_basic_usage
-    prompt: "A natural language prompt that would trigger this tool"
+  - name: test_descriptive_name_here
+    prompt: "Write a realistic user request here - e.g., 'Show me all charts in the system' or 'Get the data for chart ID 5'"
     evaluators:
       - name: execution_successful
       - name: was_mcp_tool_called
         args:
           tool_name: "{request.tool_name}"
-      - name: tool_called_with_parameters
-        args:
-          tool_name: "{request.tool_name}"
-          parameters:
-            param1: "expected_value"
-          partial_match: true
 ```
 
-Important:
-1. Each test should have a descriptive name (e.g., test_search_by_id, test_invalid_input)
-2. The prompt should be natural language that would make the LLM call this tool
-3. Include appropriate evaluators for each test
-4. For parameter validation, only include the most important parameters
-5. Make prompts realistic and varied
+CRITICAL REQUIREMENTS:
+1. The "prompt" field MUST be a realistic natural language request that a user would actually type
+2. DO NOT use placeholder text like "A natural language prompt" - write REAL prompts based on what this tool does
+3. Each prompt should be different and test different aspects of the tool
+4. Use the tool description to understand what prompts would trigger this tool
+5. Examples of GOOD prompts: "List all available charts", "Get data for chart with ID 123", "Show me the sales dashboard"
+6. Examples of BAD prompts: "A prompt that triggers this tool", "Test the tool", "Call the function"
 
-Generate {config_for_level["count"]} tests now in YAML format:"""
+IMPORTANT: Your response must be ONLY valid YAML starting with "version:" - no explanations, no summaries, no markdown.
+
+version: "1.0"
+tests:"""
 
         test_gen_result = await llm_provider.generate_with_tools(
             prompt=test_gen_prompt, tools=[], timeout=60.0
@@ -861,6 +859,12 @@ Generate {config_for_level["count"]} tests now in YAML format:"""
 
         # Extract YAML from response
         yaml_content = test_gen_result.response
+
+        # If response starts with tests (continuing from our prompt), prepend the header
+        if yaml_content.strip().startswith("- name:") or yaml_content.strip().startswith(
+            "  - name:"
+        ):
+            yaml_content = 'version: "1.0"\ntests:\n' + yaml_content
 
         # Try to extract YAML from code blocks (handles various formats)
         yaml_match = re.search(r"```(?:yaml)?\s*([\s\S]*?)\s*```", yaml_content)

@@ -11,8 +11,6 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from testmcpy.config import get_config
-
 router = APIRouter(prefix="/api/results", tags=["results"])
 
 
@@ -45,8 +43,7 @@ class TestRunResult(BaseModel):
 
 def get_results_dir() -> Path:
     """Get or create the results directory."""
-    config = get_config()
-    results_dir = Path(config.tests_dir) / ".results"
+    results_dir = Path.cwd() / "tests" / ".results"
     results_dir.mkdir(parents=True, exist_ok=True)
     return results_dir
 
@@ -109,9 +106,7 @@ async def save_test_run(data: dict[str, Any]) -> dict[str, Any]:
 
 
 @router.get("/list")
-async def list_test_runs(
-    test_file: str | None = None, limit: int = 50
-) -> dict[str, Any]:
+async def list_test_runs(test_file: str | None = None, limit: int = 50) -> dict[str, Any]:
     """
     List all test runs, optionally filtered by test file.
     Returns metadata only (not full results).
@@ -217,9 +212,7 @@ async def compare_runs(run_ids: str) -> dict[str, Any]:
     ids = [r.strip() for r in run_ids.split(",") if r.strip()]
 
     if len(ids) < 2:
-        raise HTTPException(
-            status_code=400, detail="At least 2 run IDs required for comparison"
-        )
+        raise HTTPException(status_code=400, detail="At least 2 run IDs required for comparison")
 
     runs = []
     for run_id in ids:
@@ -229,9 +222,7 @@ async def compare_runs(run_ids: str) -> dict[str, Any]:
                 runs.append(json.load(f))
 
     if len(runs) < 2:
-        raise HTTPException(
-            status_code=404, detail="Not enough valid runs found for comparison"
-        )
+        raise HTTPException(status_code=404, detail="Not enough valid runs found for comparison")
 
     # Build comparison data
     comparison = {"runs": [], "tests": {}}

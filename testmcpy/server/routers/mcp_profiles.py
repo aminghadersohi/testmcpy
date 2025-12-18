@@ -119,31 +119,31 @@ profiles:
   my-profile:
     # Display name for the profile
     name: My MCP Server
+    description: My MCP server configuration
 
-    # MCP servers in this profile
+    # MCP servers in this profile (list format with -)
     mcps:
-      my-server:
-        # Server name (displayed in UI)
-        name: My Server
-
-        # How to start the server
-        # Option 1: Command to run
-        command: npx
-        args:
-          - -y
-          - "@my-org/my-mcp-server"
-
-        # Option 2: URL for remote server
-        # url: http://localhost:3000/mcp
-
-        # Environment variables (optional)
-        # env:
-        #   API_KEY: your-api-key
+      - name: My Server
+        # URL of the MCP server
+        mcp_url: http://localhost:3000/mcp
 
         # Authentication (optional)
         # auth:
         #   type: bearer
-        #   token_env: MY_API_TOKEN
+        #   token: your-bearer-token
+
+        # For JWT auth:
+        # auth:
+        #   type: jwt
+        #   api_url: https://api.example.com/auth/
+        #   api_token: your-api-token
+        #   api_secret: your-api-secret
+
+# Global settings (optional)
+global:
+  timeout: 30
+  rate_limit:
+    requests_per_minute: 60
 """
 
         config_file.write_text(default_template)

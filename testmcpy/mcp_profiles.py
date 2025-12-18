@@ -120,12 +120,7 @@ class MCPProfileConfig:
         """
         Find MCP services configuration file.
 
-        Searches in order:
-        1. Provided config_path
-        2. .mcp_services.yaml in current directory
-        3. .mcp_services.yaml in parent directories (up to 5 levels)
-
-        Note: User home directory (~/.mcp_services.yaml) is NOT searched.
+        Looks for .mcp_services.yaml in the current working directory.
         """
         if config_path:
             path = Path(config_path)
@@ -133,15 +128,10 @@ class MCPProfileConfig:
                 return path
             return None
 
-        # Check current directory and parents
-        current = Path.cwd()
-        for _ in range(5):
-            config_file = current / ".mcp_services.yaml"
-            if config_file.exists():
-                return config_file
-            if current.parent == current:
-                break
-            current = current.parent
+        # Check current directory only (same as llm_profiles)
+        config_file = Path.cwd() / ".mcp_services.yaml"
+        if config_file.exists():
+            return config_file
 
         return None
 

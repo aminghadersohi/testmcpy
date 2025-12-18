@@ -176,10 +176,6 @@ async def list_mcp_profiles():
                 "profiles": [],
                 "default": None,
                 "message": "No .mcp_services.yaml file found",
-                "searched_path": str(Path.cwd() / ".mcp_services.yaml"),
-                "config_path": str(profile_config.config_path)
-                if profile_config.config_path
-                else None,
             }
 
         profiles_list = []

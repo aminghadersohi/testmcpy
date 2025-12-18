@@ -11,6 +11,6 @@ try:
     __version__ = version("testmcpy")
 except Exception:
     # Fallback for development or when package not installed
-    __version__ = "0.2.10"
+    __version__ = "0.2.11"
 
 __author__ = "testmcpy Contributors"

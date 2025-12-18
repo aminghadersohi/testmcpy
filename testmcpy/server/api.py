@@ -529,17 +529,15 @@ async def list_mcp_tools(profiles: list[str] = Query(default=None)):
 @app.get("/api/mcp/resources")
 async def list_mcp_resources(profiles: list[str] = Query(default=None)):
     """List all MCP resources. Supports optional ?profiles=xxx&profiles=yyy parameters."""
-    accessed_servers = []  # Track servers accessed for cache invalidation on error
-    try:
-        all_resources = []
+    all_resources = []
 
-        if profiles:
-            # Parse server IDs in format "profileId:mcpName"
-            for server_id in profiles:
-                if ":" in server_id:
-                    # New format: specific server selection
-                    profile_id, mcp_name = server_id.split(":", 1)
-                    accessed_servers.append(f"{profile_id}:{mcp_name}")
+    if profiles:
+        # Parse server IDs in format "profileId:mcpName"
+        for server_id in profiles:
+            if ":" in server_id:
+                # New format: specific server selection
+                profile_id, mcp_name = server_id.split(":", 1)
+                try:
                     client = await get_mcp_client_for_server(profile_id, mcp_name)
                     if client:
                         resources = await client.list_resources()
@@ -547,47 +545,40 @@ async def list_mcp_resources(profiles: list[str] = Query(default=None)):
                             if isinstance(resource, dict):
                                 resource["mcp_source"] = mcp_name
                             all_resources.append(resource)
-                else:
-                    # Legacy format: entire profile
+                except Exception as e:
+                    # Server doesn't support resources or connection failed - skip silently
+                    print(f"Warning: Could not list resources from {mcp_name}: {e}")
+            else:
+                # Legacy format: entire profile
+                try:
                     clients = await get_mcp_clients_for_profile(server_id)
                     for mcp_name, client in clients:
-                        accessed_servers.append(f"{server_id}:{mcp_name}")
-                        resources = await client.list_resources()
-                        for resource in resources:
-                            if isinstance(resource, dict):
-                                resource["mcp_source"] = mcp_name
-                            all_resources.append(resource)
+                        try:
+                            resources = await client.list_resources()
+                            for resource in resources:
+                                if isinstance(resource, dict):
+                                    resource["mcp_source"] = mcp_name
+                                all_resources.append(resource)
+                        except Exception as e:
+                            print(f"Warning: Could not list resources from {mcp_name}: {e}")
+                except Exception as e:
+                    print(f"Warning: Could not get clients for profile {server_id}: {e}")
 
-        return all_resources
-    except HTTPException:
-        raise
-    except Exception as e:
-        error_msg = str(e)
-        if is_connection_error(error_msg):
-            # Clear stale cached clients so retry can get fresh connection
-            for cache_key in accessed_servers:
-                await clear_cached_client(cache_key)
-            raise HTTPException(
-                status_code=503,
-                detail=f"Service unavailable: Unable to connect to MCP server. {error_msg}",
-            )
-        raise HTTPException(status_code=500, detail=error_msg)
+    return all_resources
 
 
 @app.get("/api/mcp/prompts")
 async def list_mcp_prompts(profiles: list[str] = Query(default=None)):
     """List all MCP prompts. Supports optional ?profiles=xxx&profiles=yyy parameters."""
-    accessed_servers = []  # Track servers accessed for cache invalidation on error
-    try:
-        all_prompts = []
+    all_prompts = []
 
-        if profiles:
-            # Parse server IDs in format "profileId:mcpName"
-            for server_id in profiles:
-                if ":" in server_id:
-                    # New format: specific server selection
-                    profile_id, mcp_name = server_id.split(":", 1)
-                    accessed_servers.append(f"{profile_id}:{mcp_name}")
+    if profiles:
+        # Parse server IDs in format "profileId:mcpName"
+        for server_id in profiles:
+            if ":" in server_id:
+                # New format: specific server selection
+                profile_id, mcp_name = server_id.split(":", 1)
+                try:
                     client = await get_mcp_client_for_server(profile_id, mcp_name)
                     if client:
                         prompts = await client.list_prompts()
@@ -595,31 +586,26 @@ async def list_mcp_prompts(profiles: list[str] = Query(default=None)):
                             if isinstance(prompt, dict):
                                 prompt["mcp_source"] = mcp_name
                             all_prompts.append(prompt)
-                else:
-                    # Legacy format: entire profile
+                except Exception as e:
+                    # Server doesn't support prompts or connection failed - skip silently
+                    print(f"Warning: Could not list prompts from {mcp_name}: {e}")
+            else:
+                # Legacy format: entire profile
+                try:
                     clients = await get_mcp_clients_for_profile(server_id)
                     for mcp_name, client in clients:
-                        accessed_servers.append(f"{server_id}:{mcp_name}")
-                        prompts = await client.list_prompts()
-                        for prompt in prompts:
-                            if isinstance(prompt, dict):
-                                prompt["mcp_source"] = mcp_name
-                            all_prompts.append(prompt)
+                        try:
+                            prompts = await client.list_prompts()
+                            for prompt in prompts:
+                                if isinstance(prompt, dict):
+                                    prompt["mcp_source"] = mcp_name
+                                all_prompts.append(prompt)
+                        except Exception as e:
+                            print(f"Warning: Could not list prompts from {mcp_name}: {e}")
+                except Exception as e:
+                    print(f"Warning: Could not get clients for profile {server_id}: {e}")
 
-        return all_prompts
-    except HTTPException:
-        raise
-    except Exception as e:
-        error_msg = str(e)
-        if is_connection_error(error_msg):
-            # Clear stale cached clients so retry can get fresh connection
-            for cache_key in accessed_servers:
-                await clear_cached_client(cache_key)
-            raise HTTPException(
-                status_code=503,
-                detail=f"Service unavailable: Unable to connect to MCP server. {error_msg}",
-            )
-        raise HTTPException(status_code=500, detail=error_msg)
+    return all_prompts
 
 
 # Chat endpoint

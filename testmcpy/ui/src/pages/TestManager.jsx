@@ -562,6 +562,14 @@ function TestManager({ selectedProfiles = [] }) {
   const loadTestFile = async (relativePath) => {
     try {
       const res = await fetch(`/api/tests/${relativePath}`)
+      if (!res.ok) {
+        // File not found or other error - clear selection
+        console.warn(`Test file not found: ${relativePath}`)
+        localStorage.removeItem('selectedTestFile')
+        setSelectedFile(null)
+        setFileContent('')
+        return
+      }
       const data = await res.json()
       setSelectedFile({...data, relative_path: relativePath})
       setFileContent(data.content)
@@ -573,6 +581,8 @@ function TestManager({ selectedProfiles = [] }) {
       console.error('Failed to load test file:', error)
       // Clear saved selection if file no longer exists
       localStorage.removeItem('selectedTestFile')
+      setSelectedFile(null)
+      setFileContent('')
     }
   }
 

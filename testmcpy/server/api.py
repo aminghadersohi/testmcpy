@@ -373,6 +373,14 @@ async def health_check():
     }
 
 
+@app.get("/api/version")
+async def get_version():
+    """Get the testmcpy version."""
+    from testmcpy import __version__
+
+    return {"version": __version__}
+
+
 @app.get("/api/config")
 async def get_configuration():
     """Get current configuration."""

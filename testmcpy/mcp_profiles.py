@@ -186,14 +186,33 @@ class MCPProfileConfig:
 
             # Load profiles
             profiles_config = config.get("profiles", {})
-            for profile_id, profile_data in profiles_config.items():
-                self.profiles[profile_id] = self._parse_profile(profile_id, profile_data)
+            if not isinstance(profiles_config, dict):
+                print(
+                    f"Warning: 'profiles' in config should be a dict, got {type(profiles_config).__name__}"
+                )
+                return
 
+            for profile_id, profile_data in profiles_config.items():
+                if not isinstance(profile_data, dict):
+                    print(
+                        f"Warning: Skipping profile '{profile_id}' - invalid format (expected dict)"
+                    )
+                    continue
+                try:
+                    self.profiles[profile_id] = self._parse_profile(profile_id, profile_data)
+                except Exception as e:
+                    print(f"Warning: Failed to parse profile '{profile_id}': {e}")
+                    continue
+
+        except yaml.YAMLError as e:
+            print(f"Warning: Invalid YAML in {self.config_path}: {e}")
         except Exception as e:
             print(f"Warning: Failed to load MCP profile config from {self.config_path}: {e}")
 
-    def _parse_auth(self, auth_data: dict[str, Any]) -> AuthConfig:
+    def _parse_auth(self, auth_data: dict[str, Any] | None) -> AuthConfig:
         """Parse auth configuration."""
+        if not auth_data or not isinstance(auth_data, dict):
+            return AuthConfig(auth_type="none")
         auth_type = auth_data.get("type", "none")
 
         return AuthConfig(
@@ -242,10 +261,27 @@ class MCPProfileConfig:
                 mcps.append(mcp_server)
         else:
             # New format: multiple MCPs per profile
-            for mcp_data in mcps_data:
+            if not isinstance(mcps_data, list):
+                print(
+                    f"Warning: 'mcps' in profile '{profile_id}' should be a list, got {type(mcps_data).__name__}"
+                )
+                mcps_data = []
+
+            for idx, mcp_data in enumerate(mcps_data):
+                if not isinstance(mcp_data, dict):
+                    print(
+                        f"Warning: Skipping MCP entry {idx} in profile '{profile_id}' - invalid format"
+                    )
+                    continue
+                mcp_url = mcp_data.get("mcp_url")
+                if not mcp_url:
+                    print(
+                        f"Warning: Skipping MCP entry {idx} in profile '{profile_id}' - missing 'mcp_url'"
+                    )
+                    continue
                 mcp_server = MCPServer(
                     name=mcp_data.get("name", "Unnamed MCP"),
-                    mcp_url=mcp_data["mcp_url"],
+                    mcp_url=mcp_url,
                     auth=self._parse_auth(mcp_data.get("auth", {})),
                     timeout=mcp_data.get("timeout", timeout),
                     rate_limit_rpm=mcp_data.get("rate_limit_rpm", rate_limit_rpm),

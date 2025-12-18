@@ -5,5 +5,12 @@ A comprehensive testing framework for validating LLM tool calling
 capabilities with MCP (Model Context Protocol) services.
 """
 
-__version__ = "0.2.0"
+try:
+    from importlib.metadata import version
+
+    __version__ = version("testmcpy")
+except Exception:
+    # Fallback for development or when package not installed
+    __version__ = "0.2.10"
+
 __author__ = "testmcpy Contributors"

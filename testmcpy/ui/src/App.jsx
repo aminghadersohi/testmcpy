@@ -36,6 +36,7 @@ function AppContent() {
   const [selectedLlmProfile, setSelectedLlmProfile] = useState(null)
   const [apiReady, setApiReady] = useState(false)
   const [healthCheckAttempts, setHealthCheckAttempts] = useState(0)
+  const [appVersion, setAppVersion] = useState('v0.0.0')
   const navigate = useNavigate()
   const location = useLocation()
 
@@ -48,6 +49,7 @@ function AppContent() {
       loadConfig()
       loadProfiles()
       loadLlmProfiles()
+      loadVersion()
     }
   }, [apiReady])
 
@@ -82,6 +84,16 @@ function AppContent() {
 
     console.error('API health check failed after all attempts')
     setApiReady(true)
+  }
+
+  const loadVersion = async () => {
+    try {
+      const res = await fetch('/api/version')
+      const data = await res.json()
+      setAppVersion(`v${data.version}`)
+    } catch (error) {
+      console.error('Failed to load version:', error)
+    }
   }
 
   const loadConfig = async () => {
@@ -419,7 +431,7 @@ function AppContent() {
             {sidebarOpen && (
               <div className="text-xs text-text-tertiary space-y-0.5">
                 <div className="font-medium">MCP Testing Framework</div>
-                <div className="text-text-disabled">v1.0.0</div>
+                <div className="text-text-disabled">{appVersion}</div>
               </div>
             )}
           </div>

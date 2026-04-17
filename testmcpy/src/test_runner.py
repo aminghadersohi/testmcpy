@@ -10,6 +10,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from ..evals.base_evaluators import BaseEvaluator, create_evaluator
+from ..evals.evaluator_packs import resolve_evaluators
 from .llm_integration import LLMProvider, create_llm_provider
 from .mcp_client import MCPClient, MCPToolCall
 
@@ -74,9 +75,10 @@ class TestStep:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "TestStep":
         """Create TestStep from dictionary."""
+        evaluators = resolve_evaluators(data.get("evaluators", []))
         return cls(
             prompt=data["prompt"],
-            evaluators=data.get("evaluators", []),
+            evaluators=evaluators,
             name=data.get("name"),
             timeout=data.get("timeout", 30.0),
         )
@@ -132,10 +134,12 @@ class TestCase:
             steps = [TestStep.from_dict(s) for s in data["steps"]]
             # For multi-turn, use first step's prompt as default
             prompt = data.get("prompt", steps[0].prompt if steps else "")
-            evaluators = data.get("evaluators", steps[0].evaluators if steps else [])
+            evaluators = resolve_evaluators(
+                data.get("evaluators", steps[0].evaluators if steps else [])
+            )
         else:
             prompt = data["prompt"]
-            evaluators = data.get("evaluators", [])
+            evaluators = resolve_evaluators(data.get("evaluators", []))
 
         return cls(
             name=data["name"],
@@ -281,7 +285,13 @@ class TestRunner:
     ):
         """Call LLM with intelligent rate limiting and retry logic."""
         # Skip rate limiting for CLI providers (they use subscription, not API)
-        is_cli_provider = self.provider in ("claude-cli", "claude-code", "codex-cli", "codex")
+        is_cli_provider = self.provider in (
+            "claude-sdk",
+            "claude-cli",
+            "claude-code",
+            "codex-cli",
+            "codex",
+        )
 
         if is_cli_provider:
             # For CLI providers, just make the call directly
@@ -463,7 +473,7 @@ class TestRunner:
             # Determine timeout - CLI providers need more time
             # Use at least 120s for claude-cli and codex-cli
             effective_timeout = test_case.timeout
-            if self.provider in ("claude-cli", "claude-code", "codex-cli", "codex"):
+            if self.provider in ("claude-sdk", "claude-cli", "claude-code", "codex-cli", "codex"):
                 effective_timeout = max(test_case.timeout, 120.0)
                 if self.verbose and effective_timeout > test_case.timeout:
                     self._log(f"  Using extended timeout {effective_timeout}s for CLI provider")
@@ -513,6 +523,7 @@ class TestRunner:
                 "response": llm_result.response,
                 "tool_calls": llm_result.tool_calls,
                 "tool_results": tool_results,
+                "mcp_client": test_mcp_client,
                 "metadata": {
                     "duration_seconds": time.time() - start_time,
                     "model": self.model,
@@ -535,7 +546,7 @@ class TestRunner:
 
             for eval_config in test_case.evaluators:
                 evaluator = self._create_evaluator(eval_config)
-                eval_result = evaluator.evaluate(context)
+                eval_result = await evaluator.aevaluate(context)
 
                 evaluations.append(
                     {
@@ -718,7 +729,13 @@ class TestRunner:
 
                 # Determine timeout - CLI providers need more time
                 effective_timeout = step.timeout
-                if self.provider in ("claude-cli", "claude-code", "codex-cli", "codex"):
+                if self.provider in (
+                    "claude-sdk",
+                    "claude-cli",
+                    "claude-code",
+                    "codex-cli",
+                    "codex",
+                ):
                     effective_timeout = max(step.timeout, 120.0)
 
                 # Call LLM with conversation history
@@ -762,6 +779,7 @@ class TestRunner:
                         "response": llm_result.response,
                         "tool_calls": llm_result.tool_calls,
                         "tool_results": tool_results,
+                        "mcp_client": self.mcp_client,
                         "conversation_history": conversation_history,
                         "step_index": step_idx,
                     }
@@ -771,7 +789,7 @@ class TestRunner:
                         eval_args = eval_config.get("args", {})
                         try:
                             evaluator = create_evaluator(eval_name, **eval_args)
-                            eval_result = evaluator.evaluate(context)
+                            eval_result = await evaluator.aevaluate(context)
                             step_evaluations.append(
                                 {
                                     "evaluator": eval_name,
@@ -870,22 +888,29 @@ class TestRunner:
             semaphore = asyncio.Semaphore(workers)
             individual_results: list[dict[str, Any]] = []
 
+            # Clone test case without evaluators for per-request runs
+            # Aggregate evaluators (success_rate_above, latency_percentile) need
+            # the full load_test_results context, so run them only once at the end
+            from dataclasses import replace
+
+            per_request_case = replace(test_case, evaluators=[], load_test=None)
+
             async def _run_single(request_idx: int) -> dict[str, Any]:
                 async with semaphore:
                     req_start = time.time()
                     try:
-                        result = await self.run_test(test_case)
+                        result = await self.run_test(per_request_case)
                         duration = time.time() - req_start
                         return {
                             "request_idx": request_idx,
-                            "success": result.passed,
+                            "success": not result.error,
                             "duration": duration,
                             "response": result.response,
                             "error": result.error,
                             "score": result.score,
                             "tool_calls": result.tool_calls,
                         }
-                    except Exception as e:
+                    except (RuntimeError, ValueError, OSError, asyncio.TimeoutError) as e:
                         duration = time.time() - req_start
                         return {
                             "request_idx": request_idx,
@@ -900,9 +925,27 @@ class TestRunner:
             # Launch all requests concurrently (semaphore limits concurrency)
             tasks = [_run_single(i) for i in range(requests)]
             individual_results = await asyncio.wait_for(
-                asyncio.gather(*tasks, return_exceptions=False),
+                asyncio.gather(*tasks, return_exceptions=True),
                 timeout=timeout,
             )
+            # Filter out exceptions from gather results
+            filtered_results = []
+            for idx, r in enumerate(individual_results):
+                if isinstance(r, BaseException):
+                    filtered_results.append(
+                        {
+                            "request_idx": idx,
+                            "success": False,
+                            "duration": time.time() - start_time,
+                            "response": None,
+                            "error": str(r),
+                            "score": 0.0,
+                            "tool_calls": [],
+                        }
+                    )
+                else:
+                    filtered_results.append(r)
+            individual_results = filtered_results
 
             total_duration = time.time() - start_time
             successes = sum(1 for r in individual_results if r.get("success", False))
@@ -921,6 +964,7 @@ class TestRunner:
                 "response": f"Load test: {successes}/{requests} succeeded",
                 "tool_calls": [],
                 "tool_results": [],
+                "mcp_client": self.mcp_client,
                 "load_test_results": individual_results,
                 "metadata": {
                     "duration_seconds": total_duration,
@@ -941,7 +985,7 @@ class TestRunner:
 
             for eval_config in test_case.evaluators:
                 evaluator = self._create_evaluator(eval_config)
-                eval_result = evaluator.evaluate(context)
+                eval_result = await evaluator.aevaluate(context)
 
                 evaluations.append(
                     {
@@ -995,7 +1039,7 @@ class TestRunner:
                 error=f"Load test timed out after {timeout}s",
                 reason=f"Load test timed out after {timeout}s",
             )
-        except Exception as e:
+        except (RuntimeError, ValueError, OSError, KeyError, TypeError) as e:
             return TestResult(
                 test_name=test_case.name,
                 passed=False,
@@ -1025,7 +1069,13 @@ class TestRunner:
                 # Add minimum delay between tests to prevent rate limiting bursts
                 # Skip delay for CLI providers (they use subscription, not API rate limits)
                 if i < len(test_cases) - 1:  # Don't wait after the last test
-                    if self.provider in ("claude-cli", "claude-code", "codex-cli", "codex"):
+                    if self.provider in (
+                        "claude-sdk",
+                        "claude-cli",
+                        "claude-code",
+                        "codex-cli",
+                        "codex",
+                    ):
                         min_delay = 1  # Minimal delay for CLI providers
                     else:
                         min_delay = 15  # 15 seconds for API providers

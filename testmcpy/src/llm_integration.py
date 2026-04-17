@@ -262,7 +262,7 @@ Response (use JSON format if calling a tool):"""
                         parsed = self._parse_tool_calls(match, tools)
                         if parsed:
                             tool_calls.extend(parsed)
-                except:
+                except (json.JSONDecodeError, KeyError, TypeError, ValueError):
                     continue
 
         return tool_calls
@@ -509,6 +509,135 @@ class OpenAIProvider(LLMProvider):
         await self.client.aclose()
 
 
+class OpenRouterProvider(OpenAIProvider):
+    """OpenRouter API provider — OpenAI-compatible gateway to 100+ models.
+
+    Uses the same OpenAI chat/completions format but routes through
+    https://openrouter.ai/api/v1 with an OpenRouter API key.
+    """
+
+    def __init__(self, model: str, api_key: str | None = None):
+        resolved_key = api_key or os.environ.get("OPENROUTER_API_KEY", "")
+        super().__init__(
+            model=model,
+            api_key=resolved_key,
+            base_url="https://openrouter.ai/api/v1",
+        )
+
+    async def initialize(self):
+        """Validate that an API key is available."""
+        if not self.api_key:
+            config = get_config()
+            self.api_key = config.get("OPENROUTER_API_KEY", "")
+        if not self.api_key:
+            raise ValueError(
+                "OpenRouter API key not provided. "
+                "Set OPENROUTER_API_KEY in ~/.testmcpy or environment."
+            )
+
+    async def generate_with_tools(
+        self,
+        prompt: str,
+        tools: list[dict[str, Any]],
+        timeout: float = 30.0,
+        messages: list[dict[str, Any]] | None = None,
+    ) -> LLMResult:
+        """Generate with OpenRouter — adds required extra headers."""
+        start_time = time.time()
+
+        try:
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self.api_key}",
+                "HTTP-Referer": "https://testmcpy.dev",
+                "X-Title": "testmcpy",
+            }
+
+            if messages:
+                api_messages = messages + [{"role": "user", "content": prompt}]
+            else:
+                api_messages = [{"role": "user", "content": prompt}]
+
+            is_o1_model = self.model.startswith("o1")
+
+            request_data: dict[str, Any] = {
+                "model": self.model,
+                "messages": api_messages,
+            }
+
+            if is_o1_model:
+                request_data["max_completion_tokens"] = 1000
+            else:
+                openai_tools = self._convert_to_openai_tools(tools)
+                request_data["tools"] = openai_tools
+                request_data["tool_choice"] = "auto"
+                request_data["temperature"] = 0.1
+                request_data["max_tokens"] = 1000
+
+            response = await self.client.post(
+                f"{self.base_url}/chat/completions",
+                json=request_data,
+                headers=headers,
+                timeout=timeout,
+            )
+
+            if response.status_code != 200:
+                raise ValueError(f"OpenRouter API error: {response.status_code} - {response.text}")
+
+            result = response.json()
+            choice = result["choices"][0]
+            message = choice["message"]
+
+            tool_calls = []
+            if "tool_calls" in message:
+                for tc in message["tool_calls"]:
+                    tool_calls.append(
+                        {
+                            "name": tc["function"]["name"],
+                            "arguments": json.loads(tc["function"]["arguments"]),
+                        }
+                    )
+
+            usage = result.get("usage", {})
+            token_usage = {
+                "prompt": usage.get("prompt_tokens", 0),
+                "completion": usage.get("completion_tokens", 0),
+                "total": usage.get("total_tokens", 0),
+            }
+
+            # OpenRouter returns cost info when available
+            cost = 0.0
+            if "usage" in result and "cost" in result["usage"]:
+                cost = float(result["usage"]["cost"])
+            else:
+                # Fallback estimate
+                cost = (token_usage["prompt"] * 0.03 + token_usage["completion"] * 0.06) / 1000
+
+            duration = time.time() - start_time
+            tti_ms = int(duration * 1000)
+
+            return LLMResult(
+                response=message.get("content") or "",
+                tool_calls=tool_calls,
+                token_usage=token_usage,
+                cost=cost,
+                duration=duration,
+                tti_ms=tti_ms,
+                raw_response=result,
+            )
+
+        except ValueError:
+            raise
+        except (httpx.HTTPError, KeyError, json.JSONDecodeError) as e:
+            duration = time.time() - start_time
+            return LLMResult(
+                response=f"Error: {str(e)}",
+                tool_calls=[],
+                duration=duration,
+                tti_ms=int(duration * 1000),
+            )
+
+
 class LocalModelProvider(LLMProvider):
     """Provider for local models using transformers or llama.cpp."""
 
@@ -598,7 +727,7 @@ Assistant:"""
                     tool_calls.append(
                         {"name": data["tool"], "arguments": data.get("arguments", {})}
                     )
-        except:
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError):
             pass
         return tool_calls
 
@@ -959,7 +1088,7 @@ class AnthropicProvider(LLMProvider):
                 try:
                     error_details += f"\nHTTP Status: {e.response.status_code}"
                     error_details += f"\nHTTP Response: {e.response.text}"
-                except:
+                except (AttributeError, TypeError):
                     pass
 
             # Check if it's a timeout
@@ -1160,7 +1289,9 @@ class ClaudeSDKProvider(LLMProvider):
                 CLIConnectionError,
                 CLINotFoundError,
                 ProcessError,
+                RateLimitEvent,
                 ResultMessage,
+                SystemMessage,
                 TextBlock,
                 ThinkingBlock,
                 ToolUseBlock,
@@ -1186,12 +1317,53 @@ class ClaudeSDKProvider(LLMProvider):
             }
             clean_env["ANTHROPIC_API_KEY"] = ""  # Force subscription usage, not API credits
 
+            # Disable Claude Code's built-in tools (Bash, Read, Edit, Grep, etc.)
+            # so the LLM only uses the MCP server's tools (call_tool, search_tools, etc.).
+            # This prevents the LLM from calling ToolSearch or other internal tools
+            # instead of the MCP gateway tools.
+            _builtin_tools_to_block = [
+                "Bash",
+                "Read",
+                "Edit",
+                "Write",
+                "Grep",
+                "Glob",
+                "ToolSearch",
+                "Skill",
+                "TodoWrite",
+                "Agent",
+                "WebFetch",
+                "WebSearch",
+                "NotebookEdit",
+                "EnterWorktree",
+                "ExitWorktree",
+            ]
+
+            # System prompt to focus the LLM on MCP tools exclusively
+            system_prompt = (
+                "You are a test executor. Your ONLY job is to call the MCP tools provided "
+                "to fulfill the user's request, then report the results.\n\n"
+                "IMPORTANT RULES:\n"
+                "1. Use ONLY the MCP server tools (call_tool, search_tools, health_check, "
+                "get_instance_info). Do NOT use any Claude Code built-in tools.\n"
+                "2. The MCP server uses a gateway pattern: real tools like list_dashboards, "
+                "get_chart_info, etc. are accessed via call_tool(name='tool_name', arguments={...}).\n"
+                "3. For simple tools like health_check and get_instance_info, call them directly.\n"
+                "4. Complete the FULL agentic loop: search/discover tools if needed, call the tool, "
+                "then summarize the results in your final response.\n"
+                "5. Always include the actual data from tool results in your response.\n"
+                "6. Be concise and factual — include key data points from the tool output."
+            )
+
             options = ClaudeAgentOptions(
                 model=self.model,
                 permission_mode="bypassPermissions",
                 mcp_servers=mcp_servers,
                 max_turns=25,
                 env=clean_env,
+                disallowed_tools=_builtin_tools_to_block,
+                system_prompt=system_prompt,
+                debug_stderr=None,  # Suppress CLI debug output
             )
 
             # Execute query with timeout
@@ -1208,15 +1380,40 @@ class ClaudeSDKProvider(LLMProvider):
             async def execute_query():
                 nonlocal response_text, thinking_text, token_usage, cost
                 message_count = 0
+                # Track all text blocks per AssistantMessage so we can
+                # identify the FINAL text response (after all tool calls)
+                all_text_segments: list[str] = []
+                current_turn_text = ""
                 try:
                     async for message in query(prompt=prompt, options=options):
                         message_count += 1
-                        raw_events.append({"type": type(message).__name__})
+                        msg_type = type(message).__name__
+
+                        if isinstance(message, SystemMessage):
+                            raw_events.append(
+                                {"type": msg_type, "subtype": message.subtype, "data": message.data}
+                            )
+                            log(f"[ClaudeSDK] System ({message.subtype})")
+                            continue
+
+                        raw_events.append({"type": msg_type})
+                        log(f"[ClaudeSDK] Message #{message_count}: {msg_type}")
+
+                        if isinstance(message, RateLimitEvent):
+                            # Rate limit info from subscription — log but continue
+                            info = message.rate_limit_info
+                            log(
+                                f"[ClaudeSDK] Rate limit: status={info.status}, "
+                                f"utilization={info.utilization}"
+                            )
+                            continue
 
                         if isinstance(message, AssistantMessage):
+                            # Start a new turn's text accumulator
+                            current_turn_text = ""
                             for block in message.content:
                                 if isinstance(block, TextBlock):
-                                    response_text += block.text
+                                    current_turn_text += block.text
                                     preview = block.text[:80].replace("\n", " ")
                                     log(f"[ClaudeSDK] Text: {preview}...")
                                 elif isinstance(block, ThinkingBlock):
@@ -1233,6 +1430,10 @@ class ClaudeSDKProvider(LLMProvider):
                                     if len(args_str) > 200:
                                         args_str = args_str[:200] + "..."
                                     log(f"[ClaudeSDK] Tool Call: {block.name} | Args: {args_str}")
+
+                            # Save this turn's text
+                            if current_turn_text:
+                                all_text_segments.append(current_turn_text)
 
                         elif isinstance(message, UserMessage):
                             # Tool results come back as UserMessage content
@@ -1297,8 +1498,20 @@ class ClaudeSDKProvider(LLMProvider):
                     # SDK may throw on unknown message types (e.g. rate_limit_event).
                     # If we already collected any response or tool calls, treat as complete.
                     log(f"[ClaudeSDK] SDK error during iteration: {e}")
-                    if not response_text and not tool_calls:
+                    if not all_text_segments and not tool_calls:
                         raise
+
+                # Use the FINAL text segment as the response. In a multi-turn
+                # agentic loop (search → call → synthesize), intermediate text
+                # is often "I'll check..." while the last segment contains the
+                # actual answer with tool results incorporated.
+                if all_text_segments:
+                    response_text = all_text_segments[-1]
+                    if len(all_text_segments) > 1:
+                        log(
+                            f"[ClaudeSDK] {len(all_text_segments)} text segments; "
+                            f"using final segment ({len(response_text)} chars)"
+                        )
 
                 log(f"[ClaudeSDK] Completed: {message_count} messages, {len(response_text)} chars")
 
@@ -1387,14 +1600,14 @@ class ClaudeSDKProvider(LLMProvider):
         pass
 
 
-_copilot_logger = logging.getLogger(__name__ + ".CopilotProvider")
+_assistant_logger = logging.getLogger(__name__ + ".AssistantProvider")
 
 
-class CopilotProvider(LLMProvider):
-    """LLM provider that sends prompts to the Preset copilot HTTP endpoint.
+class AssistantProvider(LLMProvider):
+    """LLM provider that sends prompts to the AI assistant conversation endpoint.
 
     Uses the same auth flow as MCP JWT auth to obtain a JWT token, then
-    creates a copilot conversation and streams SSE completions via httpx.
+    creates a assistant conversation and streams SSE completions via httpx.
 
     Config is resolved from kwargs, then env vars, then the default MCP
     profile auth settings (in that order).
@@ -1417,10 +1630,14 @@ class CopilotProvider(LLMProvider):
         api_secret: str | None = None,
         api_url: str | None = None,
         model_override: str | None = None,
+        conversations_path: str = "/api/v1/copilot/conversations",
+        completions_path: str = "/api/v1/copilot/completions",
         **kwargs,
     ):
         self.model = model
         self.model_override = model_override
+        self.conversations_path = conversations_path
+        self.completions_path = completions_path
 
         # Resolve config: kwargs > env vars > MCP profile auth
         config = get_config()
@@ -1431,32 +1648,32 @@ class CopilotProvider(LLMProvider):
 
         self.workspace_hash = (
             workspace_hash
-            or os.environ.get("COPILOT_WORKSPACE_HASH")
+            or os.environ.get("ASSISTANT_WORKSPACE_HASH")
             or os.environ.get("PRESET_WORKSPACE_HASH", "")
         )
         self.domain = (
-            domain or os.environ.get("COPILOT_DOMAIN") or os.environ.get("PRESET_DOMAIN", "")
+            domain or os.environ.get("ASSISTANT_DOMAIN") or os.environ.get("PRESET_DOMAIN", "")
         )
         self.environment = (
             environment
-            or os.environ.get("COPILOT_ENVIRONMENT")
+            or os.environ.get("ASSISTANT_ENVIRONMENT")
             or os.environ.get("PRESET_ENVIRONMENT", "staging")
         )
         self.api_token = (
             api_token
-            or os.environ.get("COPILOT_API_TOKEN")
+            or os.environ.get("ASSISTANT_API_TOKEN")
             or os.environ.get("PRESET_API_TOKEN")
             or auth_cfg.get("api_token", "")
         )
         self.api_secret = (
             api_secret
-            or os.environ.get("COPILOT_API_SECRET")
+            or os.environ.get("ASSISTANT_API_SECRET")
             or os.environ.get("PRESET_API_SECRET")
             or auth_cfg.get("api_secret", "")
         )
         self.api_url = (
             api_url
-            or os.environ.get("COPILOT_API_URL")
+            or os.environ.get("ASSISTANT_API_URL")
             or os.environ.get("PRESET_API_URL")
             or auth_cfg.get("api_url", "")
             or self._ENV_API_URLS.get(self.environment, "")
@@ -1483,22 +1700,22 @@ class CopilotProvider(LLMProvider):
         self._client: httpx.AsyncClient | None = None
 
     async def initialize(self):
-        """Fetch JWT token and create a copilot conversation."""
+        """Fetch JWT token and create a assistant conversation."""
         if not self.base_url:
             raise ValueError(
-                "CopilotProvider requires workspace_hash + domain (or environment). "
-                "Set COPILOT_WORKSPACE_HASH and COPILOT_DOMAIN env vars, or pass them as kwargs."
+                "AssistantProvider requires workspace_hash + domain (or environment). "
+                "Set ASSISTANT_WORKSPACE_HASH and ASSISTANT_DOMAIN env vars, or pass them as kwargs."
             )
         if not self.api_token or not self.api_secret:
             raise ValueError(
-                "CopilotProvider requires api_token and api_secret for JWT auth. "
-                "Set COPILOT_API_TOKEN / COPILOT_API_SECRET env vars, or configure MCP profile auth."
+                "AssistantProvider requires api_token and api_secret for JWT auth. "
+                "Set ASSISTANT_API_TOKEN / ASSISTANT_API_SECRET env vars, or configure MCP profile auth."
             )
 
         self._client = httpx.AsyncClient(timeout=60.0)
 
         # --- Fetch JWT ---
-        _copilot_logger.info("[Copilot] Fetching JWT from: %s", self.api_url)
+        _assistant_logger.info("[Assistant] Fetching JWT from: %s", self.api_url)
         try:
             resp = await self._client.post(
                 self.api_url,
@@ -1511,7 +1728,7 @@ class CopilotProvider(LLMProvider):
             self._jwt_token = data.get("payload", {}).get("access_token", "")
             if not self._jwt_token:
                 raise ValueError(f"No access_token in auth response: {data}")
-            _copilot_logger.info("[Copilot] JWT obtained (length: %d)", len(self._jwt_token))
+            _assistant_logger.info("[Assistant] JWT obtained (length: %d)", len(self._jwt_token))
         except httpx.HTTPStatusError as e:
             raise RuntimeError(
                 f"JWT auth failed: HTTP {e.response.status_code} - {e.response.text}"
@@ -1520,8 +1737,8 @@ class CopilotProvider(LLMProvider):
             raise RuntimeError(f"JWT auth connection failed: {e}") from e
 
         # --- Create conversation ---
-        conv_url = f"{self.base_url}/api/v1/copilot/conversations"
-        _copilot_logger.info("[Copilot] Creating conversation at: %s", conv_url)
+        conv_url = f"{self.base_url}{self.conversations_path}"
+        _assistant_logger.info("[Assistant] Creating conversation at: %s", conv_url)
         try:
             resp = await self._client.post(
                 conv_url,
@@ -1534,7 +1751,7 @@ class CopilotProvider(LLMProvider):
             self._conversation_id = conv_data.get("id")
             if not self._conversation_id:
                 raise ValueError(f"No conversation ID in response: {conv_data}")
-            _copilot_logger.info("[Copilot] Conversation created: %s", self._conversation_id)
+            _assistant_logger.info("[Assistant] Conversation created: %s", self._conversation_id)
         except httpx.HTTPStatusError as e:
             raise RuntimeError(
                 f"Conversation creation failed: HTTP {e.response.status_code} - {e.response.text}"
@@ -1558,22 +1775,22 @@ class CopilotProvider(LLMProvider):
         messages: list[dict[str, Any]] | None = None,
         **kwargs,
     ) -> LLMResult:
-        """Send prompt to copilot completions endpoint and stream SSE response.
+        """Send prompt to assistant completions endpoint and stream SSE response.
 
-        The copilot endpoint handles tool calling internally (server-side),
+        The assistant endpoint handles tool calling internally (server-side),
         so we do not send tool schemas. Instead we parse SSE events for
-        tool_call / tool_result events emitted by the copilot backend.
+        tool_call / tool_result events emitted by the assistant backend.
         """
         start_time = time.time()
         logs: list[str] = []
 
         def log(msg: str):
-            _copilot_logger.info(msg)
+            _assistant_logger.info(msg)
             logs.append(msg)
 
         if not self._client or not self._jwt_token or not self._conversation_id:
             return LLMResult(
-                response="Error: CopilotProvider not initialized. Call initialize() first.",
+                response="Error: AssistantProvider not initialized. Call initialize() first.",
                 tool_calls=[],
                 duration=time.time() - start_time,
                 logs=logs,
@@ -1587,10 +1804,10 @@ class CopilotProvider(LLMProvider):
         if self.model_override or (self.model and self.model != "default"):
             payload["model_override"] = self.model_override or self.model
 
-        completions_url = f"{self.base_url}/api/v1/copilot/completions"
+        completions_url = f"{self.base_url}{self.completions_path}"
         headers = {**self._build_headers(), "Accept": "text/event-stream"}
 
-        log(f"[Copilot] POST {completions_url} (conversation={self._conversation_id})")
+        log(f"[Assistant] POST {completions_url} (conversation={self._conversation_id})")
 
         response_text = ""
         tool_calls: list[dict[str, Any]] = []
@@ -1613,7 +1830,7 @@ class CopilotProvider(LLMProvider):
                 if resp.status_code != 200:
                     body = await resp.aread()
                     raise RuntimeError(
-                        f"Copilot API error: HTTP {resp.status_code} - {body.decode('utf-8', errors='replace')}"
+                        f"Assistant API error: HTTP {resp.status_code} - {body.decode('utf-8', errors='replace')}"
                     )
 
                 current_event: str | None = None
@@ -1642,7 +1859,7 @@ class CopilotProvider(LLMProvider):
                     try:
                         data = json.loads(json_str)
                     except json.JSONDecodeError:
-                        log(f"[Copilot] Failed to parse SSE data: {json_str[:100]}")
+                        log(f"[Assistant] Failed to parse SSE data: {json_str[:100]}")
                         continue
 
                     if current_event == "token":
@@ -1657,7 +1874,7 @@ class CopilotProvider(LLMProvider):
                             "arguments": data.get("input", {}),
                         }
                         tool_calls.append(tc)
-                        log(f"[Copilot] Tool call: {tc['name']} (id={tc['id']})")
+                        log(f"[Assistant] Tool call: {tc['name']} (id={tc['id']})")
 
                     elif current_event == "tool_result":
                         tr = {
@@ -1667,7 +1884,7 @@ class CopilotProvider(LLMProvider):
                         }
                         tool_results.append(tr)
                         log(
-                            f"[Copilot] Tool result: id={tr['tool_call_id']}, duration={tr['duration_ms']}ms"
+                            f"[Assistant] Tool result: id={tr['tool_call_id']}, duration={tr['duration_ms']}ms"
                         )
 
                     elif current_event == "usage":
@@ -1676,7 +1893,7 @@ class CopilotProvider(LLMProvider):
                             "completion": data.get("output_tokens", 0),
                             "total": data.get("total_tokens", 0),
                         }
-                        log(f"[Copilot] Usage: {token_usage}")
+                        log(f"[Assistant] Usage: {token_usage}")
 
                     elif current_event == "final":
                         got_final = True
@@ -1684,27 +1901,27 @@ class CopilotProvider(LLMProvider):
                         final_answer = data.get("answer", "") or data.get("message", "")
                         if final_answer and not response_text:
                             response_text = final_answer
-                        log(f"[Copilot] Final event received ({len(response_text)} chars)")
+                        log(f"[Assistant] Final event received ({len(response_text)} chars)")
 
                     elif current_event == "error":
                         got_error = True
                         error_message = data.get("error", "") or data.get(
                             "message", "unknown error"
                         )
-                        log(f"[Copilot] Error event: {error_message}")
+                        log(f"[Assistant] Error event: {error_message}")
 
         except httpx.TimeoutException:
             duration = time.time() - start_time
-            log(f"[Copilot] TIMEOUT after {duration:.1f}s")
+            log(f"[Assistant] TIMEOUT after {duration:.1f}s")
             return LLMResult(
-                response=f"Error: Copilot request timed out after {timeout}s",
+                response=f"Error: Assistant request timed out after {timeout}s",
                 tool_calls=tool_calls,
                 duration=duration,
                 logs=logs,
             )
         except (httpx.HTTPStatusError, httpx.ConnectError, RuntimeError) as e:
             duration = time.time() - start_time
-            log(f"[Copilot] Request failed: {e}")
+            log(f"[Assistant] Request failed: {e}")
             return LLMResult(
                 response=f"Error: {e}",
                 tool_calls=tool_calls,
@@ -1718,7 +1935,7 @@ class CopilotProvider(LLMProvider):
             response_text = f"Error: {error_message}"
 
         log(
-            f"[Copilot] Done: {len(response_text)} chars, "
+            f"[Assistant] Done: {len(response_text)} chars, "
             f"{len(tool_calls)} tool calls, {token_event_count} tokens, "
             f"final={'yes' if got_final else 'no'}, error={'yes' if got_error else 'no'}, "
             f"{duration:.2f}s"
@@ -1729,7 +1946,7 @@ class CopilotProvider(LLMProvider):
             tool_calls=tool_calls,
             tool_results=tool_results,
             token_usage=token_usage,
-            cost=0.0,  # Copilot usage is bundled with workspace subscription
+            cost=0.0,  # Assistant usage is bundled with workspace subscription
             duration=duration,
             tti_ms=tti_ms,
             logs=logs,
@@ -2136,12 +2353,218 @@ User request: {prompt}"""
         await self.tool_discovery.close()
 
 
+class GeminiCLIProvider(LLMProvider):
+    """Google Gemini CLI provider via subprocess.
+
+    Wraps the Gemini CLI tool (installed via ``npm i -g @google/gemini-cli``
+    or the official Gemini CLI package).  Follows the same pattern as
+    ``CodexCLIProvider`` — the CLI handles authentication, tool discovery, and
+    model routing; we just pipe a prompt in and parse what comes back.
+    """
+
+    def __init__(
+        self,
+        model: str,
+        gemini_cli_path: str | None = None,
+        mcp_url: str | None = None,
+        auth: dict[str, Any] | None = None,
+    ):
+        if not re.match(r"^[a-zA-Z0-9._-]+$", model):
+            raise ValueError(f"Invalid model identifier: {model}")
+        self.model = model
+        self.gemini_cli_path = gemini_cli_path or self._find_gemini_cli()
+        # Use MCP_URL and auth from default profile if not provided
+        config = get_config()
+        if mcp_url is None:
+            mcp_url = config.get_mcp_url()
+        if auth is None:
+            default_mcp = config.get_default_mcp_server()
+            if default_mcp and default_mcp.auth:
+                auth = default_mcp.auth.to_dict()
+        self.tool_discovery = ToolDiscoveryService(mcp_url, auth=auth)
+
+    def _find_gemini_cli(self) -> str:
+        """Find Gemini CLI in PATH or common locations."""
+        # Check environment variable first
+        cli_path = os.environ.get("GEMINI_CLI_PATH")
+        if cli_path and os.path.exists(cli_path):
+            return cli_path
+
+        # Check common locations
+        common_paths = [
+            "/usr/local/bin/gemini",
+            "/opt/homebrew/bin/gemini",
+            os.path.expanduser("~/.local/bin/gemini"),
+            os.path.expanduser("~/.npm-global/bin/gemini"),
+            "gemini",  # In PATH
+        ]
+
+        for path in common_paths:
+            try:
+                result = subprocess.run([path, "--version"], capture_output=True, timeout=5)
+                if result.returncode == 0:
+                    return path
+            except (subprocess.TimeoutExpired, FileNotFoundError):
+                continue
+
+        raise FileNotFoundError(
+            "Gemini CLI not found. Install via: npm i -g @anthropic-ai/gemini-cli"
+        )
+
+    async def initialize(self):
+        """Initialize Gemini CLI provider."""
+        # Verify Gemini CLI is working
+        try:
+            result = subprocess.run(
+                [self.gemini_cli_path, "--version"], capture_output=True, timeout=10, text=True
+            )
+            if result.returncode != 0:
+                raise RuntimeError(f"Gemini CLI error: {result.stderr}")
+        except subprocess.TimeoutExpired as e:
+            raise RuntimeError("Gemini CLI timeout during initialization") from e
+
+        # Try to pre-discover tools, but don't fail if MCP service is unavailable
+        try:
+            await self.tool_discovery.discover_tools()
+            print(f"✅ Successfully connected to MCP service at {self.tool_discovery.mcp_url}")
+        except (ConnectionError, TimeoutError, OSError, ValueError) as e:
+            print(f"⚠️  Warning: Failed to initialize MCP tools: {e}")
+            print(f"   MCP URL: {self.tool_discovery.mcp_url}")
+            print("   The provider will work without MCP tools (direct CLI calls only)")
+
+    async def generate_with_tools(
+        self,
+        prompt: str,
+        tools: list[dict[str, Any]],
+        timeout: float = 120.0,
+        messages: list[dict[str, Any]] | None = None,
+    ) -> LLMResult:
+        """Generate response using Gemini CLI."""
+        start_time = time.time()
+
+        try:
+            # Create tool-aware prompt template
+            enhanced_prompt = self._create_tool_prompt(prompt, tools)
+
+            # Build command — Gemini CLI accepts a prompt via stdin
+            cmd = [
+                self.gemini_cli_path,
+                "--print",  # Print response only, no interactive mode
+                "--model",
+                self.model,
+            ]
+
+            # Run as subprocess
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+
+            stdout, stderr = await asyncio.wait_for(
+                process.communicate(input=enhanced_prompt.encode()), timeout=timeout
+            )
+
+            response_text = stdout.decode("utf-8").strip()
+
+            if process.returncode != 0:
+                error_text = stderr.decode("utf-8").strip()
+                return LLMResult(
+                    response=f"Gemini CLI error: {error_text}",
+                    tool_calls=[],
+                    duration=time.time() - start_time,
+                )
+
+            # Parse tool calls from CLI output
+            tool_calls = self._parse_tool_calls(response_text)
+
+            # Execute tool calls locally
+            for tool_call in tool_calls:
+                try:
+                    await self.tool_discovery.execute_tool_call(tool_call)
+                except (ConnectionError, TimeoutError, OSError, ValueError, RuntimeError) as e:
+                    logging.warning("Gemini CLI tool call failed: %s", e)
+
+            return LLMResult(
+                response=response_text,
+                tool_calls=tool_calls,
+                token_usage=None,  # CLI doesn't provide token counts
+                cost=0.0,  # CLI usage varies by subscription
+                duration=time.time() - start_time,
+                raw_response={"stdout": response_text},
+            )
+
+        except asyncio.TimeoutError:
+            return LLMResult(
+                response=f"Error: Gemini CLI timed out after {timeout}s",
+                tool_calls=[],
+                duration=time.time() - start_time,
+            )
+        except (FileNotFoundError, OSError) as e:
+            return LLMResult(
+                response=f"Error: {str(e)}", tool_calls=[], duration=time.time() - start_time
+            )
+
+    def _create_tool_prompt(self, prompt: str, tools: list[dict[str, Any]]) -> str:
+        """Create enhanced prompt with tool descriptions."""
+        if not tools:
+            return prompt
+
+        tool_descriptions = []
+        for tool in tools:
+            name = tool.get("name", "unknown")
+            desc = tool.get("description", "")
+            params = tool.get("inputSchema", tool.get("parameters", {}))
+
+            tool_desc = f"**{name}**: {desc}"
+            if params.get("properties"):
+                param_list = ", ".join(params["properties"].keys())
+                tool_desc += f" (parameters: {param_list})"
+
+            tool_descriptions.append(tool_desc)
+
+        return f"""You have access to the following tools:
+
+{chr(10).join(tool_descriptions)}
+
+When you need to use a tool, format your response like this:
+TOOL_CALL: {{"name": "tool_name", "arguments": {{"param": "value"}}}}
+
+User request: {prompt}"""
+
+    def _parse_tool_calls(self, response: str) -> list[dict[str, Any]]:
+        """Parse tool calls from Gemini CLI response."""
+        tool_calls = []
+
+        # Look for TOOL_CALL: patterns — try nested braces first so the
+        # regex engine does not short-circuit on the flat alternative.
+        tool_call_pattern = r"TOOL_CALL:\s*(\{[^}]*\{[^}]*\}[^}]*\}|\{[^}]+\})"
+        matches = re.findall(tool_call_pattern, response)
+
+        for match in matches:
+            try:
+                call_data = json.loads(match)
+                if "name" in call_data:
+                    tool_calls.append(
+                        {"name": call_data["name"], "arguments": call_data.get("arguments", {})}
+                    )
+            except json.JSONDecodeError:
+                continue
+
+        return tool_calls
+
+    async def close(self):
+        """Close connections."""
+        await self.tool_discovery.close()
+
+
 def create_llm_provider(provider: str, model: str, **kwargs) -> LLMProvider:
     """
     Create an LLM provider instance.
 
     Args:
-        provider: Provider name (ollama, openai, local, anthropic, claude-sdk, claude-cli, claude-code, copilot, chatbot, codex-cli)
+        provider: Provider name (ollama, openai, openrouter, local, anthropic, claude-sdk, claude-cli, claude-code, assistant, chatbot, codex-cli, gemini-cli)
         model: Model name/path
         **kwargs: Additional provider-specific arguments
 
@@ -2151,6 +2574,7 @@ def create_llm_provider(provider: str, model: str, **kwargs) -> LLMProvider:
     providers = {
         "ollama": OllamaProvider,
         "openai": OpenAIProvider,
+        "openrouter": OpenRouterProvider,
         "local": LocalModelProvider,
         "anthropic": AnthropicProvider,
         "gemini": GeminiProvider,
@@ -2158,10 +2582,11 @@ def create_llm_provider(provider: str, model: str, **kwargs) -> LLMProvider:
         "claude-sdk": ClaudeSDKProvider,  # Claude Agent SDK (uses Claude CLI)
         "claude-cli": ClaudeSDKProvider,  # Alias → claude-sdk
         "claude-code": ClaudeSDKProvider,  # Alias → claude-sdk
-        "copilot": CopilotProvider,  # Preset copilot endpoint
-        "chatbot": CopilotProvider,  # Alias → copilot
+        "assistant": AssistantProvider,  # AI assistant conversation endpoint
+        "chatbot": AssistantProvider,  # Alias → assistant
         "codex-cli": CodexCLIProvider,
         "codex": CodexCLIProvider,  # Alias
+        "gemini-cli": GeminiCLIProvider,
     }
 
     if provider not in providers:

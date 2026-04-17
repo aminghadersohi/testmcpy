@@ -8,6 +8,7 @@ profiles. Each profile can contain MULTIPLE MCP servers, allowing you to:
 - Mix different MCP servers for your specific use case
 """
 
+import logging
 import os
 import re
 from dataclasses import dataclass, field
@@ -16,12 +17,14 @@ from typing import Any
 
 import yaml
 
+logger = logging.getLogger(__name__)
+
 
 @dataclass
 class AuthConfig:
     """Authentication configuration for MCP service."""
 
-    auth_type: str  # bearer, oauth, jwt, none
+    auth_type: str  # bearer, oauth, jwt, api_key, custom_headers, none
     token: str | None = None
     # JWT fields
     api_url: str | None = None
@@ -33,8 +36,27 @@ class AuthConfig:
     token_url: str | None = None
     scopes: list[str] = field(default_factory=list)
     oauth_auto_discover: bool = False  # Use RFC 8414 auto-discovery for OAuth
+    # OAuth token refresh fields
+    refresh_token: str | None = None
+    token_expiry: float | None = None  # Unix timestamp when token expires
+    # OAuth advanced flow fields
+    grant_type: str | None = None  # client_credentials | authorization_code
+    redirect_uri: str | None = None
+    use_pkce: bool = False
+    authorization_url: str | None = None
+    token_introspection_url: str | None = None
+    # API Key auth fields
+    header_name: str = "X-API-Key"  # Header name for API key auth
+    api_key: str | None = None  # API key value
+    api_key_env: str | None = None  # Environment variable name for API key
+    # Custom headers auth
+    headers: dict[str, str] = field(default_factory=dict)
     # SSL options
     insecure: bool = False  # Disable SSL verification for self-signed certificates
+    # mTLS / client certificate fields
+    client_cert: str | None = None  # Path to client certificate file
+    client_key: str | None = None  # Path to client private key file
+    ca_bundle: str | None = None  # Path to CA bundle file
 
     def to_dict(self) -> dict[str, Any]:
         """Convert AuthConfig to dict for MCPClient auth parameter.
@@ -42,7 +64,7 @@ class AuthConfig:
         Returns:
             Dictionary with auth configuration suitable for MCPClient.
         """
-        auth_dict = {"type": self.auth_type}
+        auth_dict: dict[str, Any] = {"type": self.auth_type}
 
         if self.auth_type == "bearer" and self.token:
             auth_dict["token"] = self.token
@@ -64,10 +86,44 @@ class AuthConfig:
                 auth_dict["token_url"] = self.token_url
             if self.scopes:
                 auth_dict["scopes"] = self.scopes
+            # Token refresh fields
+            if self.refresh_token:
+                auth_dict["refresh_token"] = self.refresh_token
+            if self.token_expiry is not None:
+                auth_dict["token_expiry"] = self.token_expiry
+            # Advanced OAuth fields
+            if self.grant_type:
+                auth_dict["grant_type"] = self.grant_type
+            if self.redirect_uri:
+                auth_dict["redirect_uri"] = self.redirect_uri
+            if self.use_pkce:
+                auth_dict["use_pkce"] = True
+            if self.authorization_url:
+                auth_dict["authorization_url"] = self.authorization_url
+            if self.token_introspection_url:
+                auth_dict["token_introspection_url"] = self.token_introspection_url
+        elif self.auth_type == "api_key":
+            auth_dict["header_name"] = self.header_name
+            if self.api_key:
+                auth_dict["api_key"] = self.api_key
+            elif self.api_key_env:
+                # Resolve environment variable
+                auth_dict["api_key"] = os.environ.get(self.api_key_env, "")
+                auth_dict["api_key_env"] = self.api_key_env
+        elif self.auth_type == "custom_headers":
+            auth_dict["headers"] = self.headers
 
         # Include SSL options if configured
         if self.insecure:
             auth_dict["insecure"] = self.insecure
+
+        # Include mTLS options if configured
+        if self.client_cert:
+            auth_dict["client_cert"] = self.client_cert
+        if self.client_key:
+            auth_dict["client_key"] = self.client_key
+        if self.ca_bundle:
+            auth_dict["ca_bundle"] = self.ca_bundle
 
         return auth_dict
 
@@ -82,6 +138,9 @@ class MCPServer:
     timeout: int = 30
     rate_limit_rpm: int = 60
     default: bool = False  # Mark this MCP server as default in the profile
+    transport: str = "sse"  # "sse" (HTTP/SSE) or "stdio" (subprocess)
+    command: str | None = None  # Command for stdio transport (e.g., "npx", "python")
+    args: list[str] | None = None  # Arguments for stdio transport command
 
 
 @dataclass
@@ -228,8 +287,27 @@ class MCPProfileConfig:
             token_url=auth_data.get("token_url"),
             scopes=auth_data.get("scopes", []),
             oauth_auto_discover=auth_data.get("oauth_auto_discover", False),
+            # OAuth token refresh
+            refresh_token=auth_data.get("refresh_token"),
+            token_expiry=auth_data.get("token_expiry"),
+            # OAuth advanced flows
+            grant_type=auth_data.get("grant_type"),
+            redirect_uri=auth_data.get("redirect_uri"),
+            use_pkce=auth_data.get("use_pkce", False),
+            authorization_url=auth_data.get("authorization_url"),
+            token_introspection_url=auth_data.get("token_introspection_url"),
+            # API Key
+            header_name=auth_data.get("header_name", "X-API-Key"),
+            api_key=auth_data.get("api_key"),
+            api_key_env=auth_data.get("api_key_env"),
+            # Custom headers
+            headers=auth_data.get("headers", {}),
             # SSL options
             insecure=auth_data.get("insecure", False),
+            # mTLS
+            client_cert=auth_data.get("client_cert"),
+            client_key=auth_data.get("client_key"),
+            ca_bundle=auth_data.get("ca_bundle"),
         )
 
     def _parse_profile(self, profile_id: str, data: dict[str, Any]) -> MCPProfile:
@@ -279,6 +357,26 @@ class MCPProfileConfig:
                         f"Warning: Skipping MCP entry {idx} in profile '{profile_id}' - missing 'mcp_url'"
                     )
                     continue
+                transport = mcp_data.get("transport", "sse")
+                if transport not in ("sse", "stdio"):
+                    logger.warning(
+                        "Unknown transport '%s' in MCP entry %d of profile '%s', "
+                        "defaulting to 'sse'",
+                        transport,
+                        idx,
+                        profile_id,
+                    )
+                    transport = "sse"
+
+                command = mcp_data.get("command")
+                if transport == "stdio" and not command:
+                    logger.warning(
+                        "MCP entry %d in profile '%s' uses stdio transport "
+                        "but has no 'command' configured",
+                        idx,
+                        profile_id,
+                    )
+
                 mcp_server = MCPServer(
                     name=mcp_data.get("name", "Unnamed MCP"),
                     mcp_url=mcp_url,
@@ -286,6 +384,9 @@ class MCPProfileConfig:
                     timeout=mcp_data.get("timeout", timeout),
                     rate_limit_rpm=mcp_data.get("rate_limit_rpm", rate_limit_rpm),
                     default=mcp_data.get("default", False),  # Check for default flag
+                    transport=transport,
+                    command=command,
+                    args=mcp_data.get("args"),
                 )
                 mcps.append(mcp_server)
 

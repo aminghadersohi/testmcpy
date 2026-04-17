@@ -61,6 +61,17 @@ class EvalRunRequest(BaseModel):
     provider: str | None = None
 
 
+class SingleTestRunRequest(BaseModel):
+    """Run a single test case ad-hoc (for the Prompt Playground)."""
+
+    prompt: str
+    evaluators: list[dict[str, Any]] = []
+    model: str | None = None
+    provider: str | None = None
+    profile: str | None = None
+    llm_profile: str | None = None
+
+
 class GenerateTestsRequest(BaseModel):
     tool_name: str
     tool_description: str
@@ -123,6 +134,74 @@ async def list_tests():
     root_files = sorted(root_files, key=lambda x: x["modified"], reverse=True)
 
     return {"folders": folders, "files": root_files}
+
+
+@router.post("/tests/run-single")
+async def run_single_test(request: SingleTestRunRequest):
+    """Run a single ad-hoc test case from the Prompt Playground."""
+    model = request.model or config.default_model
+    provider = request.provider or config.default_provider
+
+    # Resolve API key from LLM profile if provided
+    if request.llm_profile:
+        from testmcpy.llm_profiles import load_llm_profile
+
+        llm_profile = load_llm_profile(request.llm_profile)
+        if llm_profile:
+            default_prov = llm_profile.get_default_provider()
+            if default_prov:
+                model = model or default_prov.model
+                provider = provider or default_prov.provider
+
+    # Build evaluators list
+    evaluator_configs = request.evaluators
+    if not evaluator_configs:
+        evaluator_configs = [{"name": "execution_successful"}]
+
+    # Build a TestCase
+    test_case = TestCase(
+        name="playground_test",
+        prompt=request.prompt,
+        evaluators=[],
+    )
+
+    # Parse evaluators
+    for ev_cfg in evaluator_configs:
+        try:
+            ev = create_evaluator(ev_cfg["name"], **ev_cfg.get("args", {}))
+            test_case.evaluators.append(ev)
+        except (KeyError, TypeError, ValueError) as e:
+            print(f"Warning: Failed to create evaluator {ev_cfg}: {e}")
+
+    # Get MCP client
+    mcp_client = None
+    if request.profile:
+        mcp_client = await get_or_create_mcp_client(request.profile)
+
+    try:
+        runner = TestRunner(
+            model=model,
+            provider=provider,
+            mcp_url=config.get_mcp_url(),
+            mcp_client=mcp_client,
+            verbose=True,
+            hide_tool_output=False,
+        )
+
+        results = await runner.run_tests([test_case])
+
+        if not results:
+            return {"error": "Test execution returned no results"}
+
+        result = results[0]
+        return {
+            "passed": result.passed,
+            "result": result.to_dict(),
+        }
+    except (ConnectionError, TimeoutError) as e:
+        return {"error": f"Connection error: {str(e)}"}
+    except (ValueError, RuntimeError) as e:
+        return {"error": str(e)}
 
 
 # NOTE: Generate endpoints must be defined BEFORE the catch-all /tests/{filename:path}
@@ -734,6 +813,8 @@ async def create_test_file(request: TestFileCreate):
         )
 
     file_path = tests_dir / filename
+    if not file_path.resolve().is_relative_to(tests_dir.resolve()):
+        raise HTTPException(status_code=400, detail="Invalid filename")
 
     if file_path.exists():
         raise HTTPException(status_code=400, detail="File already exists")

@@ -15,6 +15,7 @@ import {
   ChevronRight
 } from 'lucide-react'
 import ReactJson from '@microlink/react-json-view'
+import { useEditorTheme } from '../hooks/useEditorTheme'
 
 /**
  * TraceVisualization - Timeline showing tool execution steps
@@ -267,6 +268,7 @@ function ParameterForm({ schema, values, onChange }) {
  * Main ToolDebugModal component
  */
 function ToolDebugModal({ tool, profile, onClose }) {
+  const { jsonTheme } = useEditorTheme()
   const [parameters, setParameters] = useState({})
   const [loading, setLoading] = useState(false)
   const [result, setResult] = useState(null)
@@ -364,10 +366,10 @@ function ToolDebugModal({ tool, profile, onClose }) {
   }
 
   return (
-    <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-      <div className="bg-surface rounded-xl border border-border shadow-2xl max-w-4xl w-full max-h-[90vh] flex flex-col">
+    <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-0 md:p-4">
+      <div className="bg-surface rounded-none md:rounded-xl border border-border shadow-2xl md:max-w-4xl w-full h-full md:h-auto max-h-full md:max-h-[90vh] flex flex-col">
         {/* Header */}
-        <div className="flex items-start justify-between p-6 border-b border-border">
+        <div className="flex items-start justify-between p-4 md:p-6 border-b border-border">
           <div className="flex-1 min-w-0">
             <h2 className="text-xl font-bold text-text-primary flex items-center gap-2">
               <Play className="text-primary" size={24} />
@@ -391,7 +393,7 @@ function ToolDebugModal({ tool, profile, onClose }) {
         </div>
 
         {/* Content */}
-        <div className="flex-1 overflow-auto p-6 space-y-6">
+        <div className="flex-1 overflow-auto p-4 md:p-6 space-y-4 md:space-y-6">
           {/* Parameter Form */}
           <div>
             <h3 className="text-sm font-semibold text-text-secondary mb-3">
@@ -499,10 +501,10 @@ function ToolDebugModal({ tool, profile, onClose }) {
               </button>
 
               {expandedSections.has('response') && (
-                <div className="bg-black/40 rounded-lg p-4 border border-border">
+                <div className="bg-surface-elevated rounded-lg p-4 border border-border">
                   <ReactJson
                     src={result.response}
-                    theme="monokai"
+                    theme={jsonTheme}
                     collapsed={3}
                     displayDataTypes={false}
                     displayObjectSize={true}
@@ -552,7 +554,7 @@ function ToolDebugModal({ tool, profile, onClose }) {
                     <div className="text-xs font-semibold text-text-tertiary mb-1">
                       Parameters
                     </div>
-                    <pre className="text-sm font-mono text-text-primary bg-black/40 p-3 rounded border border-border overflow-auto">
+                    <pre className="text-sm font-mono text-text-primary bg-surface-elevated p-3 rounded border border-border overflow-auto">
                       {JSON.stringify(parameters, null, 2)}
                     </pre>
                   </div>

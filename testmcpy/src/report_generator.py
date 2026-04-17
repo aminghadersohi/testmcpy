@@ -6,6 +6,7 @@ with grand totals, per-eval breakdowns, cost summaries, and failure analysis.
 """
 
 import json
+import re
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -131,15 +132,17 @@ class ReportGenerator:
         self.report.total_tokens += suite_tokens
         self.report.total_cost += suite_cost
 
-        # Categorize: suites starting with "C" or containing "chatbot"/"demo"
-        # are chatbot pipeline, otherwise MCP direct
+        # Categorize by eval naming convention:
+        # C00-C09 chatbot evals, D01-D02 demo scripts → chatbot pipeline
+        # Everything else → MCP direct
         lower_name = suite_name.lower()
-        if (
-            suite_name.startswith("C")
+        is_chatbot = (
+            bool(re.match(r"^C\d", suite_name))  # C00, C01, etc.
+            or bool(re.match(r"^D\d", suite_name))  # D01, D02, etc.
             or "chatbot" in lower_name
-            or "demo" in lower_name
-            or suite_name.startswith("D")
-        ):
+            or "assistant" in lower_name
+        )
+        if is_chatbot:
             self.report.chatbot_requests += len(results)
             self.report.chatbot_tokens += suite_tokens
             self.report.chatbot_cost += suite_cost
@@ -333,11 +336,16 @@ class ReportGenerator:
         return "\n".join(sections)
 
     def save(self, path: str) -> Path:
-        """Save report to file (markdown or JSON based on extension)."""
+        """Save report to file (markdown, JSON, or HTML based on extension)."""
         output_path = Path(path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
-        if output_path.suffix == ".json":
+        if output_path.suffix == ".html":
+            from testmcpy.src.html_report import HTMLReportGenerator
+
+            html_gen = HTMLReportGenerator(self.report)
+            output_path.write_text(html_gen.generate())
+        elif output_path.suffix == ".json":
             output_path.write_text(json.dumps(self.to_dict(), indent=2))
         else:
             output_path.write_text(self.generate_markdown())

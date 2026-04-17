@@ -24,8 +24,10 @@ import {
   Wrench
 } from 'lucide-react'
 import Editor from '@monaco-editor/react'
+import { useEditorTheme } from '../hooks/useEditorTheme'
 
 function GenerationHistory() {
+  const { monacoTheme } = useEditorTheme()
   const [logs, setLogs] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
@@ -144,14 +146,14 @@ function GenerationHistory() {
   return (
     <div className="h-full flex flex-col bg-background">
       {/* Header */}
-      <div className="flex-shrink-0 px-6 py-4 border-b border-border bg-surface-elevated">
+      <div className="flex-shrink-0 px-4 md:px-6 py-4 border-b border-border bg-surface-elevated">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
             <div className="p-2 rounded-lg bg-purple-500/10">
               <History size={24} className="text-purple-400" />
             </div>
             <div>
-              <h1 className="text-xl font-semibold text-text-primary">Generation History</h1>
+              <h1 className="text-xl md:text-2xl font-semibold text-text-primary">Generation History</h1>
               <p className="text-sm text-text-tertiary">View all test generation runs with prompts and responses</p>
             </div>
           </div>
@@ -168,7 +170,7 @@ function GenerationHistory() {
 
       {/* Stats Bar */}
       {stats && (
-        <div className="flex-shrink-0 px-6 py-3 border-b border-border bg-surface">
+        <div className="flex-shrink-0 px-4 md:px-6 py-3 border-b border-border bg-surface">
           <div className="flex items-center gap-6">
             <div className="flex items-center gap-2">
               <History size={16} className="text-text-tertiary" />
@@ -200,7 +202,7 @@ function GenerationHistory() {
       )}
 
       {/* Filters */}
-      <div className="flex-shrink-0 px-6 py-3 border-b border-border bg-surface-elevated/50">
+      <div className="flex-shrink-0 px-4 md:px-6 py-3 border-b border-border bg-surface-elevated/50">
         <div className="flex items-center gap-4">
           <Filter size={16} className="text-text-tertiary" />
 
@@ -253,9 +255,9 @@ function GenerationHistory() {
       </div>
 
       {/* Main Content */}
-      <div className="flex-1 flex overflow-hidden">
+      <div className="flex-1 flex flex-col md:flex-row overflow-hidden">
         {/* Log List */}
-        <div className="w-96 flex-shrink-0 border-r border-border overflow-auto bg-surface-elevated">
+        <div className={`w-full md:w-96 flex-shrink-0 border-b md:border-b-0 md:border-r border-border overflow-auto bg-surface-elevated ${selectedLog ? 'hidden md:block' : 'block'}`}>
           {loading ? (
             <div className="flex items-center justify-center h-full">
               <Loader2 className="animate-spin text-primary" size={32} />
@@ -331,7 +333,13 @@ function GenerationHistory() {
         </div>
 
         {/* Log Details */}
-        <div className="flex-1 overflow-hidden flex flex-col">
+        <div className={`flex-1 overflow-hidden flex flex-col ${selectedLog ? 'block' : 'hidden md:block'}`}>
+          {selectedLog && (
+            <button onClick={() => { setSelectedLog(null); setLogDetails(null) }} className="md:hidden flex items-center gap-2 px-4 py-3 text-sm text-text-secondary hover:text-text-primary border-b border-border w-full">
+              <ChevronRight size={16} className="rotate-180" />
+              <span>Back to list</span>
+            </button>
+          )}
           {loadingDetails ? (
             <div className="flex items-center justify-center h-full">
               <Loader2 className="animate-spin text-primary" size={32} />
@@ -422,7 +430,7 @@ function GenerationHistory() {
               <div className="flex-1 overflow-auto p-4">
                 {/* Logs Section */}
                 {expandedSection === 'logs' && (
-                  <div className="space-y-1 font-mono text-sm bg-gray-950 rounded-lg p-4">
+                  <div className="space-y-1 font-mono text-sm bg-surface rounded-lg p-4">
                     {logDetails.logs?.map((log, idx) => (
                       <div
                         key={idx}
@@ -431,14 +439,14 @@ function GenerationHistory() {
                           log.includes('✓') || log.includes('Complete') ? 'text-green-400' :
                           log.includes('Sending') || log.includes('Analyzing') ? 'text-yellow-400' :
                           log.includes('Tool:') || log.includes('Using') ? 'text-blue-400' :
-                          'text-gray-300'
+                          'text-text-secondary'
                         }`}
                       >
                         {log}
                       </div>
                     ))}
                     {(!logDetails.logs || logDetails.logs.length === 0) && (
-                      <div className="text-gray-500 text-center py-4">No logs recorded</div>
+                      <div className="text-text-tertiary text-center py-4">No logs recorded</div>
                     )}
                   </div>
                 )}
@@ -473,7 +481,7 @@ function GenerationHistory() {
                             </button>
                           </div>
                           <div className="max-h-64 overflow-auto">
-                            <pre className="p-4 text-xs text-text-secondary whitespace-pre-wrap bg-gray-950">{call.prompt}</pre>
+                            <pre className="p-4 text-xs text-text-secondary whitespace-pre-wrap bg-surface">{call.prompt}</pre>
                           </div>
                         </div>
 
@@ -490,7 +498,7 @@ function GenerationHistory() {
                             </button>
                           </div>
                           <div className="max-h-64 overflow-auto">
-                            <pre className="p-4 text-xs text-text-secondary whitespace-pre-wrap bg-gray-950">{call.response}</pre>
+                            <pre className="p-4 text-xs text-text-secondary whitespace-pre-wrap bg-surface">{call.response}</pre>
                           </div>
                         </div>
                       </div>
@@ -595,7 +603,7 @@ function GenerationHistory() {
                         <Editor
                           height="500px"
                           defaultLanguage="yaml"
-                          theme="vs-dark"
+                          theme={monacoTheme}
                           value={logDetails.generated_yaml}
                           options={{
                             readOnly: true,

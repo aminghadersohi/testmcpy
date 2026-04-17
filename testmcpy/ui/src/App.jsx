@@ -13,7 +13,14 @@ import {
   ChevronRight,
   Shield,
   History,
-  BarChart3
+  BarChart3,
+  Grid3X3,
+  Sun,
+  Moon,
+  Monitor,
+  GitCompare,
+  Heart,
+  TrendingUp,
 } from 'lucide-react'
 
 import MCPExplorer from './pages/MCPExplorer'
@@ -25,10 +32,64 @@ import LLMProfiles from './pages/LLMProfiles'
 import AuthDebugger from './pages/AuthDebugger'
 import GenerationHistory from './pages/GenerationHistory'
 import Reports from './pages/Reports'
+import CompatibilityMatrix from './pages/CompatibilityMatrix'
+import MetricsDashboard from './pages/MetricsDashboard'
+import RunComparison from './pages/RunComparison'
+import MCPHealth from './pages/MCPHealth'
+import SecurityDashboard from './pages/SecurityDashboard'
 import { TestRunProvider } from './contexts/TestRunContext'
+import { ThemeProvider, useTheme } from './contexts/ThemeContext'
+import { NotificationProvider } from './components/NotificationProvider'
+import CommandPalette from './components/CommandPalette'
+
+function ThemeSwitcher({ collapsed }) {
+  const { theme, setTheme } = useTheme()
+
+  const options = [
+    { value: 'light', icon: Sun, label: 'Light' },
+    { value: 'dark', icon: Moon, label: 'Dark' },
+    { value: 'system', icon: Monitor, label: 'System' },
+  ]
+
+  if (collapsed) {
+    // Cycle through themes on click when collapsed
+    const next = { light: 'dark', dark: 'system', system: 'light' }
+    const CurrentIcon = options.find(o => o.value === theme)?.icon || Monitor
+    return (
+      <button
+        onClick={() => setTheme(next[theme])}
+        className="w-full flex items-center justify-center p-2 rounded-lg hover:bg-surface-hover transition-all duration-200 text-text-secondary hover:text-text-primary"
+        title={`Theme: ${theme}`}
+      >
+        <CurrentIcon size={16} />
+      </button>
+    )
+  }
+
+  return (
+    <div className="flex items-center gap-0.5 p-0.5 rounded-lg bg-background-subtle border border-border">
+      {options.map(({ value, icon: Icon, label }) => (
+        <button
+          key={value}
+          onClick={() => setTheme(value)}
+          className={`flex-1 flex items-center justify-center gap-1 px-1.5 py-1.5 rounded-md text-[11px] font-medium transition-all duration-200 ${
+            theme === value
+              ? 'bg-primary text-white shadow-sm'
+              : 'text-text-secondary hover:text-text-primary hover:bg-surface-hover'
+          }`}
+          title={label}
+        >
+          <Icon size={11} />
+          <span>{label}</span>
+        </button>
+      ))}
+    </div>
+  )
+}
 
 function AppContent() {
   const [sidebarOpen, setSidebarOpen] = useState(true)
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
   const [config, setConfig] = useState({})
   const [selectedProfiles, setSelectedProfiles] = useState([])
   const [profiles, setProfiles] = useState([])
@@ -39,6 +100,23 @@ function AppContent() {
   const [appVersion, setAppVersion] = useState('v0.0.0')
   const navigate = useNavigate()
   const location = useLocation()
+
+  // Close mobile drawer on route change
+  useEffect(() => {
+    setMobileMenuOpen(false)
+  }, [location.pathname])
+
+  // Close mobile drawer on resize to desktop
+  useEffect(() => {
+    const mq = window.matchMedia('(min-width: 768px)')
+    const handler = () => {
+      if (mq.matches) {
+        setMobileMenuOpen(false)
+      }
+    }
+    mq.addEventListener('change', handler)
+    return () => mq.removeEventListener('change', handler)
+  }, [])
 
   useEffect(() => {
     checkApiHealth()
@@ -267,17 +345,30 @@ function AppContent() {
     { path: '/', label: 'Explorer', icon: Package },
     { path: '/tests', label: 'Tests', icon: FileText },
     { path: '/reports', label: 'Reports', icon: BarChart3 },
+    { path: '/compatibility', label: 'Compat', icon: Grid3X3 },
     { path: '/generation-history', label: 'Gen History', icon: History },
     { path: '/chat', label: 'Interact', icon: MessageSquare },
+    { section: 'Analytics' },
+    { path: '/metrics', label: 'Metrics', icon: TrendingUp },
+    { path: '/compare', label: 'Compare', icon: GitCompare },
+    { path: '/mcp-health', label: 'MCP Health', icon: Heart },
+    { path: '/security', label: 'Security', icon: Shield },
+    { section: 'Settings' },
     { path: '/auth-debugger', label: 'Auth Debug', icon: Shield },
     { path: '/config', label: 'Config', icon: Settings },
   ]
 
+  // On mobile, sidebar always shows labels (acts as expanded drawer)
+  const showLabels = sidebarOpen || mobileMenuOpen
+
   if (!apiReady) {
     return (
       <div className="flex h-screen bg-background text-text-primary items-center justify-center">
-        <div className="flex flex-col items-center gap-4">
-          <div className="w-12 h-12 border-4 border-primary border-t-transparent rounded-full animate-spin"></div>
+        <div className="flex flex-col items-center gap-5">
+          <div className="relative">
+            <div className="w-14 h-14 border-4 border-primary/30 rounded-full"></div>
+            <div className="w-14 h-14 border-4 border-primary border-t-transparent rounded-full animate-spin absolute inset-0"></div>
+          </div>
           <div className="text-center">
             <div className="text-lg font-semibold text-text-primary">Connecting to API</div>
             <div className="text-sm text-text-secondary mt-1">
@@ -291,95 +382,137 @@ function AppContent() {
 
   return (
     <div className="flex h-screen bg-background text-text-primary">
-        {/* Sidebar */}
+        {/* Command Palette (Cmd+K) */}
+        <CommandPalette />
+
+        {/* Mobile backdrop overlay */}
+        {mobileMenuOpen && (
+          <div
+            className="fixed inset-0 bg-black/40 z-30 md:hidden"
+            onClick={() => setMobileMenuOpen(false)}
+          />
+        )}
+
+        {/* Sidebar — fixed drawer on mobile, static on desktop */}
         <aside
-          className={`${
-            sidebarOpen ? 'w-50' : 'w-16'
-          } bg-surface-elevated border-r border-border transition-all duration-300 flex flex-col shadow-medium`}
+          className={`
+            fixed inset-y-0 left-0 z-40 w-64
+            md:relative md:z-auto
+            ${sidebarOpen ? 'md:w-56' : 'md:w-16'}
+            transform transition-all duration-300 ease-in-out
+            ${mobileMenuOpen ? 'translate-x-0' : '-translate-x-full'}
+            md:translate-x-0
+            sidebar-bg border-r border-border flex flex-col shadow-medium
+          `}
         >
-          <div className="p-3 flex items-center justify-between border-b border-border">
-            {sidebarOpen ? (
-              <div className="flex items-center gap-2">
-                <svg width="28" height="28" viewBox="0 0 28 28" xmlns="http://www.w3.org/2000/svg">
-                  <rect x="5" y="9" width="5" height="14" rx="1.5" fill="none" stroke="currentColor" strokeWidth="2" className="text-primary" />
-                  <rect x="7" y="16" width="3" height="7" fill="currentColor" className="text-primary" opacity="0.3" />
-                  <circle cx="9.5" cy="6" r="2.5" fill="none" stroke="currentColor" strokeWidth="1.5" className="text-primary" />
-                  <line x1="9.5" y1="6" x2="9.5" y2="9" stroke="currentColor" strokeWidth="1.5" className="text-primary" />
-                  <circle cx="20" cy="14" r="6" fill="none" stroke="currentColor" strokeWidth="2" className="text-success" />
-                  <path d="M 17 14 L 19 16 L 23 12" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="text-success" />
-                </svg>
+          {/* Header */}
+          <div className={`border-b border-border ${showLabels ? 'p-3 flex items-center justify-between' : 'p-2 flex flex-col items-center gap-2'}`}>
+            {showLabels ? (
+              <div className="flex items-center gap-2.5">
+                <div className="w-8 h-8 rounded-lg bg-primary/10 border border-primary/20 flex items-center justify-center flex-shrink-0">
+                  <svg width="18" height="18" viewBox="0 0 28 28" xmlns="http://www.w3.org/2000/svg">
+                    <rect x="5" y="9" width="5" height="14" rx="1.5" fill="none" stroke="currentColor" strokeWidth="2" className="text-primary" />
+                    <rect x="7" y="16" width="3" height="7" fill="currentColor" className="text-primary" opacity="0.3" />
+                    <circle cx="9.5" cy="6" r="2.5" fill="none" stroke="currentColor" strokeWidth="1.5" className="text-primary" />
+                    <line x1="9.5" y1="6" x2="9.5" y2="9" stroke="currentColor" strokeWidth="1.5" className="text-primary" />
+                    <circle cx="20" cy="14" r="6" fill="none" stroke="currentColor" strokeWidth="2" className="text-success" />
+                    <path d="M 17 14 L 19 16 L 23 12" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="text-success" />
+                  </svg>
+                </div>
                 <div>
-                  <h1 className="text-lg font-bold text-primary leading-tight">testmcpy</h1>
+                  <h1 className="text-sm font-bold text-text-primary leading-tight tracking-tight">testmcpy</h1>
                   <p className="text-[10px] text-text-tertiary leading-tight">MCP Testing</p>
                 </div>
               </div>
             ) : (
-              <svg width="24" height="24" viewBox="0 0 28 28" xmlns="http://www.w3.org/2000/svg" className="mx-auto">
-                <rect x="5" y="9" width="5" height="14" rx="1.5" fill="none" stroke="currentColor" strokeWidth="2" className="text-primary" />
-                <rect x="7" y="16" width="3" height="7" fill="currentColor" className="text-primary" opacity="0.3" />
-                <circle cx="9.5" cy="6" r="2.5" fill="none" stroke="currentColor" strokeWidth="1.5" className="text-primary" />
-                <line x1="9.5" y1="6" x2="9.5" y2="9" stroke="currentColor" strokeWidth="1.5" className="text-primary" />
-              </svg>
+              <div className="w-8 h-8 rounded-lg bg-primary/10 border border-primary/20 flex items-center justify-center">
+                <svg width="16" height="16" viewBox="0 0 28 28" xmlns="http://www.w3.org/2000/svg">
+                  <rect x="5" y="9" width="5" height="14" rx="1.5" fill="none" stroke="currentColor" strokeWidth="2" className="text-primary" />
+                  <rect x="7" y="16" width="3" height="7" fill="currentColor" className="text-primary" opacity="0.3" />
+                  <circle cx="9.5" cy="6" r="2.5" fill="none" stroke="currentColor" strokeWidth="1.5" className="text-primary" />
+                  <line x1="9.5" y1="6" x2="9.5" y2="9" stroke="currentColor" strokeWidth="1.5" className="text-primary" />
+                </svg>
+              </div>
             )}
+            {/* Desktop: collapse/expand toggle. Mobile: close drawer */}
             <button
-              onClick={() => setSidebarOpen(!sidebarOpen)}
-              className="p-2 hover:bg-surface-hover rounded-lg transition-all duration-200 text-text-secondary hover:text-text-primary"
+              onClick={() => {
+                // On mobile, close the drawer
+                if (window.innerWidth < 768) {
+                  setMobileMenuOpen(false)
+                } else {
+                  setSidebarOpen(!sidebarOpen)
+                }
+              }}
+              className="p-1.5 hover:bg-surface-hover rounded-lg transition-all duration-200 text-text-tertiary hover:text-text-primary"
             >
-              {sidebarOpen ? <X size={20} /> : <Menu size={20} />}
+              {showLabels ? <X size={16} /> : <Menu size={18} />}
             </button>
           </div>
 
-          <nav className="flex-1 px-3 py-4 space-y-1">
-            {navItems.map((item) => {
+          {/* Navigation */}
+          <nav className="flex-1 px-2 py-3 space-y-0.5 overflow-y-auto">
+            {navItems.map((item, idx) => {
+              if (item.section) {
+                return showLabels ? (
+                  <div key={item.section} className="pt-3 pb-1 px-3">
+                    <span className="text-[10px] font-semibold text-text-disabled uppercase tracking-wider">{item.section}</span>
+                  </div>
+                ) : (
+                  <div key={item.section} className="pt-2 pb-1 px-3">
+                    <div className="border-t border-border" />
+                  </div>
+                )
+              }
               const Icon = item.icon
               return (
                 <NavLink
                   key={item.path}
                   to={item.path}
                   className={({ isActive }) =>
-                    `flex items-center gap-3 px-3 py-2 rounded-lg transition-all duration-200 ${
+                    `flex items-center gap-3 px-3 py-2 rounded-lg transition-all duration-200 group ${
                       isActive
-                        ? 'bg-primary text-white shadow-sm'
+                        ? 'bg-primary text-white shadow-sm shadow-primary/25'
                         : 'hover:bg-surface-hover text-text-secondary hover:text-text-primary'
                     }`
                   }
                 >
-                  <Icon size={20} className="flex-shrink-0" />
-                  {sidebarOpen && <span className="font-medium">{item.label}</span>}
+                  <Icon size={18} className="flex-shrink-0" />
+                  {showLabels && <span className="text-sm font-medium">{item.label}</span>}
                 </NavLink>
               )
             })}
           </nav>
 
           {/* Profile Selectors */}
-          <div className="px-3 py-3 border-t border-border space-y-2">
+          <div className="px-2 py-2 border-t border-border space-y-1.5">
             {/* MCP Selector Widget with Connection Status */}
             <button
               onClick={() => navigate('/mcp-profiles')}
               className={`w-full rounded-lg transition-all duration-200 ${
                 location.pathname === '/mcp-profiles'
-                  ? 'bg-primary/10 border border-primary'
+                  ? 'bg-primary/10 border border-primary/40 shadow-glow-primary'
                   : selectedProfiles.length > 0
-                    ? 'bg-success/10 border border-success/30 hover:bg-success/20'
-                    : 'bg-surface-elevated border border-border hover:bg-surface-hover'
+                    ? 'bg-success/8 border border-success/20 hover:bg-success/15 hover:border-success/30'
+                    : 'bg-surface border border-border hover:bg-surface-hover hover:border-border-subtle'
               }`}
             >
-              <div className="flex items-center gap-2 px-3 py-2">
+              <div className="flex items-center gap-2 px-2.5 py-2">
                 <div className="relative flex-shrink-0">
-                  <Server size={16} className={location.pathname === '/mcp-profiles' ? 'text-primary' : 'text-primary'} />
+                  <Server size={15} className="text-primary" />
                   {selectedProfiles.length > 0 && (
-                    <CheckCircle2 size={10} className="absolute -bottom-1 -right-1 text-success bg-surface-elevated rounded-full" />
+                    <CheckCircle2 size={9} className="absolute -bottom-1 -right-1 text-success" />
                   )}
                 </div>
-                {sidebarOpen && (
+                {showLabels && (
                   <div className="flex-1 min-w-0 text-left">
                     <div className="flex items-center gap-1.5">
                       <span className="text-xs font-semibold text-text-primary truncate">
                         {getSelectedMCPDisplay().profile}
                       </span>
                       {selectedProfiles.length > 0 && (
-                        <span className="text-[9px] px-1 py-0.5 rounded bg-success/20 text-success font-medium">
-                          Connected
+                        <span className="text-[8px] px-1 py-0.5 rounded-full bg-success/15 text-success font-semibold uppercase tracking-wider">
+                          Live
                         </span>
                       )}
                     </div>
@@ -388,77 +521,110 @@ function AppContent() {
                     </div>
                   </div>
                 )}
-                {sidebarOpen && <ChevronRight size={14} className="text-text-tertiary flex-shrink-0" />}
+                {showLabels && <ChevronRight size={13} className="text-text-tertiary flex-shrink-0" />}
               </div>
             </button>
 
             {/* LLM Profile Selector Widget */}
             <button
               onClick={() => navigate('/llm-profiles')}
-              className={`w-full flex items-center gap-2 px-3 py-2 rounded-lg transition-all duration-200 ${
+              className={`w-full rounded-lg transition-all duration-200 ${
                 location.pathname === '/llm-profiles'
-                  ? 'bg-primary/10 border border-primary text-primary'
-                  : 'bg-surface-elevated border border-border hover:bg-surface-hover'
+                  ? 'bg-primary/10 border border-primary/40 shadow-glow-primary'
+                  : 'bg-surface border border-border hover:bg-surface-hover hover:border-border-subtle'
               }`}
             >
-              <Cpu size={16} className={location.pathname === '/llm-profiles' ? 'text-primary' : 'text-success'} />
-              {sidebarOpen && (
-                <div className="flex-1 min-w-0 text-left">
-                  <div className="flex items-center gap-1.5">
-                    <span className="text-xs font-semibold text-text-primary truncate">
-                      {getSelectedLLMDisplay().providerName}
-                    </span>
-                    {getSelectedLLMDisplay().isCliTool && (
-                      <span className="px-1 py-0.5 text-[9px] bg-amber-500/20 text-amber-400 rounded flex-shrink-0">CLI</span>
-                    )}
-                    {getSelectedLLMDisplay().isSdk && (
-                      <span className="px-1 py-0.5 text-[9px] bg-cyan-500/20 text-cyan-400 rounded flex-shrink-0">SDK</span>
-                    )}
-                    {getSelectedLLMDisplay().isApi && (
-                      <span className="px-1 py-0.5 text-[9px] bg-emerald-500/20 text-emerald-400 rounded flex-shrink-0">API</span>
-                    )}
+              <div className="flex items-center gap-2 px-2.5 py-2">
+                <Cpu size={15} className={location.pathname === '/llm-profiles' ? 'text-primary' : 'text-info-light'} />
+                {showLabels && (
+                  <div className="flex-1 min-w-0 text-left">
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-xs font-semibold text-text-primary truncate">
+                        {getSelectedLLMDisplay().providerName}
+                      </span>
+                      {getSelectedLLMDisplay().isCliTool && (
+                        <span className="px-1 py-0.5 text-[8px] bg-amber-500/15 text-amber-500 dark:text-amber-400 rounded font-semibold flex-shrink-0">CLI</span>
+                      )}
+                      {getSelectedLLMDisplay().isSdk && (
+                        <span className="px-1 py-0.5 text-[8px] bg-cyan-500/15 text-cyan-600 dark:text-cyan-400 rounded font-semibold flex-shrink-0">SDK</span>
+                      )}
+                      {getSelectedLLMDisplay().isApi && (
+                        <span className="px-1 py-0.5 text-[8px] bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 rounded font-semibold flex-shrink-0">API</span>
+                      )}
+                    </div>
+                    <div className="text-[10px] text-text-tertiary truncate">
+                      {getSelectedLLMDisplay().profileName}
+                    </div>
                   </div>
-                  <div className="text-[10px] text-text-tertiary truncate">
-                    {getSelectedLLMDisplay().profileName}
-                  </div>
-                </div>
-              )}
-              {sidebarOpen && <ChevronRight size={14} className="text-text-tertiary flex-shrink-0" />}
+                )}
+                {showLabels && <ChevronRight size={13} className="text-text-tertiary flex-shrink-0" />}
+              </div>
             </button>
           </div>
 
-          <div className="p-3 border-t border-border">
-            {sidebarOpen && (
-              <div className="text-xs text-text-tertiary space-y-0.5">
-                <div className="font-medium">MCP Testing Framework</div>
-                <div className="text-text-disabled">{appVersion}</div>
+          {/* Footer with theme switcher */}
+          <div className="px-2 py-2.5 border-t border-border space-y-2">
+            <ThemeSwitcher collapsed={!showLabels} />
+            {showLabels && (
+              <div className="text-[10px] text-text-tertiary flex items-center justify-between px-1">
+                <span className="font-medium">testmcpy</span>
+                <span className="text-text-disabled">{appVersion}</span>
               </div>
             )}
           </div>
         </aside>
 
-        {/* Main Content */}
-        <main className="flex-1 overflow-auto">
-          <Routes>
-            <Route path="/" element={<MCPExplorer selectedProfiles={selectedProfiles} />} />
-            <Route path="/chat" element={<ChatInterface selectedProfiles={selectedProfiles} selectedLlmProfile={selectedLlmProfile} llmProfiles={llmProfiles} />} />
-            <Route path="/tests" element={<TestManager selectedProfiles={selectedProfiles} selectedLlmProfile={selectedLlmProfile} llmProfiles={llmProfiles} />} />
-            <Route path="/reports" element={<Reports />} />
-            <Route path="/generation-history" element={<GenerationHistory />} />
-            <Route path="/auth-debugger" element={<AuthDebugger />} />
-            <Route path="/config" element={<Configuration />} />
-            <Route path="/mcp-profiles" element={
-              <MCPProfiles
-                selectedProfiles={selectedProfiles}
-                onSelectProfiles={(newProfiles) => {
-                  setSelectedProfiles(newProfiles)
-                  localStorage.setItem('selectedMCPProfiles', JSON.stringify(newProfiles))
-                }}
-              />
-            } />
-            <Route path="/llm-profiles" element={<LLMProfiles selectedProfile={selectedLlmProfile} onSelectProfile={handleLlmProfileChange} onProfilesChange={loadLlmProfiles} />} />
-          </Routes>
-        </main>
+        {/* Main content area with mobile header */}
+        <div className="flex-1 flex flex-col min-w-0">
+          {/* Mobile top bar — only visible below md */}
+          <div className="md:hidden flex items-center justify-between px-4 py-2.5 border-b border-border bg-surface-elevated">
+            <button
+              onClick={() => setMobileMenuOpen(true)}
+              className="p-1.5 hover:bg-surface-hover rounded-lg transition-all duration-200 text-text-secondary hover:text-text-primary"
+            >
+              <Menu size={20} />
+            </button>
+            <div className="flex items-center gap-2">
+              <div className="w-6 h-6 rounded-md bg-primary/10 border border-primary/20 flex items-center justify-center">
+                <svg width="14" height="14" viewBox="0 0 28 28" xmlns="http://www.w3.org/2000/svg">
+                  <rect x="5" y="9" width="5" height="14" rx="1.5" fill="none" stroke="currentColor" strokeWidth="2" className="text-primary" />
+                  <circle cx="20" cy="14" r="6" fill="none" stroke="currentColor" strokeWidth="2" className="text-success" />
+                  <path d="M 17 14 L 19 16 L 23 12" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="text-success" />
+                </svg>
+              </div>
+              <span className="text-sm font-bold text-text-primary">testmcpy</span>
+            </div>
+            <ThemeSwitcher collapsed={true} />
+          </div>
+
+          {/* Main Content */}
+          <main className="flex-1 overflow-auto">
+            <Routes>
+              <Route path="/" element={<MCPExplorer selectedProfiles={selectedProfiles} />} />
+              <Route path="/chat" element={<ChatInterface selectedProfiles={selectedProfiles} selectedLlmProfile={selectedLlmProfile} llmProfiles={llmProfiles} />} />
+              <Route path="/tests" element={<TestManager selectedProfiles={selectedProfiles} selectedLlmProfile={selectedLlmProfile} llmProfiles={llmProfiles} />} />
+              <Route path="/reports" element={<Reports />} />
+              <Route path="/compatibility" element={<CompatibilityMatrix />} />
+              <Route path="/generation-history" element={<GenerationHistory />} />
+              <Route path="/metrics" element={<MetricsDashboard />} />
+              <Route path="/compare" element={<RunComparison />} />
+              <Route path="/mcp-health" element={<MCPHealth />} />
+              <Route path="/security" element={<SecurityDashboard />} />
+              <Route path="/auth-debugger" element={<AuthDebugger />} />
+              <Route path="/config" element={<Configuration />} />
+              <Route path="/mcp-profiles" element={
+                <MCPProfiles
+                  selectedProfiles={selectedProfiles}
+                  onSelectProfiles={(newProfiles) => {
+                    setSelectedProfiles(newProfiles)
+                    localStorage.setItem('selectedMCPProfiles', JSON.stringify(newProfiles))
+                  }}
+                />
+              } />
+              <Route path="/llm-profiles" element={<LLMProfiles selectedProfile={selectedLlmProfile} onSelectProfile={handleLlmProfileChange} onProfilesChange={loadLlmProfiles} />} />
+            </Routes>
+          </main>
+        </div>
 
       </div>
   )
@@ -467,9 +633,13 @@ function AppContent() {
 function App() {
   return (
     <Router>
-      <TestRunProvider>
-        <AppContent />
-      </TestRunProvider>
+      <ThemeProvider>
+        <NotificationProvider>
+          <TestRunProvider>
+            <AppContent />
+          </TestRunProvider>
+        </NotificationProvider>
+      </ThemeProvider>
     </Router>
   )
 }

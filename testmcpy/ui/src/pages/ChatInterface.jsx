@@ -1,12 +1,14 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react'
-import { Send, Loader, Wrench, DollarSign, ChevronDown, ChevronRight, CheckCircle, FileText, Plus, Server, Trash2, Brain } from 'lucide-react'
+import { Send, Loader, Wrench, DollarSign, ChevronDown, ChevronRight, CheckCircle, FileText, Plus, Server, Trash2, Brain, RefreshCw, Download, Edit3, Settings2 } from 'lucide-react'
 import ReactJson from '@microlink/react-json-view'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useKeyboardShortcuts, useAnnounce } from '../hooks/useKeyboardShortcuts'
+import { useEditorTheme } from '../hooks/useEditorTheme'
 
 // JSON viewer component with IDE-like collapsible tree
 function JSONViewer({ data }) {
+  const { jsonTheme } = useEditorTheme()
   const [collapsed, setCollapsed] = useState(true)
 
   // Parse JSON strings recursively
@@ -53,10 +55,10 @@ function JSONViewer({ data }) {
         <span>Tool Output</span>
       </button>
       {!collapsed && (
-        <div className="bg-black/40 rounded-lg p-3 border border-white/10 overflow-x-auto">
+        <div className="bg-background-subtle rounded-lg p-3 border border-border overflow-x-auto">
           <ReactJson
             src={parsedData}
-            theme="monokai"
+            theme={jsonTheme}
             collapsed={false}
             displayDataTypes={false}
             displayObjectSize={true}
@@ -77,6 +79,7 @@ function JSONViewer({ data }) {
 }
 
 function ChatInterface({ selectedProfiles = [], selectedLlmProfile, llmProfiles = [] }) {
+  const { jsonTheme } = useEditorTheme()
   const [messages, setMessages] = useState([])
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
@@ -91,6 +94,10 @@ function ChatInterface({ selectedProfiles = [], selectedLlmProfile, llmProfiles 
   const textareaRef = useRef(null)
   const [historySize, setHistorySize] = useState(10)  // Number of messages to keep in history
   const abortControllerRef = useRef(null)
+  const [editingMessageIdx, setEditingMessageIdx] = useState(null)
+  const [editingText, setEditingText] = useState('')
+  const [systemPrompt, setSystemPrompt] = useState('')
+  const [showSystemPrompt, setShowSystemPrompt] = useState(false)
 
   // For Chat, only use the first selected profile (single MCP at a time)
   const activeProfile = selectedProfiles.length > 0 ? selectedProfiles[0] : null
@@ -215,6 +222,62 @@ function ChatInterface({ selectedProfiles = [], selectedLlmProfile, llmProfiles 
     localStorage.removeItem('chatHistory')
   }
 
+  // Regenerate: resend the last user message
+  const regenerateLastResponse = () => {
+    if (loading || messages.length < 2) return
+    // Find last user message
+    let lastUserIdx = -1
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].role === 'user') { lastUserIdx = i; break }
+    }
+    if (lastUserIdx < 0) return
+    const lastUserMsg = messages[lastUserIdx].content
+    // Remove messages from last user message onward
+    const trimmed = messages.slice(0, lastUserIdx)
+    setMessages(trimmed)
+    saveChatHistory(trimmed)
+    setInput(lastUserMsg)
+    // Auto-send after a tick
+    setTimeout(() => {
+      const fakeEvent = { target: { value: lastUserMsg } }
+      // We set input above, sendMessage will pick it up
+    }, 50)
+  }
+
+  // Edit a user message: trim conversation and re-send
+  const editAndResend = (idx) => {
+    if (loading) return
+    const trimmed = messages.slice(0, idx)
+    setMessages(trimmed)
+    saveChatHistory(trimmed)
+    setInput(editingText)
+    setEditingMessageIdx(null)
+    setEditingText('')
+  }
+
+  // Export conversation as markdown
+  const exportAsMarkdown = () => {
+    const lines = messages.map(m => {
+      const role = m.role === 'user' ? '**User**' : '**Assistant**'
+      let text = `### ${role}\n\n${m.content || ''}\n`
+      if (m.tool_calls && m.tool_calls.length > 0) {
+        text += `\n_Tool calls: ${m.tool_calls.map(tc => tc.name).join(', ')}_\n`
+      }
+      return text
+    })
+    if (systemPrompt) {
+      lines.unshift(`### System Prompt\n\n${systemPrompt}\n\n---\n`)
+    }
+    const md = lines.join('\n---\n\n')
+    const blob = new Blob([md], { type: 'text/markdown' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `chat_export_${new Date().toISOString().slice(0, 10)}.md`
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }
@@ -261,6 +324,11 @@ function ChatInterface({ selectedProfiles = [], selectedLlmProfile, llmProfiles 
         role: msg.role,
         content: msg.content
       }))
+
+      // Prepend system prompt as first system message if set
+      if (systemPrompt.trim()) {
+        historyForAPI.unshift({ role: 'system', content: systemPrompt.trim() })
+      }
 
       const llmConfig = getLlmConfig()
       const res = await fetch('/api/chat/stream', {
@@ -688,9 +756,9 @@ ${evaluators}
     <div className="h-full flex flex-col">
       {/* Header */}
       <div className="p-4 border-b border-border bg-surface-elevated">
-        <div className="flex items-center justify-between mb-3">
+        <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
           <div>
-            <h1 className="text-2xl font-bold">Chat Interface</h1>
+            <h1 className="text-xl md:text-2xl font-bold">Chat Interface</h1>
             <p className="text-text-secondary mt-1 text-base">
               Interactive chat with LLM using MCP tools
               {messages.length > 0 && (
@@ -700,21 +768,64 @@ ${evaluators}
               )}
             </p>
           </div>
-          <div className="flex gap-3">
-            {messages.length > 0 && (
+          <div className="flex gap-2 flex-wrap">
+            <button
+              onClick={() => setShowSystemPrompt(!showSystemPrompt)}
+              className={`btn ${showSystemPrompt ? 'btn-primary' : 'btn-secondary'} text-sm flex items-center gap-2`}
+              title="System prompt"
+            >
+              <Settings2 size={16} />
+              <span className="hidden sm:inline">System</span>
+            </button>
+            {messages.length >= 2 && (
               <button
-                onClick={clearChatHistory}
+                onClick={regenerateLastResponse}
+                disabled={loading}
                 className="btn btn-secondary text-sm flex items-center gap-2"
-                title="Clear chat history"
+                title="Regenerate last response"
               >
-                <Trash2 size={16} />
-                <span>Clear History</span>
+                <RefreshCw size={16} />
+                <span className="hidden sm:inline">Regenerate</span>
               </button>
+            )}
+            {messages.length > 0 && (
+              <>
+                <button
+                  onClick={exportAsMarkdown}
+                  className="btn btn-secondary text-sm flex items-center gap-2"
+                  title="Export as Markdown"
+                >
+                  <Download size={16} />
+                  <span className="hidden sm:inline">Export</span>
+                </button>
+                <button
+                  onClick={clearChatHistory}
+                  className="btn btn-secondary text-sm flex items-center gap-2"
+                  title="Clear chat history"
+                >
+                  <Trash2 size={16} />
+                  <span className="hidden sm:inline">Clear</span>
+                </button>
+              </>
             )}
           </div>
         </div>
 
       </div>
+
+      {/* System Prompt */}
+      {showSystemPrompt && (
+        <div className="px-4 py-3 border-b border-border bg-surface">
+          <label className="block text-xs font-semibold text-text-secondary mb-1">System Prompt</label>
+          <textarea
+            value={systemPrompt}
+            onChange={(e) => setSystemPrompt(e.target.value)}
+            placeholder="Enter a system prompt to guide the LLM's behavior..."
+            className="input w-full text-sm"
+            rows={3}
+          />
+        </div>
+      )}
 
       {/* Active MCP Banner */}
       {activeProfile && (
@@ -848,10 +959,10 @@ ${evaluators}
                             {collapsedThinking[idx] ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
                             <Brain size={14} />
                             <span>Thinking</span>
-                            <span className="text-white/40 font-normal">({message.thinking.length.toLocaleString()} chars)</span>
+                            <span className="text-text-disabled font-normal">({message.thinking.length.toLocaleString()} chars)</span>
                           </button>
                           {!collapsedThinking[idx] && (
-                            <div className="bg-purple-900/20 border border-purple-500/30 rounded-lg p-3 text-sm text-white/80 max-h-64 overflow-y-auto">
+                            <div className="bg-purple-100 dark:bg-purple-900/20 border border-purple-300 dark:border-purple-500/30 rounded-lg p-3 text-sm text-text-secondary max-h-64 overflow-y-auto">
                               <div className="whitespace-pre-wrap font-mono text-xs leading-relaxed">
                                 {message.thinking}
                               </div>
@@ -861,19 +972,19 @@ ${evaluators}
                       )}
 
                       {message.tool_calls && message.tool_calls.length > 0 && (
-                        <div className="mb-3 p-2 bg-primary/10 border border-primary/30 rounded-lg text-xs text-white/70">
+                        <div className="mb-3 p-2 bg-primary/10 border border-primary/30 rounded-lg text-xs text-text-secondary">
                           <span className="font-semibold text-primary-light">Note:</span> The LLM's interpretation may be inaccurate.
                           For actual tool results, see "Raw Tool Output" in the tool calls section below.
                         </div>
                       )}
-                      <div className="prose prose-invert prose-sm max-w-none leading-relaxed prose-p:my-2 prose-pre:bg-black/50 prose-pre:border prose-pre:border-white/10 prose-code:text-primary-light prose-a:text-primary-light prose-a:no-underline hover:prose-a:underline prose-strong:text-white prose-headings:text-white">
+                      <div className="prose dark:prose-invert prose-sm max-w-none leading-relaxed prose-p:my-2 prose-pre:bg-background-subtle prose-pre:border prose-pre:border-border prose-code:text-primary-light prose-a:text-primary-light prose-a:no-underline hover:prose-a:underline prose-strong:text-text-primary prose-headings:text-text-primary">
                         <ReactMarkdown
                           remarkPlugins={[remarkGfm]}
                           components={{
                             // Custom code block styling
                             code({node, inline, className, children, ...props}) {
                               return inline ? (
-                                <code className="bg-black/50 px-1.5 py-0.5 rounded text-primary-light" {...props}>
+                                <code className="bg-background-subtle px-1.5 py-0.5 rounded text-primary-light" {...props}>
                                   {children}
                                 </code>
                               ) : (
@@ -900,12 +1011,37 @@ ${evaluators}
                       </div>
                     </>
                   ) : (
-                    <div className="whitespace-pre-wrap leading-relaxed">{message.content}</div>
+                    editingMessageIdx === idx ? (
+                      <div className="space-y-2">
+                        <textarea
+                          value={editingText}
+                          onChange={(e) => setEditingText(e.target.value)}
+                          className="w-full bg-white/10 rounded p-2 text-sm resize-none"
+                          rows={3}
+                          autoFocus
+                        />
+                        <div className="flex gap-2">
+                          <button onClick={() => editAndResend(idx)} className="text-xs bg-white/20 hover:bg-white/30 px-2 py-1 rounded">Send</button>
+                          <button onClick={() => setEditingMessageIdx(null)} className="text-xs bg-white/10 hover:bg-white/20 px-2 py-1 rounded">Cancel</button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="whitespace-pre-wrap leading-relaxed group/msg">
+                        {message.content}
+                        <button
+                          onClick={(e) => { e.stopPropagation(); setEditingMessageIdx(idx); setEditingText(message.content) }}
+                          className="ml-2 inline-flex opacity-0 group-hover/msg:opacity-100 transition-opacity p-0.5 rounded hover:bg-white/20"
+                          title="Edit message"
+                        >
+                          <Edit3 size={12} />
+                        </button>
+                      </div>
+                    )
                   )}
 
                   {/* Eval and Test Actions for Assistant Messages */}
                   {message.role === 'assistant' && !message.error && (
-                    <div className="mt-4 pt-4 border-t border-white/10 flex gap-2">
+                    <div className="mt-4 pt-4 border-t border-border flex gap-2">
                       <button
                         onClick={() => runEval(idx)}
                         disabled={runningEval === idx}
@@ -928,32 +1064,32 @@ ${evaluators}
 
                   {/* Display Eval Results */}
                   {evalResults[idx] && (
-                    <div className="mt-4 pt-4 border-t border-white/10">
+                    <div className="mt-4 pt-4 border-t border-border">
                       <div className="flex items-center gap-2 mb-3">
                         <CheckCircle size={16} className={evalResults[idx].passed ? 'text-success' : 'text-error'} />
                         <span className="font-semibold text-sm">
                           Eval: {evalResults[idx].passed ? 'PASSED' : 'FAILED'}
                         </span>
-                        <span className="text-xs text-white/60">
+                        <span className="text-xs text-text-tertiary">
                           Score: {evalResults[idx].score?.toFixed(2) || 'N/A'}
                         </span>
                       </div>
                       {evalResults[idx].reason && (
-                        <p className="text-xs text-white/70 leading-relaxed mb-3">
+                        <p className="text-xs text-text-secondary leading-relaxed mb-3">
                           {evalResults[idx].reason}
                         </p>
                       )}
 
                       {/* Tool Calls Summary */}
                       {message.tool_calls && message.tool_calls.length > 0 && (
-                        <div className="mb-3 bg-black/30 rounded-lg p-3 border border-white/10">
-                          <div className="text-xs text-white/60 mb-2 flex items-center gap-2">
+                        <div className="mb-3 bg-background-subtle rounded-lg p-3 border border-border">
+                          <div className="text-xs text-text-tertiary mb-2 flex items-center gap-2">
                             <Wrench size={12} />
                             <span className="font-medium">Tool Calls ({message.tool_calls.length})</span>
                           </div>
                           <div className="space-y-2">
                             {message.tool_calls.map((call, callIdx) => (
-                              <div key={callIdx} className="bg-black/20 rounded p-2">
+                              <div key={callIdx} className="bg-surface-hover rounded p-2">
                                 <div className="flex items-center gap-2 mb-1">
                                   <span className="font-mono text-[11px] text-primary-light font-semibold">
                                     {call.name}
@@ -964,12 +1100,12 @@ ${evaluators}
                                 </div>
                                 {call.arguments && Object.keys(call.arguments).length > 0 && (
                                   <div className="mt-1">
-                                    <div className="text-[10px] text-white/50 mb-1">Parameters:</div>
+                                    <div className="text-[10px] text-text-disabled mb-1">Parameters:</div>
                                     <div className="space-y-1">
                                       {Object.entries(call.arguments).map(([key, value]) => (
                                         <div key={key} className="flex items-start gap-2 text-[11px]">
-                                          <span className="text-white/60 font-medium min-w-[80px]">{key}:</span>
-                                          <span className="text-white/80 font-mono flex-1 break-all">
+                                          <span className="text-text-tertiary font-medium min-w-[80px]">{key}:</span>
+                                          <span className="text-text-secondary font-mono flex-1 break-all">
                                             {typeof value === 'object' ? JSON.stringify(value) : String(value)}
                                           </span>
                                         </div>
@@ -987,18 +1123,18 @@ ${evaluators}
                       {evalResults[idx].evaluations && evalResults[idx].evaluations.length > 0 && (
                         <div className="space-y-2 mt-3">
                           {evalResults[idx].evaluations.map((evalItem, evalIdx) => (
-                            <div key={evalIdx} className="bg-black/20 rounded-lg p-2.5 border border-white/10">
+                            <div key={evalIdx} className="bg-surface-hover rounded-lg p-2.5 border border-border">
                               <div className="flex items-start gap-2">
                                 <CheckCircle size={14} className={evalItem.passed ? 'text-success mt-0.5' : 'text-error mt-0.5'} />
                                 <div className="flex-1 min-w-0">
                                   <div className="flex items-center gap-2 mb-1">
-                                    <span className="text-xs font-medium text-white/90">{evalItem.evaluator || evalItem.name || 'Unknown Evaluator'}</span>
-                                    <span className="text-[10px] text-white/50">
+                                    <span className="text-xs font-medium text-text-primary">{evalItem.evaluator || evalItem.name || 'Unknown Evaluator'}</span>
+                                    <span className="text-[10px] text-text-disabled">
                                       {evalItem.passed ? '✓' : '✗'} Score: {evalItem.score?.toFixed(2)}
                                     </span>
                                   </div>
                                   {evalItem.reason && (
-                                    <p className="text-[11px] text-white/70 leading-relaxed">
+                                    <p className="text-[11px] text-text-secondary leading-relaxed">
                                       {evalItem.reason}
                                     </p>
                                   )}
@@ -1007,7 +1143,7 @@ ${evaluators}
                                     <div className="mt-2 bg-error/10 border border-error/30 rounded p-2">
                                       <div className="text-[10px] font-semibold text-error-light mb-1">Error Details:</div>
                                       {evalItem.details.errors.map((err, errIdx) => (
-                                        <div key={errIdx} className="text-[10px] text-white/80 mb-1">
+                                        <div key={errIdx} className="text-[10px] text-text-secondary mb-1">
                                           <span className="font-medium">Tool {err.tool}:</span> {err.error}
                                         </div>
                                       ))}
@@ -1035,7 +1171,7 @@ ${evaluators}
                     const hasMultipleTurns = turnNumbers.length > 1
 
                     return (
-                    <div className="mt-3 pt-3 border-t border-white/10">
+                    <div className="mt-3 pt-3 border-t border-border">
                       <button
                         onClick={() => setCollapsedToolCalls(prev => ({ ...prev, [idx]: !prev[idx] }))}
                         className="flex items-center gap-2 text-xs font-medium text-text-secondary hover:text-text-primary transition-colors"
@@ -1052,23 +1188,23 @@ ${evaluators}
                               <div key={turnNum}>
                                 {hasMultipleTurns && (
                                   <div className="flex items-center gap-2 mb-2">
-                                    <div className="h-px flex-1 bg-white/10" />
-                                    <span className="text-[10px] font-medium text-white/50 uppercase tracking-wider">
+                                    <div className="h-px flex-1 bg-border" />
+                                    <span className="text-[10px] font-medium text-text-disabled uppercase tracking-wider">
                                       Turn {turnNum}: {turnCalls.length} tool{turnCalls.length !== 1 ? 's' : ''}
                                     </span>
-                                    <div className="h-px flex-1 bg-white/10" />
+                                    <div className="h-px flex-1 bg-border" />
                                   </div>
                                 )}
                                 {turnCalls.map((call, callIdx) => (
                           <div
                             key={`${turnNum}-${callIdx}`}
-                            className="bg-black/20 rounded-lg p-3 border border-white/10"
+                            className="bg-surface-hover rounded-lg p-3 border border-border"
                           >
                             <div className="flex items-baseline gap-2 mb-2">
                               <span className="font-mono font-semibold text-primary-light text-sm">
                                 {call.name}
                               </span>
-                              <span className="text-xs text-white/40">
+                              <span className="text-xs text-text-disabled">
                                 ({Object.keys(call.arguments || {}).length} params)
                               </span>
                             </div>
@@ -1076,11 +1212,11 @@ ${evaluators}
                             {/* Arguments - shown as collapsible object */}
                             {call.arguments && Object.keys(call.arguments).length > 0 && (
                               <div className="mb-2">
-                                <div className="text-xs text-white/60 mb-1">Arguments:</div>
-                                <div className="bg-black/30 rounded p-2">
+                                <div className="text-xs text-text-tertiary mb-1">Arguments:</div>
+                                <div className="bg-background-subtle rounded p-2">
                                   <ReactJson
                                     src={call.arguments}
-                                    theme="monokai"
+                                    theme={jsonTheme}
                                     collapsed={1}
                                     displayDataTypes={false}
                                     displayObjectSize={true}
@@ -1101,8 +1237,8 @@ ${evaluators}
                             {/* Result - shown as collapsible object (same as arguments) */}
                             {call.result && (
                               <div className="mt-3">
-                                <div className="text-xs text-white/60 mb-2 font-semibold">Raw Tool Output:</div>
-                                <div className="bg-black/40 rounded-lg p-3 border border-white/10 overflow-x-auto">
+                                <div className="text-xs text-text-tertiary mb-2 font-semibold">Raw Tool Output:</div>
+                                <div className="bg-background-subtle rounded-lg p-3 border border-border overflow-x-auto">
                                   <ReactJson
                                     src={(() => {
                                       // Parse JSON strings recursively
@@ -1133,7 +1269,7 @@ ${evaluators}
                                       }
                                       return parseJsonStrings(call.result)
                                     })()}
-                                    theme="monokai"
+                                    theme={jsonTheme}
                                     collapsed={1}
                                     displayDataTypes={false}
                                     displayObjectSize={true}
@@ -1155,7 +1291,7 @@ ${evaluators}
                             {call.error && (
                               <div className="mt-3 p-3 bg-error/10 border border-error/30 rounded-lg">
                                 <div className="text-xs font-semibold text-error mb-1">Error:</div>
-                                <div className="text-xs text-white/80 font-mono">{call.error}</div>
+                                <div className="text-xs text-text-secondary font-mono">{call.error}</div>
                               </div>
                             )}
                             </div>
@@ -1171,7 +1307,7 @@ ${evaluators}
 
                   {/* Metadata - inline */}
                   {message.token_usage && (
-                    <div className="mt-3 pt-3 border-t border-white/10 flex items-center gap-4 text-[10px] opacity-70">
+                    <div className="mt-3 pt-3 border-t border-border flex items-center gap-4 text-[10px] opacity-70">
                       {message.totalTurns > 1 && (
                         <span className="flex items-center gap-1">
                           <span className="font-medium">{message.totalTurns}</span> turns
@@ -1209,7 +1345,7 @@ ${evaluators}
 
       {/* Input */}
       <div className="p-3 border-t border-border bg-surface-elevated shadow-strong" role="form" aria-label="Chat input">
-        <div className="max-w-4xl mx-auto flex gap-4">
+        <div className="max-w-4xl mx-auto flex gap-2 md:gap-4">
           <div className="flex-1 relative">
             <textarea
               ref={textareaRef}
@@ -1234,7 +1370,7 @@ ${evaluators}
             aria-label={loading ? 'Sending message...' : 'Send message'}
           >
             {loading ? <Loader size={20} className="animate-spin" /> : <Send size={20} />}
-            <span>{loading ? 'Sending...' : 'Send'}</span>
+            <span className="hidden sm:inline">{loading ? 'Sending...' : 'Send'}</span>
           </button>
         </div>
       </div>

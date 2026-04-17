@@ -402,6 +402,45 @@ function TestManager({ selectedProfiles = [], selectedLlmProfile = null, llmProf
   const [bottomPanelTab, setBottomPanelTab] = useState('logs') // 'logs' or 'results'
   const [showFileTree, setShowFileTree] = useState(false)
   const [showTestWizard, setShowTestWizard] = useState(false)
+  const [bottomPanelHeight, setBottomPanelHeight] = useState(() => {
+    const saved = localStorage.getItem('testManagerPanelHeight')
+    return saved ? Number(saved) : 280
+  })
+  const isDraggingRef = useRef(false)
+  const containerRef = useRef(null)
+
+  // Drag handler for resizable bottom panel
+  const handleDragStart = useCallback((e) => {
+    e.preventDefault()
+    isDraggingRef.current = true
+    document.body.style.cursor = 'row-resize'
+    document.body.style.userSelect = 'none'
+
+    const handleMouseMove = (e) => {
+      if (!isDraggingRef.current || !containerRef.current) return
+      const containerRect = containerRef.current.getBoundingClientRect()
+      const newHeight = containerRect.bottom - e.clientY
+      const maxHeight = containerRect.height * 0.8
+      const clamped = Math.min(Math.max(newHeight, 120), maxHeight)
+      setBottomPanelHeight(clamped)
+    }
+
+    const handleMouseUp = () => {
+      isDraggingRef.current = false
+      document.body.style.cursor = ''
+      document.body.style.userSelect = ''
+      document.removeEventListener('mousemove', handleMouseMove)
+      document.removeEventListener('mouseup', handleMouseUp)
+      // Persist
+      setBottomPanelHeight(h => {
+        localStorage.setItem('testManagerPanelHeight', String(h))
+        return h
+      })
+    }
+
+    document.addEventListener('mousemove', handleMouseMove)
+    document.addEventListener('mouseup', handleMouseUp)
+  }, [])
 
   useEffect(() => {
     loadTestFiles()
@@ -1275,7 +1314,7 @@ tests:
             </div>
 
             {/* Split view: Editor + Bottom Panel */}
-            <div className="flex-1 flex flex-col overflow-hidden relative min-h-0">
+            <div ref={containerRef} className="flex-1 flex flex-col overflow-hidden relative min-h-0">
               {/* Editor area - always takes remaining space */}
               <div className="flex-1 overflow-hidden min-h-0 min-h-[250px]">
                 <Editor
@@ -1299,9 +1338,17 @@ tests:
                 />
               </div>
 
-              {/* Bottom Panel - Fixed height, doesn't affect editor */}
+              {/* Bottom Panel - Resizable via drag handle */}
               {(running || streamingLogs.length > 0 || testResults) && (
-                <div className="h-[280px] flex-shrink-0 border-t border-border flex flex-col bg-surface">
+                <>
+                {/* Drag handle */}
+                <div
+                  onMouseDown={handleDragStart}
+                  className="h-1.5 flex-shrink-0 cursor-row-resize bg-border hover:bg-primary/40 transition-colors group flex items-center justify-center"
+                >
+                  <div className="w-8 h-0.5 rounded-full bg-text-disabled group-hover:bg-primary transition-colors" />
+                </div>
+                <div className="flex-shrink-0 flex flex-col bg-surface" style={{ height: bottomPanelHeight }}>
                   {/* Tab Bar */}
                   <div className="flex items-center border-b border-border bg-surface-elevated px-2">
                     {/* Logs Tab */}
@@ -1434,6 +1481,7 @@ tests:
                     )}
                   </div>
                 </div>
+              </>
               )}
 
               {/* Visual Test Execution Status - floating indicator */}

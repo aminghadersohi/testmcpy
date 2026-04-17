@@ -222,6 +222,14 @@ class TokenValidEvaluator(BaseEvaluator):
 
         # Try to decode JWT (without signature verification)
         try:
+            # Decode header (first part) for alg/typ validation
+            header_part = parts[0]
+            header_padding = 4 - len(header_part) % 4
+            if header_padding != 4:
+                header_part += "=" * header_padding
+            header_bytes = base64.urlsafe_b64decode(header_part)
+            header = json.loads(header_bytes)
+
             # Decode payload (second part)
             # Add padding if needed
             payload_part = parts[1]
@@ -236,7 +244,25 @@ class TokenValidEvaluator(BaseEvaluator):
                 "token_length": len(token),
                 "has_payload": True,
                 "claims": list(payload.keys()),
+                "header": header,
             }
+
+            # Validate JWT header - check for alg: "none" attack (RFC 7519 Section 5)
+            alg = header.get("alg")
+            if alg is None:
+                return EvalResult(
+                    passed=False,
+                    score=0.5,
+                    reason="JWT header missing 'alg' claim (RFC 7519 Section 5)",
+                    details=details,
+                )
+            if alg.lower() == "none":
+                return EvalResult(
+                    passed=False,
+                    score=0.0,
+                    reason="JWT uses alg='none' - unsigned token is a security vulnerability",
+                    details=details,
+                )
 
             # Check expiration if requested
             if self.args.get("check_expiration", False):
@@ -586,6 +612,12 @@ class JWTClaimsValidEvaluator(BaseEvaluator):
             checks.append(f"sub={self.args['sub']}")
         if self.args.get("check_exp", True):
             checks.append("exp")
+        if self.args.get("check_nbf"):
+            checks.append("nbf")
+        if self.args.get("check_iat"):
+            checks.append("iat")
+        if self.args.get("check_header"):
+            checks.append("header")
         if self.args.get("custom_claims"):
             checks.append(f"custom({len(self.args['custom_claims'])})")
         return f"Validates JWT claims: {', '.join(checks) or 'structure only'}"
@@ -699,6 +731,67 @@ class JWTClaimsValidEvaluator(BaseEvaluator):
             else:
                 passed_claims.append("exp")
                 details["expires_in_seconds"] = int(exp - time.time())
+
+        # Check not-before (nbf) - RFC 7519 Section 4.1.5
+        check_nbf = self.args.get("check_nbf", False)
+        if check_nbf:
+            nbf = payload.get("nbf")
+            if nbf is None:
+                failed_claims.append("nbf: missing not-before claim")
+            elif not isinstance(nbf, (int, float)):
+                failed_claims.append(f"nbf: invalid type {type(nbf).__name__}")
+            elif nbf > time.time():
+                failed_claims.append(
+                    f"nbf: token not yet valid (nbf={int(nbf)}, now={int(time.time())})"
+                )
+            else:
+                passed_claims.append("nbf")
+
+        # Check issued-at (iat) - RFC 7519 Section 4.1.6
+        check_iat = self.args.get("check_iat", False)
+        if check_iat:
+            iat = payload.get("iat")
+            if iat is None:
+                failed_claims.append("iat: missing issued-at claim")
+            elif not isinstance(iat, (int, float)):
+                failed_claims.append(f"iat: invalid type {type(iat).__name__}")
+            elif iat > time.time():
+                failed_claims.append(
+                    f"iat: issued in the future (iat={int(iat)}, now={int(time.time())})"
+                )
+            else:
+                passed_claims.append("iat")
+                details["issued_at"] = int(iat)
+
+        # Check JWT header - RFC 7519 Section 5
+        check_header = self.args.get("check_header", False)
+        if check_header:
+            try:
+                parts = token.split(".")
+                header_part = parts[0]
+                header_padding = 4 - len(header_part) % 4
+                if header_padding != 4:
+                    header_part += "=" * header_padding
+                header_bytes = base64.urlsafe_b64decode(header_part)
+                header = json.loads(header_bytes)
+                details["header"] = header
+
+                alg = header.get("alg")
+                if alg is None:
+                    failed_claims.append("header.alg: missing algorithm claim")
+                elif alg.lower() == "none":
+                    failed_claims.append("header.alg: 'none' is a security vulnerability")
+                else:
+                    passed_claims.append("header.alg")
+
+                typ = header.get("typ")
+                if typ is not None:
+                    if typ.upper() == "JWT":
+                        passed_claims.append("header.typ")
+                    else:
+                        failed_claims.append(f"header.typ: expected 'JWT', got '{typ}'")
+            except (ValueError, json.JSONDecodeError) as e:
+                failed_claims.append(f"header: failed to decode - {e}")
 
         # Check custom claims
         custom_claims = self.args.get("custom_claims", {})

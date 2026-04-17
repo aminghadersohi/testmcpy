@@ -296,8 +296,8 @@ def run(
                         if "tests" in data:
                             for test_data in data["tests"]:
                                 test_cases.append(TestCase.from_dict(test_data))
-                        elif "prompt" in data:
-                            # Handle single test case files
+                        elif "prompt" in data or data.get("auth_only"):
+                            # Handle single test case files (including auth-only)
                             test_cases.append(TestCase.from_dict(data))
 
         # Apply suite-level provider override (suite YAML takes precedence over CLI args)
@@ -326,21 +326,32 @@ def run(
         if dry_run:
             console.print("[yellow]DRY RUN - Not executing tests[/yellow]")
             for i, test in enumerate(test_cases, 1):
-                console.print(f"{i}. {test.name}: {test.prompt[:50]}...")
+                if test.is_auth_only:
+                    auth_type = test.auth.get("type", "unknown") if test.auth else "unknown"
+                    console.print(f"{i}. {test.name}: [dim]auth-only ({auth_type} flow)[/dim]")
+                else:
+                    console.print(f"{i}. {test.name}: {test.prompt[:50]}...")
             return
 
         # Run tests with progress output
         results = []
-        await runner.initialize()
+        # Only initialize LLM provider if there are non-auth-only tests
+        has_non_auth_only = any(not tc.is_auth_only for tc in test_cases)
+        if has_non_auth_only:
+            await runner.initialize()
 
         for i, test_case in enumerate(test_cases, 1):
             # Show which test is running
             console.print(
                 f"\n[cyan]Running test {i}/{len(test_cases)}:[/cyan] [bold]{test_case.name}[/bold]"
             )
-            console.print(
-                f"  [dim]Prompt: {test_case.prompt[:80]}{'...' if len(test_case.prompt) > 80 else ''}[/dim]"
-            )
+            if test_case.is_auth_only:
+                auth_type = test_case.auth.get("type", "unknown") if test_case.auth else "unknown"
+                console.print(f"  [dim]Auth-only: {auth_type} flow[/dim]")
+            else:
+                console.print(
+                    f"  [dim]Prompt: {test_case.prompt[:80]}{'...' if len(test_case.prompt) > 80 else ''}[/dim]"
+                )
 
             # Run the test
             from rich.status import Status

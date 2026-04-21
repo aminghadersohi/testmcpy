@@ -119,6 +119,10 @@ function MCPExplorer({ selectedProfiles = [] }) {
     for (let i = 0; i < retries; i++) {
       try {
         const response = await fetch(url)
+        if (response.status === 401 || response.status === 403) {
+          setLoadingPhase('authenticating')
+          throw new Error(`HTTP ${response.status}`)
+        }
         if (!response.ok) throw new Error(`HTTP ${response.status}`)
         return response
       } catch (error) {
@@ -130,11 +134,20 @@ function MCPExplorer({ selectedProfiles = [] }) {
   }
 
   const [loadingPhase, setLoadingPhase] = useState('connecting')
+  const [loadingElapsed, setLoadingElapsed] = useState(0)
 
   const loadData = async () => {
     setLoading(true)
     setLoadingPhase('connecting')
+    setLoadingElapsed(0)
     setError(null)
+
+    // Tick elapsed time every second while loading
+    const startTime = Date.now()
+    const elapsedTimer = setInterval(() => {
+      setLoadingElapsed(Math.floor((Date.now() - startTime) / 1000))
+    }, 1000)
+
     try {
       // Only use the first selected profile for Explorer (single MCP at a time)
       const params = new URLSearchParams()
@@ -143,16 +156,11 @@ function MCPExplorer({ selectedProfiles = [] }) {
       }
       const queryString = params.toString() ? `?${params.toString()}` : ''
 
-      // Show auth hint after a short delay — if we're still loading after
-      // 3s, the server is probably waiting for an OAuth browser flow.
-      const authTimer = setTimeout(() => setLoadingPhase('authenticating'), 3000)
-
       const [toolsRes, resourcesRes, promptsRes] = await Promise.all([
         fetchWithRetry(`/api/mcp/tools${queryString}`),
         fetchWithRetry(`/api/mcp/resources${queryString}`),
         fetchWithRetry(`/api/mcp/prompts${queryString}`),
       ])
-      clearTimeout(authTimer)
 
       setLoadingPhase('loaded')
       setTools(await toolsRes.json())
@@ -162,6 +170,7 @@ function MCPExplorer({ selectedProfiles = [] }) {
       console.error('Failed to load MCP data:', err)
       setError(err.message || 'Failed to load MCP data')
     } finally {
+      clearInterval(elapsedTimer)
       setLoading(false)
     }
   }
@@ -548,17 +557,20 @@ function MCPExplorer({ selectedProfiles = [] }) {
     const phaseMessages = {
       connecting: 'Connecting to MCP server...',
       authenticating: 'Waiting for authentication — check your browser for an OAuth prompt',
-      loaded: 'Loading tools...',
+      loaded: 'Parsing response...',
     }
     return (
       <div className="h-full flex flex-col">
         <div className="p-4 border-b border-border bg-surface-elevated">
-          <h1 className="text-2xl font-bold">Explorer</h1>
+          <h1 className="text-xl md:text-2xl font-bold">Explorer</h1>
           <div className="flex items-center gap-2 mt-1">
             <LoadingSpinner size={16} />
-            <p className="text-text-secondary text-base">
+            <p className="text-text-secondary text-sm md:text-base">
               {phaseMessages[loadingPhase] || 'Loading MCP data...'}
             </p>
+            {loadingElapsed > 0 && loadingPhase !== 'authenticating' && (
+              <span className="text-xs text-text-disabled">{loadingElapsed}s</span>
+            )}
           </div>
           {loadingPhase === 'authenticating' && (
             <p className="text-xs text-text-tertiary mt-1">

@@ -297,11 +297,16 @@ async def handle_test_websocket(websocket: WebSocket):
                             )
                             continue
 
+                    # Get MCP URL from the selected profile's client, not the default config
+                    effective_mcp_url = config.get_mcp_url()
+                    if mcp_client and hasattr(mcp_client, "base_url") and mcp_client.base_url:
+                        effective_mcp_url = mcp_client.base_url
+
                     # Create runner with streaming log callback
                     runner = TestRunner(
                         model=effective_model,
                         provider=effective_provider,
-                        mcp_url=config.get_mcp_url(),
+                        mcp_url=effective_mcp_url,
                         mcp_client=mcp_client,
                         verbose=True,
                         hide_tool_output=False,

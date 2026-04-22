@@ -241,9 +241,7 @@ class TestCommandPalette:
         page.keyboard.press("Meta+k")
         page.wait_for_timeout(500)
         # Look for search input or palette overlay
-        page.locator(
-            "[role='dialog'], [class*='palette'], [class*='command'], [class*='modal']"
-        )
+        page.locator("[role='dialog'], [class*='palette'], [class*='command'], [class*='modal']")
         _screenshot(page, screenshots_dir, "CommandPalette", "opened")
         # Palette should appear (may not on all OS; check content changed)
         content = page.text_content("body") or ""
@@ -417,9 +415,7 @@ class TestChatUpgrade:
         page.goto(f"{server_url}/chat")
         page.wait_for_load_state("networkidle")
         content = page.text_content("body") or ""
-        any(
-            kw in content.lower() for kw in ["system prompt", "system message", "instructions"]
-        )
+        any(kw in content.lower() for kw in ["system prompt", "system message", "instructions"])
         _screenshot(page, screenshots_dir, "Chat", "system_prompt")
         _no_errors(content)
 

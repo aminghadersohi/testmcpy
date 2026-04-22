@@ -8,14 +8,12 @@ Story: SC-103111 — MCP client compatibility testing matrix
 """
 
 import pytest
-from fastapi import HTTPException
 from pydantic import ValidationError
 
 from testmcpy.server.routers.compatibility import (
     CompatibilityMatrixRequest,
     ToolTestResult,
 )
-
 
 # ── Request validation ───────────────────────────────────────────────────────
 

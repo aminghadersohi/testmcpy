@@ -241,7 +241,7 @@ class TestCommandPalette:
         page.keyboard.press("Meta+k")
         page.wait_for_timeout(500)
         # Look for search input or palette overlay
-        palette = page.locator(
+        page.locator(
             "[role='dialog'], [class*='palette'], [class*='command'], [class*='modal']"
         )
         _screenshot(page, screenshots_dir, "CommandPalette", "opened")
@@ -288,7 +288,7 @@ class TestThemeToggle:
         """Theme toggle button exists in the sidebar."""
         page.goto(f"{server_url}/")
         page.wait_for_load_state("networkidle")
-        theme_btn = page.locator(
+        page.locator(
             "button[title*='theme'], button[title*='Theme'], "
             "button:has-text('Light'), button:has-text('Dark'), "
             "[class*='theme']"
@@ -303,7 +303,7 @@ class TestThemeToggle:
         page.goto(f"{server_url}/")
         page.wait_for_load_state("networkidle")
         # Get initial background color
-        initial_bg = page.evaluate("window.getComputedStyle(document.body).backgroundColor")
+        page.evaluate("window.getComputedStyle(document.body).backgroundColor")
         # Find and click theme toggle (may be in collapsed sidebar, use force)
         theme_btn = page.locator(
             "button[title*='theme'], button[title*='Theme'], "
@@ -312,7 +312,7 @@ class TestThemeToggle:
         if theme_btn.count() > 0:
             theme_btn.first.dispatch_event("click")
             page.wait_for_timeout(500)
-            new_bg = page.evaluate("window.getComputedStyle(document.body).backgroundColor")
+            page.evaluate("window.getComputedStyle(document.body).backgroundColor")
             # Background should change (light <-> dark)
             _screenshot(page, screenshots_dir, "ThemeToggle", "toggled")
             content = page.text_content("body") or ""
@@ -379,7 +379,7 @@ class TestReportsOverhaul:
         """Reports page has filter/search controls."""
         page.goto(f"{server_url}/reports")
         page.wait_for_load_state("networkidle")
-        filters = page.locator(
+        page.locator(
             "input[placeholder*='search' i], input[placeholder*='filter' i], "
             "select, [class*='filter']"
         )
@@ -391,7 +391,7 @@ class TestReportsOverhaul:
         """Reports page has an export button."""
         page.goto(f"{server_url}/reports")
         page.wait_for_load_state("networkidle")
-        export_btn = page.locator(
+        page.locator(
             "button:has-text('Export'), button:has-text('Download'), button:has-text('CSV')"
         )
         _screenshot(page, screenshots_dir, "Reports", "export_btn")
@@ -417,7 +417,7 @@ class TestChatUpgrade:
         page.goto(f"{server_url}/chat")
         page.wait_for_load_state("networkidle")
         content = page.text_content("body") or ""
-        has_system = any(
+        any(
             kw in content.lower() for kw in ["system prompt", "system message", "instructions"]
         )
         _screenshot(page, screenshots_dir, "Chat", "system_prompt")
@@ -427,7 +427,7 @@ class TestChatUpgrade:
         """Chat page has export/download capability."""
         page.goto(f"{server_url}/chat")
         page.wait_for_load_state("networkidle")
-        export_btn = page.locator(
+        page.locator(
             "button:has-text('Export'), button:has-text('Download'), "
             "button[title*='export' i], button[title*='download' i]"
         )
@@ -545,7 +545,7 @@ class TestNotifications:
         page.goto(f"{server_url}/")
         page.wait_for_load_state("networkidle")
         # Trigger a notification by calling the JS context function
-        has_provider = page.evaluate("""() => {
+        page.evaluate("""() => {
             // Check if React context is available (indirect check)
             return document.querySelector('[class*="toast"], [class*="notification"], [role="alert"]') !== null
                 || true;  // Provider is loaded even if no toasts visible
@@ -558,7 +558,7 @@ class TestNotifications:
         """No notification toasts should be visible on fresh page load."""
         page.goto(f"{server_url}/")
         page.wait_for_load_state("networkidle")
-        toasts = page.locator("[class*='toast'], [role='alert']")
+        page.locator("[class*='toast'], [role='alert']")
         # On fresh load, there should be 0 or very few toasts
         _screenshot(page, screenshots_dir, "Notifications", "clean_load")
         content = page.text_content("body") or ""

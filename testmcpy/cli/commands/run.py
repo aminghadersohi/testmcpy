@@ -398,6 +398,11 @@ def run(
                     f"[yellow]Suite-level provider config:[/yellow] {suite_provider_config}"
                 )
 
+        def cli_log_callback(msg: str) -> None:
+            """Print runner/provider log messages to console in real-time."""
+            if verbose:
+                console.print(f"  [dim]{msg}[/dim]")
+
         runner = TestRunner(
             model=effective_model,
             provider=effective_provider,
@@ -406,6 +411,7 @@ def run(
             verbose=verbose,
             hide_tool_output=hide_tool_output,
             provider_config=suite_provider_config,
+            log_callback=cli_log_callback if verbose else None,
         )
 
         console.print(f"\n[bold]Found {len(test_cases)} test case(s)[/bold]")

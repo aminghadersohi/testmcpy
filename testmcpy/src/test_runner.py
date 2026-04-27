@@ -261,7 +261,8 @@ class TestRunner:
 
     def _log(self, message: str, force: bool = False):
         """Log a message to console and optionally via callback."""
-        if self.verbose or force:
+        if (self.verbose or force) and not self.log_callback:
+            # Only print directly if there's no callback (callback handles display)
             print(message)
         if self.log_callback:
             # Call the callback (might be async, so we handle both)

@@ -504,8 +504,9 @@ class TestRunner:
                 for tool in mcp_tools
             ]
 
+            # Always notify callback of test start (for spinner updates)
+            self._log(f"Running test: {test_case.name}")
             if self.verbose:
-                self._log(f"Running test: {test_case.name}")
                 self._log(f"Prompt: {test_case.prompt}")
                 self._log(f"Available tools: {len(formatted_tools)}")
                 self._log(f"Provider: {self.provider}, Model: {self.model}")
@@ -532,7 +533,12 @@ class TestRunner:
                 **llm_kwargs,
             )
 
-            # Show requested tool calls before executing them
+            # Notify callback of tool calls (for spinner updates even when not verbose)
+            if llm_result.tool_calls:
+                for tc in llm_result.tool_calls:
+                    self._log(f"  Tool call: {tc.get('name', 'unknown')}")
+
+            # Show detailed tool call args in verbose mode
             if self.verbose and not self.hide_tool_output and llm_result.tool_calls:
                 self._log(f"  LLM requested {len(llm_result.tool_calls)} tool call(s):")
                 for i, tool_call in enumerate(llm_result.tool_calls, 1):
@@ -589,6 +595,7 @@ class TestRunner:
             }
 
             # Run evaluators
+            self._log("  Evaluating results...")
             evaluations = []
             all_passed = True
             total_score = 0.0

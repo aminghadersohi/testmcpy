@@ -440,11 +440,35 @@ def run(
                     f"  [dim]Prompt: {test_case.prompt[:80]}{'...' if len(test_case.prompt) > 80 else ''}[/dim]"
                 )
 
-            # Run the test
-            from rich.status import Status
-
-            with Status("[yellow]Executing test...[/yellow]", console=console):
+            # Run the test — show live progress instead of static spinner
+            if verbose:
+                # In verbose mode, let _log() print directly (no spinner overlay)
                 result = await runner._run_test_with_retry(test_case)
+            else:
+                # In non-verbose mode, update spinner with runner progress
+                from rich.status import Status
+
+                _status = Status("[yellow]Executing test...[/yellow]", console=console)
+                _status.start()
+
+                def update_status(msg: str, _s: Status = _status) -> None:
+                    msg_lower = msg.lower()
+                    if "tool call" in msg_lower or "tool_call" in msg_lower:
+                        _s.update(f"[yellow]Tool call: {msg.split('.')[-1].strip()[:60]}[/yellow]")
+                    elif "running test" in msg_lower:
+                        _s.update("[yellow]Running...[/yellow]")
+                    elif "executing" in msg_lower:
+                        _s.update("[yellow]Executing tool calls...[/yellow]")
+                    elif "evaluating" in msg_lower or "evaluator" in msg_lower:
+                        _s.update("[yellow]Evaluating results...[/yellow]")
+
+                old_callback = runner.log_callback
+                runner.log_callback = update_status
+                try:
+                    result = await runner._run_test_with_retry(test_case)
+                finally:
+                    runner.log_callback = old_callback
+                    _status.stop()
 
             results.append(result)
 

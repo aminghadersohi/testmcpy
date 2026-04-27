@@ -334,6 +334,33 @@ testmcpy run tests/ --model claude-haiku-4-5
 
 **Common options:** `--profile`, `--llm-profile`, `--model`, `--provider`, `--timeout`, `--verbose`, `--output`
 
+### Inline MCP Auth (No Config File Needed)
+
+Pass MCP auth credentials directly on the command line, bypassing `.mcp_services.yaml`:
+
+```bash
+# JWT auth (e.g., Preset workspaces)
+testmcpy run tests/ \
+  --mcp-url https://workspace.example.com/mcp \
+  --auth-type jwt \
+  --jwt-url https://auth.example.com/v1/auth/ \
+  --jwt-token $MCP_JWT_TOKEN \
+  --jwt-secret $MCP_JWT_SECRET
+
+# Bearer token auth
+testmcpy run tests/ \
+  --mcp-url https://workspace.example.com/mcp \
+  --auth-type bearer \
+  --auth-token $MCP_BEARER_TOKEN
+
+# No auth (public MCP endpoint)
+testmcpy run tests/ \
+  --mcp-url https://workspace.example.com/mcp \
+  --auth-type none
+```
+
+Environment variables are also supported: `MCP_AUTH_TOKEN`, `MCP_JWT_URL`, `MCP_JWT_TOKEN`, `MCP_JWT_SECRET`.
+
 ## Web Interface
 
 Optional React-based UI with 15+ pages for visual testing and analytics:

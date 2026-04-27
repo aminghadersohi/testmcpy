@@ -305,6 +305,7 @@ def run(
             from testmcpy.src.mcp_client import MCPClient
 
             mcp_client = MCPClient(effective_mcp_url, auth=inline_auth)
+            await mcp_client.initialize()
         else:
             effective_profile = profile
             if not effective_profile:

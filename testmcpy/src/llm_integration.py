@@ -1798,6 +1798,20 @@ class ClaudeSDKProvider(LLMProvider):
                 f"{len(tool_calls)} tool calls, {len(mcp_tool_results)} results"
             )
 
+            # Estimate cost from tokens if SDK didn't provide it (subscription billing)
+            if cost == 0.0 and token_usage:
+                from .model_registry import get_model
+
+                model_info = get_model(self.model)
+                if model_info:
+                    cost = (
+                        token_usage.get("prompt", 0) * model_info.input_price_per_1m / 1_000_000
+                        + token_usage.get("completion", 0)
+                        * model_info.output_price_per_1m
+                        / 1_000_000
+                    )
+                    log(f"[ClaudeSDK] Estimated cost from token counts: ${cost:.4f}")
+
             return LLMResult(
                 response=response_text,
                 tool_calls=tool_calls,

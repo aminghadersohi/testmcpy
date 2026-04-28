@@ -609,12 +609,38 @@ function Reports() {
   const [copiedLink, setCopiedLink] = useState(false)
   const [filterStatus, setFilterStatus] = useState('all') // all, pass, fail
   const [filterSearch, setFilterSearch] = useState('')
+  // Server-side filters
+  const [filterModel, setFilterModel] = useState('')
+  const [filterProvider, setFilterProvider] = useState('')
+  const [filterTestFile, setFilterTestFile] = useState('')
+  const [filterOptions, setFilterOptions] = useState({ models: [], providers: [], test_files: [] })
+  // Comparison
+  const [compareMode, setCompareMode] = useState(false)
+  const [selectedForCompare, setSelectedForCompare] = useState(new Set())
+  const [compareData, setCompareData] = useState(null)
+  const [showCompare, setShowCompare] = useState(false)
   const autoRefreshRef = useRef(null)
   const deepLinkProcessed = useRef(false)
 
+  const loadFilterOptions = useCallback(async () => {
+    try {
+      const res = await fetch('/api/results/filters')
+      if (res.ok) {
+        const data = await res.json()
+        setFilterOptions(data)
+      }
+    } catch (error) {
+      console.error('Failed to load filter options:', error)
+    }
+  }, [])
+
   const loadTestRuns = useCallback(async () => {
     try {
-      const res = await fetch('/api/results/list?limit=50')
+      const params = new URLSearchParams({ limit: '100' })
+      if (filterModel) params.set('model', filterModel)
+      if (filterProvider) params.set('provider', filterProvider)
+      if (filterTestFile) params.set('test_file', filterTestFile)
+      const res = await fetch(`/api/results/list?${params}`)
       if (res.ok) {
         const data = await res.json()
         setTestRuns(data.runs || [])
@@ -622,7 +648,7 @@ function Reports() {
     } catch (error) {
       console.error('Failed to load test runs:', error)
     }
-  }, [])
+  }, [filterModel, filterProvider, filterTestFile])
 
   const loadSmokeReports = useCallback(async () => {
     try {
@@ -638,14 +664,53 @@ function Reports() {
 
   const loadAllReports = useCallback(async (showSpinner = true) => {
     if (showSpinner) setLoading(true)
-    await Promise.all([loadTestRuns(), loadSmokeReports()])
+    await Promise.all([loadTestRuns(), loadSmokeReports(), loadFilterOptions()])
     if (showSpinner) setLoading(false)
-  }, [loadTestRuns, loadSmokeReports])
+  }, [loadTestRuns, loadSmokeReports, loadFilterOptions])
 
-  // Initial load
+  // Initial load — run once
+  const initialLoadDone = useRef(false)
   useEffect(() => {
-    loadAllReports()
+    if (!initialLoadDone.current) {
+      initialLoadDone.current = true
+      loadAllReports()
+    }
   }, [loadAllReports])
+
+  // Reload only test runs when filters change (skip smoke/filters refetch)
+  const filtersInitialized = useRef(false)
+  useEffect(() => {
+    if (!filtersInitialized.current) {
+      filtersInitialized.current = true
+      return  // skip first render — initial load handles it
+    }
+    loadTestRuns()
+  }, [filterModel, filterProvider, filterTestFile]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Comparison logic
+  const toggleCompareSelection = (runId) => {
+    setSelectedForCompare(prev => {
+      const next = new Set(prev)
+      if (next.has(runId)) next.delete(runId)
+      else next.add(runId)
+      return next
+    })
+  }
+
+  const loadComparison = async () => {
+    if (selectedForCompare.size < 2) return
+    try {
+      const ids = Array.from(selectedForCompare).join(',')
+      const res = await fetch(`/api/results/compare?run_ids=${ids}`)
+      if (res.ok) {
+        const data = await res.json()
+        setCompareData(data)
+        setShowCompare(true)
+      }
+    } catch (error) {
+      console.error('Failed to load comparison:', error)
+    }
+  }
 
   // Deep-link: load run from URL params after data loads
   useEffect(() => {
@@ -794,9 +859,18 @@ function Reports() {
             ? 'bg-primary/10 border-l-2 border-l-primary'
             : 'hover:bg-surface border-l-2 border-l-transparent'
         }`}
-        onClick={() => selectRun(run.run_id, 'tests')}
+        onClick={() => compareMode ? toggleCompareSelection(run.run_id) : selectRun(run.run_id, 'tests')}
       >
         <div className="flex items-start justify-between gap-2">
+          {compareMode && (
+            <input
+              type="checkbox"
+              checked={selectedForCompare.has(run.run_id)}
+              onChange={() => toggleCompareSelection(run.run_id)}
+              onClick={(e) => e.stopPropagation()}
+              className="mt-1 flex-shrink-0"
+            />
+          )}
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2">
               {run.failed === 0 ? (
@@ -1099,9 +1173,39 @@ function Reports() {
             type="text"
             value={filterSearch}
             onChange={(e) => setFilterSearch(e.target.value)}
-            placeholder="Filter by name or model..."
-            className="input text-xs py-1.5 px-3 w-48"
+            placeholder="Search..."
+            className="input text-xs py-1.5 px-3 w-36"
           />
+          {filterOptions.models.length > 1 && (
+            <select
+              value={filterModel}
+              onChange={(e) => setFilterModel(e.target.value)}
+              className="input text-xs py-1.5 px-2"
+            >
+              <option value="">All Models</option>
+              {filterOptions.models.map(m => <option key={m} value={m}>{m}</option>)}
+            </select>
+          )}
+          {filterOptions.providers.length > 1 && (
+            <select
+              value={filterProvider}
+              onChange={(e) => setFilterProvider(e.target.value)}
+              className="input text-xs py-1.5 px-2"
+            >
+              <option value="">All Providers</option>
+              {filterOptions.providers.map(p => <option key={p} value={p}>{p}</option>)}
+            </select>
+          )}
+          {filterOptions.test_files.length > 1 && (
+            <select
+              value={filterTestFile}
+              onChange={(e) => setFilterTestFile(e.target.value)}
+              className="input text-xs py-1.5 px-2"
+            >
+              <option value="">All Test Files</option>
+              {filterOptions.test_files.map(f => <option key={f} value={f}>{f.split('/').pop()}</option>)}
+            </select>
+          )}
           <div className="flex items-center gap-1">
             {['all', 'pass', 'fail'].map(status => (
               <button
@@ -1117,6 +1221,39 @@ function Reports() {
               </button>
             ))}
           </div>
+          <div className="flex items-center gap-1 ml-auto">
+            <button
+              onClick={() => {
+                setCompareMode(!compareMode)
+                if (compareMode) {
+                  setSelectedForCompare(new Set())
+                  setShowCompare(false)
+                  setCompareData(null)
+                }
+              }}
+              className={`px-2.5 py-1 rounded text-xs font-medium transition-colors ${
+                compareMode ? 'bg-primary/20 text-primary' : 'bg-surface hover:bg-surface-hover text-text-secondary'
+              }`}
+            >
+              {compareMode ? 'Cancel Compare' : 'Compare'}
+            </button>
+            {compareMode && selectedForCompare.size >= 2 && (
+              <button
+                onClick={loadComparison}
+                className="px-2.5 py-1 rounded text-xs font-medium bg-primary text-white"
+              >
+                Compare {selectedForCompare.size} runs
+              </button>
+            )}
+          </div>
+          {(filterModel || filterProvider || filterTestFile) && (
+            <button
+              onClick={() => { setFilterModel(''); setFilterProvider(''); setFilterTestFile('') }}
+              className="text-xs text-text-tertiary hover:text-text-secondary"
+            >
+              Clear filters
+            </button>
+          )}
         </div>
       </div>
 
@@ -1235,6 +1372,61 @@ function Reports() {
           )}
         </div>
       </div>
+      {/* Comparison Modal */}
+      {showCompare && compareData && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+          <div className="bg-surface-elevated rounded-lg border border-border max-w-4xl w-full max-h-[80vh] overflow-auto shadow-lg">
+            <div className="p-4 border-b border-border flex items-center justify-between">
+              <h3 className="font-semibold text-text-primary">Run Comparison</h3>
+              <button
+                onClick={() => { setShowCompare(false); setCompareData(null) }}
+                className="text-text-tertiary hover:text-text-primary"
+              >
+                &times;
+              </button>
+            </div>
+            <div className="p-4 overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-border">
+                    <th className="text-left py-2 px-3 text-text-secondary font-medium">Test</th>
+                    {(compareData.runs || []).map(run => (
+                      <th key={run.run_id} className="text-center py-2 px-3 text-text-secondary font-medium">
+                        <div className="text-xs">{run.model}</div>
+                        <div className="text-xs text-text-disabled">{run.provider}</div>
+                        <div className={`text-xs mt-1 px-1.5 py-0.5 rounded inline-block ${getPassRateBgColor(run.pass_rate * 100)}`}>
+                          {(run.pass_rate * 100).toFixed(0)}%
+                        </div>
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {Object.entries(compareData.tests || {}).map(([testName, runs]) => (
+                    <tr key={testName} className="border-b border-border/50">
+                      <td className="py-2 px-3 font-mono text-xs text-text-primary">{testName}</td>
+                      {(compareData.runs || []).map(run => {
+                        const result = runs[run.run_id]
+                        return (
+                          <td key={run.run_id} className="text-center py-2 px-3">
+                            {result ? (
+                              <span className={`text-xs px-2 py-0.5 rounded ${result.passed ? 'bg-success/20 text-success' : 'bg-error/20 text-error'}`}>
+                                {result.passed ? 'PASS' : 'FAIL'}
+                              </span>
+                            ) : (
+                              <span className="text-xs text-text-disabled">-</span>
+                            )}
+                          </td>
+                        )
+                      })}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

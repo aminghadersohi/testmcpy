@@ -87,6 +87,7 @@ def save_test_run_to_file(data: dict[str, Any]) -> dict[str, Any]:
         provider=provider,
         started_at=started_at,
         mcp_profile_id=data.get("mcp_profile"),
+        metadata=data.get("metadata"),
     )
 
     # Save individual question results
@@ -120,13 +121,33 @@ async def save_test_run(data: dict[str, Any]) -> dict[str, Any]:
 
 
 @router.get("/list")
-async def list_test_runs(test_file: str | None = None, limit: int = 50) -> dict[str, Any]:
+async def list_test_runs(
+    test_file: str | None = None,
+    model: str | None = None,
+    provider: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    sort_by: str = "started_at",
+    sort_order: str = "desc",
+    limit: int = 50,
+    offset: int = 0,
+) -> dict[str, Any]:
     """
-    List all test runs, optionally filtered by test file.
+    List all test runs with filtering, sorting, and pagination.
     Returns metadata only (not full results).
     """
     storage = get_storage()
-    runs_data = storage.list_runs(test_id=test_file, limit=limit)
+    runs_data = storage.list_runs(
+        test_id=test_file,
+        model=model,
+        provider=provider,
+        date_from=date_from,
+        date_to=date_to,
+        sort_by=sort_by,
+        sort_order=sort_order,
+        limit=limit,
+        offset=offset,
+    )
 
     runs = []
     for run in runs_data:
@@ -143,13 +164,77 @@ async def list_test_runs(test_file: str | None = None, limit: int = 50) -> dict[
                 "total_tests": run["total_questions"],
                 "passed": run["passed_questions"],
                 "failed": run["total_questions"] - run["passed_questions"],
-                "total_cost": 0.0,
-                "total_tokens": 0,
-                "total_duration": 0.0,
+                "total_cost": run.get("total_cost", 0.0),
+                "total_tokens": run.get("total_tokens", 0),
+                "total_duration": round((run.get("total_duration_ms", 0) or 0) / 1000, 2),
+                "session_id": run.get("metadata", {}).get("session_id"),
             }
         )
 
-    return {"runs": runs, "total": len(runs)}
+    # total reflects page size; a full count query would be needed for true pagination
+    # For now, signal "there may be more" if we hit the limit
+    return {"runs": runs, "total": len(runs), "has_more": len(runs) >= limit}
+
+
+@router.get("/filters")
+async def get_filter_options() -> dict[str, Any]:
+    """Get distinct values for filter dropdowns (models, providers, test files)."""
+    storage = get_storage()
+    return storage.get_filter_options()
+
+
+@router.get("/sessions")
+async def list_sessions(limit: int = 20, run_limit: int = 200) -> dict[str, Any]:
+    """List runs grouped by session_id, with aggregate stats per session.
+    Only examines the most recent `run_limit` runs to keep the query fast."""
+    storage = get_storage()
+    all_runs = storage.list_runs(limit=run_limit)
+
+    # Group by session_id
+    sessions: dict[str, list] = {}
+    ungrouped = []
+    for run in all_runs:
+        sid = run.get("metadata", {}).get("session_id")
+        if sid:
+            sessions.setdefault(sid, []).append(run)
+        else:
+            ungrouped.append(run)
+
+    # Build session summaries
+    result = []
+    for sid, runs in sorted(
+        sessions.items(), key=lambda x: x[1][0].get("started_at", ""), reverse=True
+    ):
+        total_q = sum(r["total_questions"] for r in runs)
+        passed_q = sum(r["passed_questions"] for r in runs)
+        result.append(
+            {
+                "session_id": sid,
+                "run_count": len(runs),
+                "models": list({r["model"] for r in runs}),
+                "providers": list({r["provider"] for r in runs}),
+                "test_files": [r["test_id"] for r in runs],
+                "started_at": min(r["started_at"] for r in runs if r.get("started_at")),
+                "total_tests": total_q,
+                "passed": passed_q,
+                "failed": total_q - passed_q,
+                "pass_rate": round(passed_q / total_q * 100, 1) if total_q > 0 else 0,
+                "total_cost": round(sum(r.get("total_cost", 0) for r in runs), 4),
+                "total_tokens": sum(r.get("total_tokens", 0) for r in runs),
+                "runs": [
+                    {
+                        "run_id": r["run_id"],
+                        "test_file": r["test_id"],
+                        "passed": r["passed_questions"],
+                        "failed": r["total_questions"] - r["passed_questions"],
+                        "pass_rate": r["pass_rate"],
+                    }
+                    for r in runs
+                ],
+            }
+        )
+
+    return {"sessions": result[:limit], "total": len(result)}
 
 
 @router.get("/run/{run_id}")

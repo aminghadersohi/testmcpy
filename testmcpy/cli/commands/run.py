@@ -220,12 +220,60 @@ def run(
         "--system-prompt-file",
         help="File containing the system prompt text",
     ),
+    # Inline MCP auth options (bypass .mcp_services.yaml)
+    auth_type: Optional[str] = typer.Option(
+        None,
+        "--auth-type",
+        help="MCP auth type: jwt, bearer, oauth, api_key, none",
+    ),
+    auth_token: Optional[str] = typer.Option(
+        None,
+        "--auth-token",
+        envvar="MCP_AUTH_TOKEN",
+        help="Bearer token or API key for MCP auth",
+    ),
+    jwt_url: Optional[str] = typer.Option(
+        None,
+        "--jwt-url",
+        envvar="MCP_JWT_URL",
+        help="JWT auth endpoint URL (for --auth-type jwt)",
+    ),
+    jwt_token: Optional[str] = typer.Option(
+        None,
+        "--jwt-token",
+        envvar="MCP_JWT_TOKEN",
+        help="JWT API token / key name (for --auth-type jwt)",
+    ),
+    jwt_secret: Optional[str] = typer.Option(
+        None,
+        "--jwt-secret",
+        envvar="MCP_JWT_SECRET",
+        help="JWT API secret (for --auth-type jwt)",
+    ),
 ):
     """
     Run test cases against MCP service.
 
     This command executes test cases defined in YAML/JSON files.
     """
+    # Build inline auth dict if --auth-type is provided
+    inline_auth = None
+    if auth_type:
+        inline_auth = {"type": auth_type}
+        if auth_type == "jwt":
+            if jwt_url:
+                inline_auth["api_url"] = jwt_url
+            if jwt_token:
+                inline_auth["api_token"] = jwt_token
+            if jwt_secret:
+                inline_auth["api_secret"] = jwt_secret
+        elif auth_type == "bearer":
+            if auth_token:
+                inline_auth["token"] = auth_token
+        elif auth_type == "api_key":
+            if auth_token:
+                inline_auth["api_key"] = auth_token
+
     # Load config with profile if specified
     if profile:
         from testmcpy.config import Config
@@ -251,17 +299,25 @@ def run(
 
         # Get authenticated MCP client
         mcp_client = None
-        effective_profile = profile
-        if not effective_profile:
-            # Use default profile from config
-            mcp_config = load_mcp_yaml()
-            effective_profile = mcp_config.get("default")
 
-        if effective_profile:
-            try:
-                mcp_client = await get_or_create_mcp_client(effective_profile)
-            except Exception as e:
-                console.print(f"[yellow]Warning: Could not load MCP profile: {e}[/yellow]")
+        if inline_auth and effective_mcp_url:
+            # Use inline auth flags — bypass profile system entirely
+            from testmcpy.src.mcp_client import MCPClient
+
+            mcp_client = MCPClient(effective_mcp_url, auth=inline_auth)
+            await mcp_client.initialize()
+        else:
+            effective_profile = profile
+            if not effective_profile:
+                # Use default profile from config
+                mcp_config = load_mcp_yaml()
+                effective_profile = mcp_config.get("default")
+
+            if effective_profile:
+                try:
+                    mcp_client = await get_or_create_mcp_client(effective_profile)
+                except Exception as e:
+                    console.print(f"[yellow]Warning: Could not load MCP profile: {e}[/yellow]")
 
         # Load test cases and detect suite-level provider override
         test_cases = []
@@ -342,6 +398,11 @@ def run(
                     f"[yellow]Suite-level provider config:[/yellow] {suite_provider_config}"
                 )
 
+        def cli_log_callback(msg: str) -> None:
+            """Print runner/provider log messages to console in real-time."""
+            if verbose:
+                console.print(f"  [dim]{msg}[/dim]")
+
         runner = TestRunner(
             model=effective_model,
             provider=effective_provider,
@@ -350,6 +411,7 @@ def run(
             verbose=verbose,
             hide_tool_output=hide_tool_output,
             provider_config=suite_provider_config,
+            log_callback=cli_log_callback if verbose else None,
         )
 
         console.print(f"\n[bold]Found {len(test_cases)} test case(s)[/bold]")
@@ -384,11 +446,35 @@ def run(
                     f"  [dim]Prompt: {test_case.prompt[:80]}{'...' if len(test_case.prompt) > 80 else ''}[/dim]"
                 )
 
-            # Run the test
-            from rich.status import Status
-
-            with Status("[yellow]Executing test...[/yellow]", console=console):
+            # Run the test — show live progress instead of static spinner
+            if verbose:
+                # In verbose mode, let _log() print directly (no spinner overlay)
                 result = await runner._run_test_with_retry(test_case)
+            else:
+                # In non-verbose mode, update spinner with runner progress
+                from rich.status import Status
+
+                _status = Status("[yellow]Executing test...[/yellow]", console=console)
+                _status.start()
+
+                def update_status(msg: str, _s: Status = _status) -> None:
+                    msg_lower = msg.lower()
+                    if "tool call" in msg_lower or "tool_call" in msg_lower:
+                        _s.update(f"[yellow]Tool call: {msg.split('.')[-1].strip()[:60]}[/yellow]")
+                    elif "running test" in msg_lower:
+                        _s.update("[yellow]Running...[/yellow]")
+                    elif "executing" in msg_lower:
+                        _s.update("[yellow]Executing tool calls...[/yellow]")
+                    elif "evaluating" in msg_lower or "evaluator" in msg_lower:
+                        _s.update("[yellow]Evaluating results...[/yellow]")
+
+                old_callback = runner.log_callback
+                runner.log_callback = update_status
+                try:
+                    result = await runner._run_test_with_retry(test_case)
+                finally:
+                    runner.log_callback = old_callback
+                    _status.stop()
 
             results.append(result)
 

@@ -120,13 +120,33 @@ async def save_test_run(data: dict[str, Any]) -> dict[str, Any]:
 
 
 @router.get("/list")
-async def list_test_runs(test_file: str | None = None, limit: int = 50) -> dict[str, Any]:
+async def list_test_runs(
+    test_file: str | None = None,
+    model: str | None = None,
+    provider: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    sort_by: str = "started_at",
+    sort_order: str = "desc",
+    limit: int = 50,
+    offset: int = 0,
+) -> dict[str, Any]:
     """
-    List all test runs, optionally filtered by test file.
+    List all test runs with filtering, sorting, and pagination.
     Returns metadata only (not full results).
     """
     storage = get_storage()
-    runs_data = storage.list_runs(test_id=test_file, limit=limit)
+    runs_data = storage.list_runs(
+        test_id=test_file,
+        model=model,
+        provider=provider,
+        date_from=date_from,
+        date_to=date_to,
+        sort_by=sort_by,
+        sort_order=sort_order,
+        limit=limit,
+        offset=offset,
+    )
 
     runs = []
     for run in runs_data:
@@ -143,13 +163,21 @@ async def list_test_runs(test_file: str | None = None, limit: int = 50) -> dict[
                 "total_tests": run["total_questions"],
                 "passed": run["passed_questions"],
                 "failed": run["total_questions"] - run["passed_questions"],
-                "total_cost": 0.0,
-                "total_tokens": 0,
-                "total_duration": 0.0,
+                "total_cost": run.get("total_cost", 0.0),
+                "total_tokens": run.get("total_tokens", 0),
+                "total_duration": round((run.get("total_duration_ms", 0) or 0) / 1000, 2),
+                "session_id": run.get("metadata", {}).get("session_id"),
             }
         )
 
     return {"runs": runs, "total": len(runs)}
+
+
+@router.get("/filters")
+async def get_filter_options() -> dict[str, Any]:
+    """Get distinct values for filter dropdowns (models, providers, test files)."""
+    storage = get_storage()
+    return storage.get_filter_options()
 
 
 @router.get("/run/{run_id}")

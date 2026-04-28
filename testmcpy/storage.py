@@ -780,7 +780,13 @@ class TestStorage:
         self,
         test_id: str | None = None,
         model: str | None = None,
+        provider: str | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        sort_by: str = "started_at",
+        sort_order: str = "desc",
         limit: int = 50,
+        offset: int = 0,
     ) -> list[dict[str, Any]]:
         with self._session() as session:
             query = session.query(
@@ -793,8 +799,14 @@ class TestStorage:
                 TestRunModel.runner_tool,
                 TestRunModel.started_at,
                 TestRunModel.completed_at,
+                TestRunModel.metadata_,
                 func.count(QuestionResultModel.id).label("total_questions"),
                 func.sum(func.iif(QuestionResultModel.passed, 1, 0)).label("passed_questions"),
+                func.sum(QuestionResultModel.cost_usd).label("total_cost"),
+                func.sum(
+                    QuestionResultModel.tokens_input + QuestionResultModel.tokens_output
+                ).label("total_tokens"),
+                func.sum(QuestionResultModel.duration_ms).label("total_duration_ms"),
             ).outerjoin(
                 QuestionResultModel,
                 TestRunModel.run_id == QuestionResultModel.run_id,
@@ -804,13 +816,21 @@ class TestStorage:
                 query = query.filter(TestRunModel.suite_id == test_id)
             if model:
                 query = query.filter(TestRunModel.model == model)
+            if provider:
+                query = query.filter(TestRunModel.provider == provider)
+            if date_from:
+                query = query.filter(TestRunModel.started_at >= date_from)
+            if date_to:
+                query = query.filter(TestRunModel.started_at <= date_to)
 
-            rows = (
-                query.group_by(TestRunModel.run_id)
-                .order_by(TestRunModel.started_at.desc())
-                .limit(limit)
-                .all()
-            )
+            # Sorting
+            sort_column = getattr(TestRunModel, sort_by, TestRunModel.started_at)
+            if sort_order == "asc":
+                query = query.order_by(sort_column.asc())
+            else:
+                query = query.order_by(sort_column.desc())
+
+            rows = query.group_by(TestRunModel.run_id).limit(limit).offset(offset).all()
 
             return [
                 {
@@ -823,6 +843,7 @@ class TestStorage:
                     "runner_tool": row.runner_tool,
                     "started_at": row.started_at,
                     "completed_at": row.completed_at,
+                    "metadata": json.loads(row.metadata_) if row.metadata_ else {},
                     "total_questions": row.total_questions,
                     "passed_questions": row.passed_questions or 0,
                     "pass_rate": (
@@ -830,9 +851,40 @@ class TestStorage:
                         if row.total_questions > 0 and row.passed_questions
                         else 0
                     ),
+                    "total_cost": round(row.total_cost or 0, 4),
+                    "total_tokens": row.total_tokens or 0,
+                    "total_duration_ms": row.total_duration_ms or 0,
                 }
                 for row in rows
             ]
+
+    def get_filter_options(self) -> dict[str, list[str]]:
+        """Get distinct values for filter dropdowns."""
+        with self._session() as session:
+            models = [
+                r[0]
+                for r in session.query(TestRunModel.model).distinct().order_by(TestRunModel.model)
+                if r[0]
+            ]
+            providers = [
+                r[0]
+                for r in session.query(TestRunModel.provider)
+                .distinct()
+                .order_by(TestRunModel.provider)
+                if r[0]
+            ]
+            test_files = [
+                r[0]
+                for r in session.query(TestRunModel.suite_id)
+                .distinct()
+                .order_by(TestRunModel.suite_id)
+                if r[0]
+            ]
+            return {
+                "models": models,
+                "providers": providers,
+                "test_files": test_files,
+            }
 
     # ==================== Smoke Reports ====================
 

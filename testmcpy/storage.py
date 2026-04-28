@@ -843,7 +843,9 @@ class TestStorage:
                     "runner_tool": row.runner_tool,
                     "started_at": row.started_at,
                     "completed_at": row.completed_at,
-                    "metadata": json.loads(row.metadata_) if row.metadata_ else {},
+                    "metadata": json.loads(row.metadata_)
+                    if isinstance(row.metadata_, str)
+                    else (row.metadata_ or {}),
                     "total_questions": row.total_questions,
                     "passed_questions": row.passed_questions or 0,
                     "pass_rate": (

@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import uuid
 from pathlib import Path
 from typing import Optional
 
@@ -256,6 +257,9 @@ def run(
 
     This command executes test cases defined in YAML/JSON files.
     """
+    # Generate session ID to group multiple runs from the same CLI invocation
+    session_id = str(uuid.uuid4())[:8]
+
     # Build inline auth dict if --auth-type is provided
     inline_auth = None
     if auth_type:
@@ -572,6 +576,9 @@ def run(
                     "total": len(results),
                     "passed": total_passed,
                     "failed": len(results) - total_passed,
+                },
+                "metadata": {
+                    "session_id": session_id,
                 },
             }
             save_result = save_test_run_to_file(save_data)

@@ -802,11 +802,14 @@ class TestStorage:
                 TestRunModel.metadata_,
                 func.count(QuestionResultModel.id).label("total_questions"),
                 func.sum(func.iif(QuestionResultModel.passed, 1, 0)).label("passed_questions"),
-                func.sum(QuestionResultModel.cost_usd).label("total_cost"),
+                func.sum(func.coalesce(QuestionResultModel.cost_usd, 0)).label("total_cost"),
                 func.sum(
-                    QuestionResultModel.tokens_input + QuestionResultModel.tokens_output
+                    func.coalesce(QuestionResultModel.tokens_input, 0)
+                    + func.coalesce(QuestionResultModel.tokens_output, 0)
                 ).label("total_tokens"),
-                func.sum(QuestionResultModel.duration_ms).label("total_duration_ms"),
+                func.sum(func.coalesce(QuestionResultModel.duration_ms, 0)).label(
+                    "total_duration_ms"
+                ),
             ).outerjoin(
                 QuestionResultModel,
                 TestRunModel.run_id == QuestionResultModel.run_id,
@@ -823,8 +826,14 @@ class TestStorage:
             if date_to:
                 query = query.filter(TestRunModel.started_at <= date_to)
 
-            # Sorting
-            sort_column = getattr(TestRunModel, sort_by, TestRunModel.started_at)
+            # Sorting — validate against allowlist
+            allowed_sort = {
+                "started_at": TestRunModel.started_at,
+                "completed_at": TestRunModel.completed_at,
+                "model": TestRunModel.model,
+                "provider": TestRunModel.provider,
+            }
+            sort_column = allowed_sort.get(sort_by, TestRunModel.started_at)
             if sort_order == "asc":
                 query = query.order_by(sort_column.asc())
             else:

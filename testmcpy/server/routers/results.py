@@ -171,7 +171,9 @@ async def list_test_runs(
             }
         )
 
-    return {"runs": runs, "total": len(runs)}
+    # total reflects page size; a full count query would be needed for true pagination
+    # For now, signal "there may be more" if we hit the limit
+    return {"runs": runs, "total": len(runs), "has_more": len(runs) >= limit}
 
 
 @router.get("/filters")
@@ -182,10 +184,11 @@ async def get_filter_options() -> dict[str, Any]:
 
 
 @router.get("/sessions")
-async def list_sessions(limit: int = 20) -> dict[str, Any]:
-    """List runs grouped by session_id, with aggregate stats per session."""
+async def list_sessions(limit: int = 20, run_limit: int = 200) -> dict[str, Any]:
+    """List runs grouped by session_id, with aggregate stats per session.
+    Only examines the most recent `run_limit` runs to keep the query fast."""
     storage = get_storage()
-    all_runs = storage.list_runs(limit=500)
+    all_runs = storage.list_runs(limit=run_limit)
 
     # Group by session_id
     sessions: dict[str, list] = {}

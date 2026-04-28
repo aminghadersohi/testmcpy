@@ -668,15 +668,24 @@ function Reports() {
     if (showSpinner) setLoading(false)
   }, [loadTestRuns, loadSmokeReports, loadFilterOptions])
 
-  // Initial load
+  // Initial load — run once
+  const initialLoadDone = useRef(false)
   useEffect(() => {
-    loadAllReports()
+    if (!initialLoadDone.current) {
+      initialLoadDone.current = true
+      loadAllReports()
+    }
   }, [loadAllReports])
 
-  // Reload when server-side filters change
+  // Reload only test runs when filters change (skip smoke/filters refetch)
+  const filtersInitialized = useRef(false)
   useEffect(() => {
+    if (!filtersInitialized.current) {
+      filtersInitialized.current = true
+      return  // skip first render — initial load handles it
+    }
     loadTestRuns()
-  }, [filterModel, filterProvider, filterTestFile, loadTestRuns])
+  }, [filterModel, filterProvider, filterTestFile]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Comparison logic
   const toggleCompareSelection = (runId) => {

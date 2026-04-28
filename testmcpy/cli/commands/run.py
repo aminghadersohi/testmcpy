@@ -258,7 +258,7 @@ def run(
     This command executes test cases defined in YAML/JSON files.
     """
     # Generate session ID to group multiple runs from the same CLI invocation
-    session_id = str(uuid.uuid4())[:8]
+    session_id = str(uuid.uuid4())
 
     # Build inline auth dict if --auth-type is provided
     inline_auth = None

@@ -22,6 +22,14 @@ concurrency:
 
 jobs:
   publish:
+    # Restrict to v* tags for both event paths. The `push.tags` trigger
+    # above already filters at the event level, but `release: published`
+    # has no tag filter — without this guard, publishing a GitHub Release
+    # for a non-version tag (e.g. a `preview` or `latest` tag) would fire
+    # the workflow and the downstream `VERSION=${GITHUB_REF#refs/tags/v}`
+    # parse would produce garbage. `github.ref_name` is the short tag
+    # name for both push.tags and release events.
+    if: startsWith(github.ref_name, 'v')
     runs-on: ubuntu-latest
     permissions:
       contents: write  # Needed to push Homebrew formula updates

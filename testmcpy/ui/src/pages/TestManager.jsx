@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react'
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import {
   Plus,
   Play,
@@ -13,6 +13,8 @@ import {
   Folder,
   ChevronRight,
   ChevronDown,
+  ChevronUp,
+  ChevronsUpDown,
   Loader2,
   Terminal,
   History,
@@ -21,6 +23,7 @@ import {
   DollarSign,
   Wand2,
   Server,
+  Search,
 } from 'lucide-react'
 import Editor from '@monaco-editor/react'
 import Wizard from '../components/Wizard'
@@ -30,6 +33,8 @@ import { useKeyboardShortcuts, useAnnounce } from '../hooks/useKeyboardShortcuts
 import { useTestRun } from '../contexts/TestRunContext'
 import { useEditorTheme } from '../hooks/useEditorTheme'
 import StreamingLogViewer from '../components/StreamingLogViewer'
+import EditorStatusBar from '../components/EditorStatusBar'
+import EditorTabStrip from '../components/EditorTabStrip'
 
 // Parse YAML content to find test locations (line numbers)
 function parseTestLocations(content) {
@@ -82,6 +87,36 @@ function parseTestLocations(content) {
 }
 
 // Available evaluator types for the wizard
+// Accessible sortable column header. The clickable area is a real <button>
+// inside the <th>, so keyboard users can activate it with Enter/Space, and
+// the th carries `aria-sort` so assistive tech announces the active sort.
+function SortableTH({ sortKey, align = 'left', sort, onSort, children }) {
+  const ariaSort =
+    sort.key === sortKey ? (sort.dir === 'asc' ? 'ascending' : 'descending') : 'none'
+  const alignClass =
+    align === 'right' ? 'text-right justify-end' : align === 'center' ? 'text-center justify-center' : 'text-left'
+  const indicator =
+    sort.key !== sortKey ? (
+      <ChevronsUpDown size={10} className="text-text-disabled" />
+    ) : sort.dir === 'asc' ? (
+      <ChevronUp size={10} className="text-primary" />
+    ) : (
+      <ChevronDown size={10} className="text-primary" />
+    )
+  return (
+    <th aria-sort={ariaSort} className={`py-0 px-0 text-text-tertiary font-medium ${align === 'right' ? 'text-right' : align === 'center' ? 'text-center' : 'text-left'}`}>
+      <button
+        type="button"
+        onClick={() => onSort(sortKey)}
+        className={`w-full py-2 px-3 hover:text-text-secondary inline-flex items-center gap-1 ${alignClass}`}
+      >
+        {children}
+        {indicator}
+      </button>
+    </th>
+  )
+}
+
 const EVALUATOR_TYPES = [
   { name: 'execution_successful', desc: 'Check that the LLM execution completed without errors', args: [] },
   { name: 'was_mcp_tool_called', desc: 'Check that a specific MCP tool was called', args: [{ key: 'tool_name', label: 'Tool Name', required: true }] },
@@ -370,6 +405,7 @@ function TestManager({ selectedProfiles = [], selectedLlmProfile = null, llmProf
     runningTests,
     testStatuses,
     activeTestFile,
+    pinnedHistoryRun,
     runTests: contextRunTests,
     runSingleTest: contextRunSingleTest,
     stopTests,
@@ -378,6 +414,7 @@ function TestManager({ selectedProfiles = [], selectedLlmProfile = null, llmProf
     resetTestStatuses,
     setTestStatuses,
     setTestResults,
+    setPinnedHistoryRun,
     setRunning,
     setRunningTests,
   } = useTestRun()
@@ -391,6 +428,15 @@ function TestManager({ selectedProfiles = [], selectedLlmProfile = null, llmProf
   const [newFileName, setNewFileName] = useState('')
   const [showNewFileDialog, setShowNewFileDialog] = useState(false)
   const [testLocations, setTestLocations] = useState([])
+  // Editor cursor position for the IDE-style status bar (1-based to match Monaco).
+  const [editorCursor, setEditorCursor] = useState({ line: 1, column: 1 })
+  // Persisted Monaco view options exposed via the status bar.
+  const [editorWordWrap, setEditorWordWrap] = useState(() => {
+    return localStorage.getItem('testManagerEditorWordWrap') === '1'
+  })
+  const [editorMinimap, setEditorMinimap] = useState(() => {
+    return localStorage.getItem('testManagerEditorMinimap') === '1'
+  })
   const editorRef = useRef(null)
   const monacoRef = useRef(null)
   const testLocationsRef = useRef([]) // Ref to avoid stale closure in click handler
@@ -402,6 +448,10 @@ function TestManager({ selectedProfiles = [], selectedLlmProfile = null, llmProf
   const [resultsHistory, setResultsHistory] = useState([])
   const [showHistory, setShowHistory] = useState(false)
   const [selectedHistoryRun, setSelectedHistoryRun] = useState(null)
+  const [historyFilterQuery, setHistoryFilterQuery] = useState('')
+  const [historyProviderFilter, setHistoryProviderFilter] = useState(null) // null = all
+  const [historyFailedOnly, setHistoryFailedOnly] = useState(false)
+  const [historySort, setHistorySort] = useState({ key: 'timestamp', dir: 'desc' })
   const [bottomPanelTab, setBottomPanelTab] = useState('logs') // 'logs' or 'results'
   const [showFileTree, setShowFileTree] = useState(false)
   const [showTestWizard, setShowTestWizard] = useState(false)
@@ -588,6 +638,111 @@ function TestManager({ selectedProfiles = [], selectedLlmProfile = null, llmProf
       console.error('Failed to load results history:', error)
       setResultsHistory([])
     }
+  }
+
+  // Sequencing for history-pin fetches. We track the latest pin request id
+  // and abort the previous in-flight fetch on every new click, so a slow
+  // earlier response can't win the race and pin the wrong run. Also re-checks
+  // `running` AFTER the await: if a new run started during the fetch, drop
+  // the response on the floor instead of stomping the live results.
+  const pinFetchRef = useRef({ id: 0, controller: null })
+  const pinHistoryRun = async (runId) => {
+    if (!runId || running) return
+    if (pinFetchRef.current.controller) {
+      pinFetchRef.current.controller.abort()
+    }
+    const myId = ++pinFetchRef.current.id
+    const controller = new AbortController()
+    pinFetchRef.current.controller = controller
+    try {
+      const res = await fetch(`/api/results/run/${encodeURIComponent(runId)}`, {
+        signal: controller.signal,
+      })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const data = await res.json()
+      // A newer pin click superseded us, OR a live run started while we were
+      // fetching — either way, abandon this response.
+      if (myId !== pinFetchRef.current.id || running) return
+      setPinnedHistoryRun(data)
+      setBottomPanelTab('results')
+    } catch (error) {
+      if (error.name === 'AbortError') return
+      console.error('Failed to load historical run:', error)
+    }
+  }
+
+  // Unique providers across all history runs — drives the provider chip filter.
+  const historyProviders = useMemo(
+    () => Array.from(new Set(resultsHistory.map((r) => r.provider).filter(Boolean))).sort(),
+    [resultsHistory],
+  )
+
+  // Auto-clear a stale provider filter when switching to a file whose history
+  // doesn't contain the previously-selected provider. Otherwise the chip
+  // disappears (provider chips only render for providers in the current
+  // history) but the filter stays applied, leaving the table mysteriously
+  // empty with no UI to clear it.
+  useEffect(() => {
+    if (historyProviderFilter && !historyProviders.includes(historyProviderFilter)) {
+      setHistoryProviderFilter(null)
+    }
+  }, [historyProviders, historyProviderFilter])
+
+  // History view derives a filtered + sorted view; the source array is left
+  // untouched so the chart can still slice the most recent untouched runs if
+  // we want to switch back later.
+  const filteredHistory = useMemo(() => {
+    const q = historyFilterQuery.trim().toLowerCase()
+    const filtered = resultsHistory.filter((run) => {
+      if (historyProviderFilter && run.provider !== historyProviderFilter) return false
+      if (historyFailedOnly && (run.failed ?? 0) === 0) return false
+      if (q) {
+        const hay = `${run.provider || ''} ${run.model || ''} ${run.run_id || ''}`.toLowerCase()
+        if (!hay.includes(q)) return false
+      }
+      return true
+    })
+    const dir = historySort.dir === 'asc' ? 1 : -1
+    const cmp = (a, b) => {
+      switch (historySort.key) {
+        case 'pass':
+          return ((a.pass_rate ?? 0) - (b.pass_rate ?? 0)) * dir
+        case 'cost':
+          return ((a.total_cost ?? 0) - (b.total_cost ?? 0)) * dir
+        case 'duration':
+          return ((a.total_duration ?? 0) - (b.total_duration ?? 0)) * dir
+        case 'timestamp':
+        default:
+          return (new Date(a.timestamp) - new Date(b.timestamp)) * dir
+      }
+    }
+    return [...filtered].sort(cmp)
+  }, [resultsHistory, historyFilterQuery, historyProviderFilter, historyFailedOnly, historySort])
+
+  // The timeline chart's "Older → Recent" axis must always be chronological,
+  // independent of the table's current sort key. Without this the bars
+  // re-order when the user sorts by Pass/Cost/Time and the axis labels
+  // become misleading.
+  const filteredHistoryChronological = useMemo(() => {
+    return [...filteredHistory].sort(
+      (a, b) => new Date(a.timestamp) - new Date(b.timestamp),
+    )
+  }, [filteredHistory])
+
+  const toggleHistorySort = (key) => {
+    setHistorySort((prev) =>
+      prev.key === key
+        ? { key, dir: prev.dir === 'asc' ? 'desc' : 'asc' }
+        : { key, dir: key === 'timestamp' ? 'desc' : 'asc' },
+    )
+  }
+  const SortIcon = ({ k }) => {
+    if (historySort.key !== k) return <ChevronsUpDown size={10} className="text-text-disabled" />
+    return historySort.dir === 'asc' ? (
+      <ChevronUp size={10} className="text-primary" />
+    ) : (
+      <ChevronDown size={10} className="text-primary" />
+    )
   }
 
   // Load history when file changes
@@ -795,6 +950,11 @@ function TestManager({ selectedProfiles = [], selectedLlmProfile = null, llmProf
           runSingleTest(test.name)
         }
       }
+    })
+
+    // Track cursor position for the status bar.
+    editor.onDidChangeCursorPosition((e) => {
+      setEditorCursor({ line: e.position.lineNumber, column: e.position.column })
     })
 
     // Initial decoration update - multiple attempts to ensure it works
@@ -1275,29 +1435,26 @@ tests:
           <>
             {/* Editor Header - fixed height, won't shrink */}
             <div className="flex-shrink-0 border-b border-border bg-surface-elevated">
-              {/* Top row: File info and edit controls */}
-              <div className="px-4 py-3 flex items-center justify-between">
-                <div className="flex items-center gap-3">
-                  <div className="p-2 rounded-lg bg-primary/10">
-                    <FileText size={18} className="text-primary" />
-                  </div>
-                  <div>
-                    <h2 className="font-semibold text-text-primary">{selectedFile.filename}</h2>
-                    {selectedFile.relative_path && selectedFile.relative_path.includes('/') && (
-                      <p className="text-xs text-text-tertiary mt-0.5">
-                        {selectedFile.relative_path.split('/').slice(0, -1).join('/')}
-                      </p>
-                    )}
-                  </div>
-                  {testLocations.length > 0 && (
-                    <span className="px-2 py-0.5 text-xs rounded-full bg-surface text-text-secondary border border-border">
-                      {testLocations.length} test{testLocations.length !== 1 ? 's' : ''}
-                    </span>
-                  )}
-                </div>
-
-                <div className="flex items-center gap-2">
-                  {editMode ? (
+              {/* Tab strip: file as a tab + edit controls on the right */}
+              <EditorTabStrip
+                filename={selectedFile.filename}
+                pathSubtitle={selectedFile.relative_path || selectedFile.filename}
+                testCount={testLocations.length}
+                dirty={editMode && fileContent !== selectedFile.content}
+                onClose={() => {
+                  // Confirm before discarding unsaved edits — closing the tab
+                  // shouldn't silently lose user work.
+                  const dirty = editMode && fileContent !== selectedFile.content
+                  if (dirty && !window.confirm('You have unsaved changes. Close anyway?')) {
+                    return
+                  }
+                  setSelectedFile(null)
+                  setEditMode(false)
+                  setFileContent('')
+                  localStorage.removeItem('selectedTestFile')
+                }}
+                rightSlot={
+                  editMode ? (
                     <>
                       <button
                         onClick={() => {
@@ -1325,9 +1482,9 @@ tests:
                       <Edit size={16} />
                       <span>Edit</span>
                     </button>
-                  )}
-                </div>
-              </div>
+                  )
+                }
+              />
 
               {/* Bottom row: Run controls and LLM info */}
               <div className="px-4 py-2 flex items-center justify-between border-t border-border/50 bg-surface">
@@ -1400,31 +1557,62 @@ tests:
 
             {/* Split view: Editor + Bottom Panel */}
             <div ref={containerRef} className="flex-1 flex flex-col overflow-hidden relative min-h-0">
-              {/* Editor area - always takes remaining space */}
-              <div className="flex-1 overflow-hidden min-h-0 min-h-[250px]">
-                <Editor
-                  height="100%"
-                  defaultLanguage="yaml"
-                  theme={monacoTheme}
-                  value={fileContent}
-                  onChange={(value) => setFileContent(value || '')}
-                  onMount={handleEditorDidMount}
-                  options={{
-                    readOnly: !editMode,
-                    minimap: { enabled: false },
-                    fontSize: 14,
-                    lineNumbers: 'on',
-                    scrollBeyondLastLine: false,
-                    automaticLayout: true,
-                    glyphMargin: true,
-                    folding: true,
-                    lineDecorationsWidth: 5,
+              {/* Editor area - always takes remaining space; column-flex so the
+                  status bar sits flush below Monaco without re-flowing on resize.
+                  In edit mode the warning-tinted left border makes it obvious the
+                  buffer is mutable (paired with the EDIT badge in the status bar). */}
+              <div
+                className={`flex-1 flex flex-col overflow-hidden min-h-0 min-h-[250px] border-l-2 transition-colors ${
+                  editMode ? 'border-warning/60' : 'border-transparent'
+                }`}
+              >
+                <div className="flex-1 min-h-0">
+                  <Editor
+                    height="100%"
+                    defaultLanguage="yaml"
+                    theme={monacoTheme}
+                    value={fileContent}
+                    onChange={(value) => setFileContent(value || '')}
+                    onMount={handleEditorDidMount}
+                    options={{
+                      readOnly: !editMode,
+                      minimap: { enabled: editorMinimap },
+                      wordWrap: editorWordWrap ? 'on' : 'off',
+                      fontSize: 14,
+                      lineNumbers: 'on',
+                      scrollBeyondLastLine: false,
+                      automaticLayout: true,
+                      glyphMargin: true,
+                      folding: true,
+                      lineDecorationsWidth: 5,
+                    }}
+                  />
+                </div>
+                <EditorStatusBar
+                  line={editorCursor.line}
+                  column={editorCursor.column}
+                  language="YAML"
+                  editMode={editMode}
+                  dirty={editMode && fileContent !== selectedFile.content}
+                  wordWrap={editorWordWrap}
+                  onToggleWordWrap={() => {
+                    setEditorWordWrap((v) => {
+                      localStorage.setItem('testManagerEditorWordWrap', v ? '0' : '1')
+                      return !v
+                    })
+                  }}
+                  minimap={editorMinimap}
+                  onToggleMinimap={() => {
+                    setEditorMinimap((v) => {
+                      localStorage.setItem('testManagerEditorMinimap', v ? '0' : '1')
+                      return !v
+                    })
                   }}
                 />
               </div>
 
               {/* Bottom Panel - Resizable via drag handle */}
-              {(running || streamingLogs.length > 0 || testResults) && (
+              {(running || streamingLogs.length > 0 || testResults || pinnedHistoryRun) && (
                 <>
                 {/* Drag handle */}
                 <div
@@ -1452,25 +1640,28 @@ tests:
                         <span className="px-1.5 py-0.5 rounded bg-surface text-[10px]">{streamingLogs.length}</span>
                       )}
                     </button>
-                    {/* Results Tab */}
-                    {testResults && (
-                      <button
-                        className={`px-3 py-2 text-xs font-medium flex items-center gap-2 border-b-2 transition-colors ${
-                          bottomPanelTab === 'results'
-                            ? 'border-primary text-primary'
-                            : 'border-transparent text-text-tertiary hover:text-text-secondary'
-                        }`}
-                        onClick={() => setBottomPanelTab('results')}
-                      >
-                        <CheckCircle size={12} />
-                        <span>Results</span>
-                        <span className={`px-1.5 py-0.5 rounded text-[10px] ${
-                          testResults.summary.failed > 0 ? 'bg-red-500/20 text-red-400' : 'bg-green-500/20 text-green-400'
-                        }`}>
-                          {testResults.summary.passed}/{testResults.summary.total}
-                        </span>
-                      </button>
-                    )}
+                    {/* Results Tab — backed by either the live run or a pinned history run */}
+                    {(pinnedHistoryRun || testResults) && (() => {
+                      const displayResults = pinnedHistoryRun || testResults
+                      return (
+                        <button
+                          className={`px-3 py-2 text-xs font-medium flex items-center gap-2 border-b-2 transition-colors ${
+                            bottomPanelTab === 'results'
+                              ? 'border-primary text-primary'
+                              : 'border-transparent text-text-tertiary hover:text-text-secondary'
+                          }`}
+                          onClick={() => setBottomPanelTab('results')}
+                        >
+                          <CheckCircle size={12} />
+                          <span>Results</span>
+                          <span className={`px-1.5 py-0.5 rounded text-[10px] ${
+                            displayResults.summary.failed > 0 ? 'bg-red-500/20 text-red-400' : 'bg-green-500/20 text-green-400'
+                          }`}>
+                            {displayResults.summary.passed}/{displayResults.summary.total}
+                          </span>
+                        </button>
+                      )
+                    })()}
                     {/* Spacer */}
                     <div className="flex-1" />
                     {/* Clear/Close buttons */}
@@ -1483,7 +1674,7 @@ tests:
                       </button>
                     )}
                     <button
-                      onClick={() => { clearResults(); setBottomPanelTab('logs'); }}
+                      onClick={() => { clearResults(); setPinnedHistoryRun(null); setBottomPanelTab('logs'); }}
                       className="p-1.5 text-text-tertiary hover:text-text-primary hover:bg-surface-hover rounded transition-colors"
                       title="Close panel"
                     >
@@ -1494,33 +1685,82 @@ tests:
                   {/* Panel Content */}
                   <div className="flex-1 overflow-hidden">
                     {/* Show content based on selected tab */}
-                    {bottomPanelTab === 'results' && testResults ? (
+                    {bottomPanelTab === 'results' && (pinnedHistoryRun || testResults) ? (
                       /* Results Content */
+                      (() => {
+                        const displayResults = pinnedHistoryRun || testResults
+                        return (
                       <div className="h-full flex flex-col">
+                        {/* Pinned-history banner — only shown when viewing a historical run */}
+                        {pinnedHistoryRun && (
+                          <div className="px-4 py-2 flex items-center gap-3 text-xs bg-primary/10 border-b border-primary/20">
+                            <History size={12} className="text-primary flex-shrink-0" />
+                            <span className="text-text-secondary">
+                              Viewing historical run from{' '}
+                              <span className="text-text-primary font-medium">
+                                {pinnedHistoryRun.metadata?.timestamp
+                                  ? new Date(pinnedHistoryRun.metadata.timestamp).toLocaleString()
+                                  : 'unknown date'}
+                              </span>
+                              {pinnedHistoryRun.metadata?.provider && (
+                                <> · <span className="text-text-tertiary">{pinnedHistoryRun.metadata.provider}</span></>
+                              )}
+                              {pinnedHistoryRun.metadata?.model && (
+                                <> · <span className="text-text-tertiary font-mono">{pinnedHistoryRun.metadata.model}</span></>
+                              )}
+                            </span>
+                            <span className="flex-1" />
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setPinnedHistoryRun(null)
+                                // If there's no live testResults to fall back
+                                // to, the Results tab disappears — bounce to
+                                // Logs so we don't leave the panel orphaned
+                                // with no tab highlighted.
+                                if (!testResults) setBottomPanelTab('logs')
+                              }}
+                              className="px-2 py-0.5 rounded text-[11px] text-primary hover:bg-primary/20 transition"
+                            >
+                              Unpin
+                            </button>
+                          </div>
+                        )}
                         {/* Results Summary Bar */}
                         <div className="px-4 py-2 bg-surface-elevated/50 flex items-center gap-6 text-xs border-b border-border/50">
                           <div className="flex items-center gap-2">
                             <div className="w-2 h-2 rounded-full bg-green-500"></div>
                             <span className="text-text-tertiary">Passed:</span>
-                            <span className="font-semibold text-green-400">{testResults.summary.passed}</span>
+                            <span className="font-semibold text-green-400">{displayResults.summary.passed}</span>
                           </div>
                           <div className="flex items-center gap-2">
                             <div className="w-2 h-2 rounded-full bg-red-500"></div>
                             <span className="text-text-tertiary">Failed:</span>
-                            <span className="font-semibold text-red-400">{testResults.summary.failed}</span>
+                            <span className="font-semibold text-red-400">{displayResults.summary.failed}</span>
                           </div>
-                          {testResults.summary.total_cost > 0 && (
-                            <div className="flex items-center gap-2">
-                              <span className="text-text-tertiary">Cost:</span>
-                              <span className="font-mono text-text-secondary">${testResults.summary.total_cost.toFixed(4)}</span>
-                            </div>
-                          )}
+                          {/* Live and historical responses use different cost field
+                              names. Live: summary.total_cost. Historical (from
+                              /api/results/run/{id}): summary.total_cost_usd or
+                              metadata.total_cost — see server/routers/results.py. */}
+                          {(() => {
+                            const cost =
+                              displayResults.summary?.total_cost ??
+                              displayResults.summary?.total_cost_usd ??
+                              displayResults.metadata?.total_cost ??
+                              0
+                            return cost > 0 ? (
+                              <div className="flex items-center gap-2">
+                                <span className="text-text-tertiary">Cost:</span>
+                                <span className="font-mono text-text-secondary">${cost.toFixed(4)}</span>
+                              </div>
+                            ) : null
+                          })()}
                         </div>
                         {/* Results List */}
                         <div className="flex-1 overflow-auto p-3">
-                          {testResults.results && testResults.results.length > 0 ? (
+                          {displayResults.results && displayResults.results.length > 0 ? (
                             <div className="space-y-2">
-                              {testResults.results.map((result, idx) => (
+                              {displayResults.results.map((result, idx) => (
                                 <TestResultPanel
                                   key={idx}
                                   result={result}
@@ -1535,6 +1775,8 @@ tests:
                           )}
                         </div>
                       </div>
+                        )
+                      })()
                     ) : (
                       /* Logs Content */
                       <StreamingLogViewer logs={streamingLogs} running={running} />
@@ -1575,24 +1817,78 @@ tests:
                     </button>
                   </div>
 
+                  {/* Filter row */}
+                  <div className="flex-shrink-0 flex items-center gap-2 px-3 py-1.5 bg-surface border-b border-border">
+                    <div className="relative flex-1 max-w-sm">
+                      <Search
+                        size={12}
+                        className="absolute left-2 top-1/2 -translate-y-1/2 text-text-disabled pointer-events-none"
+                      />
+                      <input
+                        type="text"
+                        value={historyFilterQuery}
+                        onChange={(e) => setHistoryFilterQuery(e.target.value)}
+                        placeholder="Filter runs (provider, model, run id)…"
+                        className="w-full pl-7 pr-2 py-1 text-xs rounded bg-surface-elevated border border-border focus:border-primary focus:outline-none text-text-primary placeholder:text-text-disabled"
+                      />
+                    </div>
+                    {historyProviders.length > 1 &&
+                      historyProviders.map((p) => (
+                        <button
+                          key={p}
+                          type="button"
+                          onClick={() =>
+                            setHistoryProviderFilter((cur) => (cur === p ? null : p))
+                          }
+                          className={`px-1.5 py-0.5 rounded text-[10px] transition ${
+                            historyProviderFilter === p
+                              ? 'bg-primary/20 text-primary border border-primary/40'
+                              : 'bg-surface-elevated text-text-tertiary border border-border hover:text-text-secondary'
+                          }`}
+                        >
+                          {p}
+                        </button>
+                      ))}
+                    <label className="inline-flex items-center gap-1.5 text-[11px] text-text-tertiary cursor-pointer select-none">
+                      <input
+                        type="checkbox"
+                        checked={historyFailedOnly}
+                        onChange={(e) => setHistoryFailedOnly(e.target.checked)}
+                        className="accent-primary"
+                      />
+                      Failed only
+                    </label>
+                    <span className="text-[10px] text-text-disabled">
+                      {filteredHistory.length} / {resultsHistory.length}
+                    </span>
+                  </div>
+
                   <div className="flex-1 flex flex-col md:flex-row overflow-hidden">
-                    {/* Timeline Chart */}
+                    {/* Timeline Chart — uses the filtered set (so chart + table
+                        agree on which runs are shown) but always sorted
+                        chronologically (so the "Older → Recent" axis stays
+                        meaningful regardless of the table's current sort key). */}
                     <div className="w-full md:w-64 flex-shrink-0 border-b md:border-b-0 md:border-r border-border p-3 overflow-hidden">
                       <div className="text-xs text-text-tertiary mb-2 font-medium">Pass Rate Timeline</div>
                       <div className="h-full flex flex-col justify-end pb-6">
                         <div className="flex items-end gap-1 h-32">
-                          {resultsHistory.slice(0, 12).reverse().map((run, idx) => {
-                            const passRate = run.pass_rate * 100
+                          {filteredHistoryChronological.slice(-12).map((run, idx) => {
+                            const passRate = (run.pass_rate ?? 0) * 100
                             const height = Math.max(4, passRate)
+                            const isPinned = pinnedHistoryRun?.metadata?.run_id === run.run_id
                             return (
-                              <div key={idx} className="flex-1 flex flex-col items-center gap-1">
-                                <div
+                              <div key={`${run.run_id}-${idx}`} className="flex-1 flex flex-col items-center gap-1">
+                                <button
+                                  type="button"
                                   className={`w-full rounded-t transition-all cursor-pointer hover:opacity-80 ${
                                     passRate === 100 ? 'bg-green-500' : passRate >= 50 ? 'bg-yellow-500' : 'bg-red-500'
-                                  }`}
+                                  } ${isPinned ? 'ring-2 ring-primary' : ''}`}
                                   style={{ height: `${height}%` }}
-                                  title={`${passRate.toFixed(0)}% - ${new Date(run.timestamp).toLocaleDateString()}`}
-                                  onClick={() => setSelectedHistoryRun(run)}
+                                  title={`Click to load · ${passRate.toFixed(0)}% · ${new Date(run.timestamp).toLocaleString()}`}
+                                  onClick={() => {
+                                    setSelectedHistoryRun(run)
+                                    pinHistoryRun(run.run_id)
+                                  }}
                                 />
                               </div>
                             )
@@ -1610,24 +1906,31 @@ tests:
                       <table className="w-full text-xs">
                         <thead className="sticky top-0 bg-surface-elevated">
                           <tr className="border-b border-border">
-                            <th className="text-left py-2 px-3 text-text-tertiary font-medium">Date</th>
+                            <SortableTH sortKey="timestamp" align="left" sort={historySort} onSort={toggleHistorySort}>Date</SortableTH>
                             <th className="text-left py-2 px-3 text-text-tertiary font-medium">Provider</th>
                             <th className="text-left py-2 px-3 text-text-tertiary font-medium">Model</th>
-                            <th className="text-center py-2 px-3 text-text-tertiary font-medium">Pass</th>
-                            <th className="text-right py-2 px-3 text-text-tertiary font-medium">Cost</th>
-                            <th className="text-right py-2 px-3 text-text-tertiary font-medium">Time</th>
+                            <SortableTH sortKey="pass" align="center" sort={historySort} onSort={toggleHistorySort}>Pass</SortableTH>
+                            <SortableTH sortKey="cost" align="right" sort={historySort} onSort={toggleHistorySort}>Cost</SortableTH>
+                            <SortableTH sortKey="duration" align="right" sort={historySort} onSort={toggleHistorySort}>Time</SortableTH>
                           </tr>
                         </thead>
                         <tbody>
-                          {resultsHistory.map((run, idx) => (
+                          {filteredHistory.map((run, idx) => {
+                            const isPinned = pinnedHistoryRun?.metadata?.run_id === run.run_id
+                            return (
                             <tr
-                              key={idx}
+                              key={run.run_id || idx}
                               className={`border-b border-border/30 cursor-pointer transition-colors ${
-                                selectedHistoryRun?.run_id === run.run_id
+                                isPinned
+                                  ? 'bg-primary/15'
+                                  : selectedHistoryRun?.run_id === run.run_id
                                   ? 'bg-primary/10'
                                   : 'hover:bg-surface-hover'
                               }`}
-                              onClick={() => setSelectedHistoryRun(selectedHistoryRun?.run_id === run.run_id ? null : run)}
+                              onClick={() => {
+                                setSelectedHistoryRun(run)
+                                pinHistoryRun(run.run_id)
+                              }}
                             >
                               <td className="py-2 px-3 text-text-secondary">
                                 {new Date(run.timestamp).toLocaleDateString()} {new Date(run.timestamp).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
@@ -1654,7 +1957,8 @@ tests:
                                 {run.total_duration?.toFixed(1)}s
                               </td>
                             </tr>
-                          ))}
+                            )
+                          })}
                         </tbody>
                       </table>
                     </div>

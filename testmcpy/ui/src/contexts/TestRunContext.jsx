@@ -18,6 +18,10 @@ export function TestRunProvider({ children }) {
   })
   const [testStatuses, setTestStatuses] = useState({})
   const [activeTestFile, setActiveTestFile] = useState(null)
+  // A historical run pinned into the Results tab. When non-null, the Results
+  // tab renders this instead of the live `testResults`. Cleared automatically
+  // at the start of any new run so live runs reclaim the tab.
+  const [pinnedHistoryRun, setPinnedHistoryRun] = useState(null)
   const wsRef = useRef(null)
 
   // Load persisted state on mount
@@ -80,6 +84,7 @@ export function TestRunProvider({ children }) {
     setRunning(true)
     setActiveTestFile(testFile)
     setTestResults(null)
+    setPinnedHistoryRun(null)
     setStreamingLogs(['🚀 Starting test run...'])
 
     const tests = testLocations.length > 0 ? testLocations : [{ name: 'test' }]
@@ -230,6 +235,7 @@ export function TestRunProvider({ children }) {
     setRunning(true)
     setRunningTestName(testName)
     setActiveTestFile(testFile)
+    setPinnedHistoryRun(null)
     setTestStatuses(prev => ({ ...prev, [testName]: 'running' }))
     setStreamingLogs([`🚀 Running test: ${testName}`])
 
@@ -371,6 +377,7 @@ export function TestRunProvider({ children }) {
     runningTests,
     testStatuses,
     activeTestFile,
+    pinnedHistoryRun,
     // Actions
     runTests,
     runSingleTest,
@@ -380,6 +387,7 @@ export function TestRunProvider({ children }) {
     resetTestStatuses,
     setTestStatuses,
     setTestResults,
+    setPinnedHistoryRun,
     // For "Run All LLMs" mode which manages its own state
     setRunning,
     setRunningTests,

@@ -1,12 +1,15 @@
-import React, { useState, useEffect, useRef } from 'react'
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import {
   ChevronRight,
   ChevronDown,
+  ArrowDown,
+  Copy,
   Brain,
   Wrench,
   CheckCircle2,
   XCircle,
   AlertTriangle,
+  AlertOctagon,
   Loader2,
   MessageSquare,
   FileText,
@@ -18,6 +21,7 @@ import {
   Activity,
   Play,
   BarChart3,
+  Search,
 } from 'lucide-react'
 
 /**
@@ -635,6 +639,85 @@ function renderEntry(entry, idx) {
   }
 }
 
+// Tell whether an entry should be kept under the "errors only" filter.
+// Captures errors, failing evaluators, failing test results, and the
+// emoji-prefixed status lines TestRunContext emits for runtime/connection
+// failures (❌ / ⚠️ — `parseLogs` classifies those as `status` entries).
+// test_header entries are NOT considered errors here — they're added back
+// in only when at least one child of the group matches (otherwise passing
+// tests would render as empty cards).
+function isErrorEntry(entry) {
+  if (entry.type === 'error') return true
+  if (entry.type === 'evaluator' && entry.passed === false) return true
+  if (entry.type === 'test_result' && entry.passed === false) return true
+  if (entry.type === 'status' && (entry.icon === '❌' || entry.icon === '⚠️')) return true
+  if (entry.type === 'provider_status' && /error|failed|traceback/i.test(entry.text || '')) {
+    return true
+  }
+  if (entry.type === 'generic' && /error|failed|traceback/i.test(entry.text || '')) {
+    return true
+  }
+  return false
+}
+
+// Apply user filters (free-text + errors-only) to entries before grouping.
+// The active running test's entries always pass through so users don't lose
+// the live view while filtering. test_header entries are only kept when at
+// least one child of the group matches (or the test is active) — this avoids
+// rendering empty test cards under "Errors only".
+function filterEntries(entries, query, errorsOnly, activeTestName) {
+  const q = query.trim().toLowerCase()
+  if (!q && !errorsOnly) return entries
+
+  const matchesQuery = (e) => {
+    if (!q) return true
+    if (e.type === 'test_header' && (e.name || '').toLowerCase().includes(q)) return true
+    const haystack = [e.text, e.name, e.args, e.raw, e.provider, e.messageType]
+      .filter(Boolean)
+      .join(' ')
+      .toLowerCase()
+    return haystack.includes(q)
+  }
+
+  // First pass: per-entry keep decision (excluding test_header — handled below).
+  const baseKeep = entries.map((e) => {
+    if (e.type === 'test_header') return false
+    if (errorsOnly && !isErrorEntry(e)) return false
+    return matchesQuery(e)
+  })
+
+  // Second pass: keep a test_header iff (a) the test is the active running
+  // one, OR (b) the header itself matches the query, OR (c) at least one
+  // child entry survived the first pass. Active tests force-include all of
+  // their children too.
+  let currentHeaderIdx = -1
+  let currentIsActive = false
+  let currentHeaderQueryMatch = false
+  let currentHasVisibleChild = false
+  const result = baseKeep.slice()
+  const finalize = () => {
+    if (currentHeaderIdx >= 0) {
+      result[currentHeaderIdx] =
+        currentIsActive || currentHeaderQueryMatch || currentHasVisibleChild
+    }
+  }
+  entries.forEach((e, i) => {
+    if (e.type === 'test_header') {
+      finalize()
+      currentHeaderIdx = i
+      currentIsActive = e.name === activeTestName
+      currentHeaderQueryMatch = !errorsOnly && q !== '' && (e.name || '').toLowerCase().includes(q)
+      currentHasVisibleChild = false
+    } else if (currentHeaderIdx >= 0) {
+      if (currentIsActive) result[i] = true
+      if (result[i]) currentHasVisibleChild = true
+    }
+  })
+  finalize()
+
+  return entries.filter((_, i) => result[i])
+}
+
 // Bucket entries into per-test groups so users can see the full log of every
 // test in a multi-test run (not just the latest one). Entries before the first
 // test header become the "preamble" group.
@@ -660,10 +743,38 @@ function groupEntriesByTest(entries) {
 
 function PerTestGroup({ group, isActive, defaultOpen }) {
   const [open, setOpen] = useState(defaultOpen)
+  const [copied, setCopied] = useState(false)
   // Keep the active test open while it's running
   useEffect(() => {
     if (isActive) setOpen(true)
   }, [isActive])
+
+  const copyLogs = useCallback(
+    async (e) => {
+      e.stopPropagation()
+      // entry.raw is only the first line for multi-line entries (LLM Response
+      // blocks, numbered tool-call args, etc.) — augment with parsed text/args
+      // so the copied output reproduces the visible body.
+      const text = group.entries
+        .map((entry) => {
+          const lines = []
+          if (entry.raw) lines.push(entry.raw)
+          if (entry.text && entry.text !== entry.raw) lines.push(`  ${entry.text}`)
+          if (entry.args) lines.push(`  args: ${entry.args}`)
+          return lines.join('\n')
+        })
+        .filter(Boolean)
+        .join('\n')
+      try {
+        await navigator.clipboard.writeText(text)
+        setCopied(true)
+        setTimeout(() => setCopied(false), 1500)
+      } catch {
+        // clipboard write blocked (e.g. insecure context) — silently ignore
+      }
+    },
+    [group.entries],
+  )
 
   const passed = group.result?.passed
   const status = !group.result
@@ -677,36 +788,60 @@ function PerTestGroup({ group, isActive, defaultOpen }) {
     pending: 'bg-surface-elevated border-border/50',
   }[status]
 
+  // Solid header tint so the sticky bar reads cleanly when entries scroll under it.
+  const headerTint = {
+    running: 'bg-yellow-500/20',
+    passed: 'bg-green-500/15',
+    failed: 'bg-red-500/15',
+    pending: 'bg-surface-elevated',
+  }[status]
+
   return (
-    <div className={`mt-2 first:mt-0 rounded-lg border ${statusClasses} overflow-hidden`}>
-      <button
-        type="button"
-        onClick={() => setOpen(!open)}
-        className="w-full flex items-center gap-2 px-2.5 py-1.5 hover:bg-surface-hover/40 transition-colors text-left"
+    <div className={`mt-2 first:mt-0 rounded-lg border ${statusClasses}`}>
+      {/* Header is two siblings (toggle + copy) inside a sticky row, not a
+          button-inside-button — prior structure was invalid HTML. */}
+      <div
+        className={`sticky top-0 z-10 flex items-center gap-2 px-2.5 py-1.5 ${headerTint} backdrop-blur-sm rounded-t-lg`}
       >
-        <ChevronRight
-          size={12}
-          className="text-text-disabled transition-transform"
-          style={{ transform: open ? 'rotate(90deg)' : 'rotate(0deg)' }}
-        />
-        {status === 'running' ? (
-          <Loader2 size={13} className="animate-spin text-yellow-400 flex-shrink-0" />
-        ) : status === 'passed' ? (
-          <CheckCircle2 size={13} className="text-green-400 flex-shrink-0" />
-        ) : status === 'failed' ? (
-          <XCircle size={13} className="text-red-400 flex-shrink-0" />
-        ) : (
-          <Play size={13} className="text-primary flex-shrink-0" />
-        )}
-        <span className="text-xs font-semibold text-text-primary truncate flex-1">{group.name}</span>
-        {group.result?.time && (
-          <span className="text-[10px] text-text-tertiary flex items-center gap-0.5">
-            <Clock size={10} />
-            {group.result.time}s
-          </span>
-        )}
-        <span className="text-[10px] text-text-disabled">{group.entries.length} entries</span>
-      </button>
+        <button
+          type="button"
+          onClick={() => setOpen(!open)}
+          aria-expanded={open}
+          className="flex items-center gap-2 flex-1 min-w-0 text-left hover:brightness-110 transition"
+        >
+          <ChevronRight
+            size={12}
+            className="text-text-disabled transition-transform flex-shrink-0"
+            style={{ transform: open ? 'rotate(90deg)' : 'rotate(0deg)' }}
+          />
+          {status === 'running' ? (
+            <Loader2 size={13} className="animate-spin text-yellow-400 flex-shrink-0" />
+          ) : status === 'passed' ? (
+            <CheckCircle2 size={13} className="text-green-400 flex-shrink-0" />
+          ) : status === 'failed' ? (
+            <XCircle size={13} className="text-red-400 flex-shrink-0" />
+          ) : (
+            <Play size={13} className="text-primary flex-shrink-0" />
+          )}
+          <span className="text-xs font-semibold text-text-primary truncate flex-1">{group.name}</span>
+          {group.result?.time && (
+            <span className="text-[10px] text-text-tertiary flex items-center gap-0.5">
+              <Clock size={10} />
+              {group.result.time}s
+            </span>
+          )}
+          <span className="text-[10px] text-text-disabled">{group.entries.length} entries</span>
+        </button>
+        <button
+          type="button"
+          onClick={copyLogs}
+          title={copied ? 'Copied' : 'Copy this test’s logs'}
+          aria-label="Copy logs for this test"
+          className="p-0.5 rounded text-text-disabled hover:text-text-primary hover:bg-surface-hover transition flex-shrink-0"
+        >
+          {copied ? <CheckCircle2 size={11} className="text-green-400" /> : <Copy size={11} />}
+        </button>
+      </div>
       {open && (
         <div className="px-2 pb-2 pt-1 border-t border-border/30">
           {group.entries.map((entry, idx) => renderEntry(entry, idx))}
@@ -725,28 +860,129 @@ function PerTestGroup({ group, isActive, defaultOpen }) {
 export default function StreamingLogViewer({ logs, running }) {
   const containerRef = useRef(null)
   const bottomRef = useRef(null)
-  const entries = parseLogs(logs)
-  const { preamble, tests } = groupEntriesByTest(entries)
+  // Memoized — typing in the filter or toggling follow no longer re-parses the
+  // entire log array on every keystroke.
+  const allEntries = useMemo(() => parseLogs(logs), [logs])
 
-  // Auto-scroll to bottom when new logs arrive
+  // Filter UI state
+  const [filterQuery, setFilterQuery] = useState('')
+  const [errorsOnly, setErrorsOnly] = useState(false)
+
+  // Compute active test name from the *unfiltered* entries so it survives
+  // the filter. (The filter then preserves this group's entries.)
+  const activeTestName = useMemo(() => {
+    if (!running) return null
+    for (let i = allEntries.length - 1; i >= 0; i--) {
+      const e = allEntries[i]
+      if (e.type === 'test_result') break
+      if (e.type === 'test_header') return e.name
+    }
+    return null
+  }, [allEntries, running])
+
+  const visibleEntries = useMemo(
+    () => filterEntries(allEntries, filterQuery, errorsOnly, activeTestName),
+    [allEntries, filterQuery, errorsOnly, activeTestName],
+  )
+  const { preamble, tests } = useMemo(() => groupEntriesByTest(visibleEntries), [visibleEntries])
+  const filterActive = filterQuery.trim().length > 0 || errorsOnly
+  const hiddenCount = allEntries.length - visibleEntries.length
+
+  // Smart follow-tail: only auto-scroll when the user is parked at the bottom.
+  // First scroll-up disables follow; clicking the "Follow" pill re-enables it.
+  const [followTail, setFollowTail] = useState(true)
+  const prevLogsLenRef = useRef(logs.length)
+
+  // When the parent clears logs (length drops to 0), a new run is starting —
+  // reset follow-tail so the user isn't stranded in scroll-back from the
+  // previous run.
   useEffect(() => {
+    const prev = prevLogsLenRef.current
+    if (prev > 0 && logs.length === 0) setFollowTail(true)
+    prevLogsLenRef.current = logs.length
+  }, [logs.length])
+
+  const scrollToBottom = useCallback(() => {
     if (bottomRef.current) {
       bottomRef.current.scrollIntoView({ behavior: 'smooth' })
     }
-  }, [logs])
+  }, [])
 
-  // Active test = last test_header without a test_result (only meaningful while running)
-  let activeTestName = null
-  if (running && tests.length > 0) {
-    const last = tests[tests.length - 1]
-    if (!last.result) activeTestName = last.name
-  }
+  useEffect(() => {
+    if (followTail) scrollToBottom()
+  }, [logs, followTail, scrollToBottom])
+
+  const handleScroll = useCallback(() => {
+    const el = containerRef.current
+    if (!el) return
+    // Treat "near bottom" (within 32px) as still-following; this avoids the
+    // smooth-scroll overshoot from accidentally disabling follow.
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 32
+    setFollowTail((prev) => (prev !== atBottom ? atBottom : prev))
+  }, [])
+
+  const showFollowPill = running && !followTail
 
   return (
-    <div ref={containerRef} className="h-full overflow-auto px-3 py-2 bg-surface">
-      {entries.length === 0 ? (
+    <div className="h-full relative flex flex-col">
+    {/* Filter toolbar */}
+    <div className="flex-shrink-0 flex items-center gap-2 px-3 py-1.5 bg-surface-elevated border-b border-border">
+      <div className="relative flex-1 max-w-sm">
+        <Search
+          size={12}
+          className="absolute left-2 top-1/2 -translate-y-1/2 text-text-disabled pointer-events-none"
+        />
+        <input
+          type="text"
+          value={filterQuery}
+          onChange={(e) => setFilterQuery(e.target.value)}
+          placeholder="Filter logs (tool name, text, args)…"
+          className="w-full pl-7 pr-2 py-1 text-xs rounded bg-surface border border-border focus:border-primary focus:outline-none text-text-primary placeholder:text-text-disabled"
+        />
+      </div>
+      <button
+        type="button"
+        onClick={() => setErrorsOnly((v) => !v)}
+        title="Show only errors and failing evaluators/results"
+        className={`inline-flex items-center gap-1 px-2 py-1 rounded text-[10px] uppercase tracking-wide transition-colors ${
+          errorsOnly
+            ? 'bg-red-500/15 text-red-300 border border-red-500/40'
+            : 'bg-surface text-text-disabled border border-border hover:text-text-secondary'
+        }`}
+      >
+        <AlertOctagon size={10} />
+        Errors only
+      </button>
+      {filterActive && (
+        <span className="text-[10px] text-text-tertiary">
+          {hiddenCount > 0 ? `${hiddenCount} hidden` : 'no matches hidden'}
+        </span>
+      )}
+      {filterActive && (
+        <button
+          type="button"
+          onClick={() => {
+            setFilterQuery('')
+            setErrorsOnly(false)
+          }}
+          className="text-[10px] text-text-tertiary hover:text-text-primary"
+        >
+          Clear
+        </button>
+      )}
+    </div>
+    <div
+      ref={containerRef}
+      onScroll={handleScroll}
+      className="flex-1 overflow-auto px-3 py-2 bg-surface"
+    >
+      {allEntries.length === 0 ? (
         <div className="text-text-tertiary text-center py-4 text-xs">
           Waiting for test execution...
+        </div>
+      ) : visibleEntries.length === 0 && filterActive ? (
+        <div className="text-text-tertiary text-center py-4 text-xs">
+          No entries match the current filter.
         </div>
       ) : (
         <div className="space-y-0">
@@ -773,6 +1009,21 @@ export default function StreamingLogViewer({ logs, running }) {
           <div ref={bottomRef} />
         </div>
       )}
+    </div>
+    {showFollowPill && (
+      <button
+        type="button"
+        onClick={() => {
+          setFollowTail(true)
+          scrollToBottom()
+        }}
+        className="absolute bottom-3 right-3 z-20 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-medium bg-primary text-white shadow-md hover:opacity-90 transition"
+        title="Resume following the latest log output"
+      >
+        <ArrowDown size={12} />
+        Follow
+      </button>
+    )}
     </div>
   )
 }

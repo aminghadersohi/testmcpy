@@ -1426,6 +1426,17 @@ class ClaudeSDKProvider(LLMProvider):
                 # so the SDK doesn't kick off its own claude.ai/oauth flow.
                 if self.auth_config.get("oauth_auto_discover"):
                     token = await self._read_cached_oauth_token()
+                    # Fail fast: without a cached token the SDK would silently
+                    # register the MCP without auth and bounce the user to its
+                    # own claude.ai/oauth flow — exactly the bug this branch
+                    # exists to prevent.
+                    if not token:
+                        raise ValueError(
+                            f"No usable cached OAuth token for {self.mcp_url}. "
+                            "Authenticate the MCP profile first (open it on the "
+                            "MCP Profiles page or run a smoke test to trigger "
+                            "the OAuth flow), then re-run the test."
+                        )
                 else:
                     token = await self._fetch_oauth_token()
 
@@ -1561,6 +1572,14 @@ class ClaudeSDKProvider(LLMProvider):
 
         access_token = getattr(oauth_token, "access_token", None)
         if not access_token:
+            # Cache file exists but the payload is malformed or missing the
+            # access_token field. Surface this so it's not silently swallowed
+            # — the caller will then raise with re-auth instructions.
+            _claude_sdk_logger.warning(
+                "[ClaudeSDK] Cached OAuth payload for %s is missing access_token "
+                "— authenticate the MCP profile again to refresh it.",
+                server_base_url,
+            )
             return None
 
         _claude_sdk_logger.info(

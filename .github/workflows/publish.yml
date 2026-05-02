@@ -1,8 +1,24 @@
 name: Publish to PyPI
 
 on:
+  # Primary trigger: pushing a vX.Y.Z tag is enough — no need to also
+  # create a GitHub Release. This matches the existing
+  # `git tag vX.Y.Z && git push --tags` flow used after every version bump.
+  push:
+    tags:
+      - 'v*'
+  # Kept as a fallback so creating a GitHub Release (web UI / gh release
+  # create) still triggers a publish if you prefer that flow.
   release:
-    types: [published]  # Trigger on GitHub releases
+    types: [published]
+
+# Don't allow two publishes for the same ref to race. Idempotency on
+# twine upload (--skip-existing below) means the second one is harmless,
+# but we still don't want simultaneous Homebrew commits clobbering each
+# other.
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   publish:
@@ -30,7 +46,12 @@ jobs:
       env:
         TWINE_USERNAME: __token__
         TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
-      run: python -m twine upload dist/*
+      # --skip-existing makes the upload idempotent. If the artifact is
+      # already on PyPI (e.g. a previous run uploaded it, or a manual
+      # twine push from a developer's laptop), we log "skipping" instead
+      # of crashing — important now that the workflow can fire on both
+      # tag pushes and GitHub Releases.
+      run: python -m twine upload --skip-existing dist/*
     
     - name: Wait for PyPI to process
       run: sleep 10

@@ -31,6 +31,7 @@ import { useTestRun } from '../contexts/TestRunContext'
 import { useEditorTheme } from '../hooks/useEditorTheme'
 import StreamingLogViewer from '../components/StreamingLogViewer'
 import EditorStatusBar from '../components/EditorStatusBar'
+import EditorTabStrip from '../components/EditorTabStrip'
 
 // Parse YAML content to find test locations (line numbers)
 function parseTestLocations(content) {
@@ -1290,29 +1291,20 @@ tests:
           <>
             {/* Editor Header - fixed height, won't shrink */}
             <div className="flex-shrink-0 border-b border-border bg-surface-elevated">
-              {/* Top row: File info and edit controls */}
-              <div className="px-4 py-3 flex items-center justify-between">
-                <div className="flex items-center gap-3">
-                  <div className="p-2 rounded-lg bg-primary/10">
-                    <FileText size={18} className="text-primary" />
-                  </div>
-                  <div>
-                    <h2 className="font-semibold text-text-primary">{selectedFile.filename}</h2>
-                    {selectedFile.relative_path && selectedFile.relative_path.includes('/') && (
-                      <p className="text-xs text-text-tertiary mt-0.5">
-                        {selectedFile.relative_path.split('/').slice(0, -1).join('/')}
-                      </p>
-                    )}
-                  </div>
-                  {testLocations.length > 0 && (
-                    <span className="px-2 py-0.5 text-xs rounded-full bg-surface text-text-secondary border border-border">
-                      {testLocations.length} test{testLocations.length !== 1 ? 's' : ''}
-                    </span>
-                  )}
-                </div>
-
-                <div className="flex items-center gap-2">
-                  {editMode ? (
+              {/* Tab strip: file as a tab + edit controls on the right */}
+              <EditorTabStrip
+                filename={selectedFile.filename}
+                pathSubtitle={selectedFile.relative_path || selectedFile.filename}
+                testCount={testLocations.length}
+                dirty={editMode && fileContent !== selectedFile.content}
+                onClose={() => {
+                  setSelectedFile(null)
+                  setEditMode(false)
+                  setFileContent('')
+                  localStorage.removeItem('selectedTestFile')
+                }}
+                rightSlot={
+                  editMode ? (
                     <>
                       <button
                         onClick={() => {
@@ -1340,9 +1332,9 @@ tests:
                       <Edit size={16} />
                       <span>Edit</span>
                     </button>
-                  )}
-                </div>
-              </div>
+                  )
+                }
+              />
 
               {/* Bottom row: Run controls and LLM info */}
               <div className="px-4 py-2 flex items-center justify-between border-t border-border/50 bg-surface">

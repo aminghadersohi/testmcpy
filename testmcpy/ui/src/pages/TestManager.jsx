@@ -87,6 +87,36 @@ function parseTestLocations(content) {
 }
 
 // Available evaluator types for the wizard
+// Accessible sortable column header. The clickable area is a real <button>
+// inside the <th>, so keyboard users can activate it with Enter/Space, and
+// the th carries `aria-sort` so assistive tech announces the active sort.
+function SortableTH({ sortKey, align = 'left', sort, onSort, children }) {
+  const ariaSort =
+    sort.key === sortKey ? (sort.dir === 'asc' ? 'ascending' : 'descending') : 'none'
+  const alignClass =
+    align === 'right' ? 'text-right justify-end' : align === 'center' ? 'text-center justify-center' : 'text-left'
+  const indicator =
+    sort.key !== sortKey ? (
+      <ChevronsUpDown size={10} className="text-text-disabled" />
+    ) : sort.dir === 'asc' ? (
+      <ChevronUp size={10} className="text-primary" />
+    ) : (
+      <ChevronDown size={10} className="text-primary" />
+    )
+  return (
+    <th aria-sort={ariaSort} className={`py-0 px-0 text-text-tertiary font-medium ${align === 'right' ? 'text-right' : align === 'center' ? 'text-center' : 'text-left'}`}>
+      <button
+        type="button"
+        onClick={() => onSort(sortKey)}
+        className={`w-full py-2 px-3 hover:text-text-secondary inline-flex items-center gap-1 ${alignClass}`}
+      >
+        {children}
+        {indicator}
+      </button>
+    </th>
+  )
+}
+
 const EVALUATOR_TYPES = [
   { name: 'execution_successful', desc: 'Check that the LLM execution completed without errors', args: [] },
   { name: 'was_mcp_tool_called', desc: 'Check that a specific MCP tool was called', args: [{ key: 'tool_name', label: 'Tool Name', required: true }] },
@@ -610,17 +640,33 @@ function TestManager({ selectedProfiles = [], selectedLlmProfile = null, llmProf
     }
   }
 
-  // Pin a historical run into the Results tab. Refuses to overwrite a live
-  // run in progress so users don't accidentally lose what they're watching.
+  // Sequencing for history-pin fetches. We track the latest pin request id
+  // and abort the previous in-flight fetch on every new click, so a slow
+  // earlier response can't win the race and pin the wrong run. Also re-checks
+  // `running` AFTER the await: if a new run started during the fetch, drop
+  // the response on the floor instead of stomping the live results.
+  const pinFetchRef = useRef({ id: 0, controller: null })
   const pinHistoryRun = async (runId) => {
     if (!runId || running) return
+    if (pinFetchRef.current.controller) {
+      pinFetchRef.current.controller.abort()
+    }
+    const myId = ++pinFetchRef.current.id
+    const controller = new AbortController()
+    pinFetchRef.current.controller = controller
     try {
-      const res = await fetch(`/api/results/run/${encodeURIComponent(runId)}`)
+      const res = await fetch(`/api/results/run/${encodeURIComponent(runId)}`, {
+        signal: controller.signal,
+      })
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       const data = await res.json()
+      // A newer pin click superseded us, OR a live run started while we were
+      // fetching — either way, abandon this response.
+      if (myId !== pinFetchRef.current.id || running) return
       setPinnedHistoryRun(data)
       setBottomPanelTab('results')
     } catch (error) {
+      if (error.name === 'AbortError') return
       console.error('Failed to load historical run:', error)
     }
   }
@@ -630,6 +676,17 @@ function TestManager({ selectedProfiles = [], selectedLlmProfile = null, llmProf
     () => Array.from(new Set(resultsHistory.map((r) => r.provider).filter(Boolean))).sort(),
     [resultsHistory],
   )
+
+  // Auto-clear a stale provider filter when switching to a file whose history
+  // doesn't contain the previously-selected provider. Otherwise the chip
+  // disappears (provider chips only render for providers in the current
+  // history) but the filter stays applied, leaving the table mysteriously
+  // empty with no UI to clear it.
+  useEffect(() => {
+    if (historyProviderFilter && !historyProviders.includes(historyProviderFilter)) {
+      setHistoryProviderFilter(null)
+    }
+  }, [historyProviders, historyProviderFilter])
 
   // History view derives a filtered + sorted view; the source array is left
   // untouched so the chart can still slice the most recent untouched runs if
@@ -661,6 +718,16 @@ function TestManager({ selectedProfiles = [], selectedLlmProfile = null, llmProf
     }
     return [...filtered].sort(cmp)
   }, [resultsHistory, historyFilterQuery, historyProviderFilter, historyFailedOnly, historySort])
+
+  // The timeline chart's "Older → Recent" axis must always be chronological,
+  // independent of the table's current sort key. Without this the bars
+  // re-order when the user sorts by Pass/Cost/Time and the axis labels
+  // become misleading.
+  const filteredHistoryChronological = useMemo(() => {
+    return [...filteredHistory].sort(
+      (a, b) => new Date(a.timestamp) - new Date(b.timestamp),
+    )
+  }, [filteredHistory])
 
   const toggleHistorySort = (key) => {
     setHistorySort((prev) =>
@@ -1375,6 +1442,12 @@ tests:
                 testCount={testLocations.length}
                 dirty={editMode && fileContent !== selectedFile.content}
                 onClose={() => {
+                  // Confirm before discarding unsaved edits — closing the tab
+                  // shouldn't silently lose user work.
+                  const dirty = editMode && fileContent !== selectedFile.content
+                  if (dirty && !window.confirm('You have unsaved changes. Close anyway?')) {
+                    return
+                  }
                   setSelectedFile(null)
                   setEditMode(false)
                   setFileContent('')
@@ -1639,7 +1712,14 @@ tests:
                             <span className="flex-1" />
                             <button
                               type="button"
-                              onClick={() => setPinnedHistoryRun(null)}
+                              onClick={() => {
+                                setPinnedHistoryRun(null)
+                                // If there's no live testResults to fall back
+                                // to, the Results tab disappears — bounce to
+                                // Logs so we don't leave the panel orphaned
+                                // with no tab highlighted.
+                                if (!testResults) setBottomPanelTab('logs')
+                              }}
                               className="px-2 py-0.5 rounded text-[11px] text-primary hover:bg-primary/20 transition"
                             >
                               Unpin
@@ -1658,12 +1738,23 @@ tests:
                             <span className="text-text-tertiary">Failed:</span>
                             <span className="font-semibold text-red-400">{displayResults.summary.failed}</span>
                           </div>
-                          {displayResults.summary.total_cost > 0 && (
-                            <div className="flex items-center gap-2">
-                              <span className="text-text-tertiary">Cost:</span>
-                              <span className="font-mono text-text-secondary">${displayResults.summary.total_cost.toFixed(4)}</span>
-                            </div>
-                          )}
+                          {/* Live and historical responses use different cost field
+                              names. Live: summary.total_cost. Historical (from
+                              /api/results/run/{id}): summary.total_cost_usd or
+                              metadata.total_cost — see server/routers/results.py. */}
+                          {(() => {
+                            const cost =
+                              displayResults.summary?.total_cost ??
+                              displayResults.summary?.total_cost_usd ??
+                              displayResults.metadata?.total_cost ??
+                              0
+                            return cost > 0 ? (
+                              <div className="flex items-center gap-2">
+                                <span className="text-text-tertiary">Cost:</span>
+                                <span className="font-mono text-text-secondary">${cost.toFixed(4)}</span>
+                              </div>
+                            ) : null
+                          })()}
                         </div>
                         {/* Results List */}
                         <div className="flex-1 overflow-auto p-3">
@@ -1773,12 +1864,15 @@ tests:
                   </div>
 
                   <div className="flex-1 flex flex-col md:flex-row overflow-hidden">
-                    {/* Timeline Chart — uses the filtered set so the chart and table agree */}
+                    {/* Timeline Chart — uses the filtered set (so chart + table
+                        agree on which runs are shown) but always sorted
+                        chronologically (so the "Older → Recent" axis stays
+                        meaningful regardless of the table's current sort key). */}
                     <div className="w-full md:w-64 flex-shrink-0 border-b md:border-b-0 md:border-r border-border p-3 overflow-hidden">
                       <div className="text-xs text-text-tertiary mb-2 font-medium">Pass Rate Timeline</div>
                       <div className="h-full flex flex-col justify-end pb-6">
                         <div className="flex items-end gap-1 h-32">
-                          {filteredHistory.slice(0, 12).slice().reverse().map((run, idx) => {
+                          {filteredHistoryChronological.slice(-12).map((run, idx) => {
                             const passRate = (run.pass_rate ?? 0) * 100
                             const height = Math.max(4, passRate)
                             const isPinned = pinnedHistoryRun?.metadata?.run_id === run.run_id
@@ -1812,32 +1906,12 @@ tests:
                       <table className="w-full text-xs">
                         <thead className="sticky top-0 bg-surface-elevated">
                           <tr className="border-b border-border">
-                            <th
-                              className="text-left py-2 px-3 text-text-tertiary font-medium cursor-pointer hover:text-text-secondary"
-                              onClick={() => toggleHistorySort('timestamp')}
-                            >
-                              <span className="inline-flex items-center gap-1">Date <SortIcon k="timestamp" /></span>
-                            </th>
+                            <SortableTH sortKey="timestamp" align="left" sort={historySort} onSort={toggleHistorySort}>Date</SortableTH>
                             <th className="text-left py-2 px-3 text-text-tertiary font-medium">Provider</th>
                             <th className="text-left py-2 px-3 text-text-tertiary font-medium">Model</th>
-                            <th
-                              className="text-center py-2 px-3 text-text-tertiary font-medium cursor-pointer hover:text-text-secondary"
-                              onClick={() => toggleHistorySort('pass')}
-                            >
-                              <span className="inline-flex items-center gap-1">Pass <SortIcon k="pass" /></span>
-                            </th>
-                            <th
-                              className="text-right py-2 px-3 text-text-tertiary font-medium cursor-pointer hover:text-text-secondary"
-                              onClick={() => toggleHistorySort('cost')}
-                            >
-                              <span className="inline-flex items-center gap-1 justify-end">Cost <SortIcon k="cost" /></span>
-                            </th>
-                            <th
-                              className="text-right py-2 px-3 text-text-tertiary font-medium cursor-pointer hover:text-text-secondary"
-                              onClick={() => toggleHistorySort('duration')}
-                            >
-                              <span className="inline-flex items-center gap-1 justify-end">Time <SortIcon k="duration" /></span>
-                            </th>
+                            <SortableTH sortKey="pass" align="center" sort={historySort} onSort={toggleHistorySort}>Pass</SortableTH>
+                            <SortableTH sortKey="cost" align="right" sort={historySort} onSort={toggleHistorySort}>Cost</SortableTH>
+                            <SortableTH sortKey="duration" align="right" sort={historySort} onSort={toggleHistorySort}>Time</SortableTH>
                           </tr>
                         </thead>
                         <tbody>

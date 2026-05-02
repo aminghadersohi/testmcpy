@@ -45,8 +45,12 @@ export default function EditorTabStrip({
               e.stopPropagation()
               onClose()
             }}
-            className="p-0.5 rounded text-text-disabled opacity-0 group-hover:opacity-100 hover:text-text-primary hover:bg-surface-hover transition"
+            // Hidden by default (cosmetic) but always discoverable via keyboard
+            // — group-focus-within reveals when the tab itself is focused, and
+            // focus:opacity-100 keeps it visible while the close button has focus.
+            className="p-0.5 rounded text-text-disabled opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus:opacity-100 hover:text-text-primary hover:bg-surface-hover transition"
             title="Close file"
+            aria-label="Close file"
           >
             <X size={12} />
           </button>

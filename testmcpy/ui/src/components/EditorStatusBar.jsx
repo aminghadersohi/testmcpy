@@ -7,6 +7,7 @@ function ToggleChip({ active, onClick, title, icon, label }) {
       type="button"
       onClick={onClick}
       title={title}
+      aria-pressed={active}
       className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] uppercase tracking-wide transition-colors ${
         active
           ? 'bg-primary/15 text-primary'

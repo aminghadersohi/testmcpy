@@ -1,7 +1,8 @@
-import React, { useState, useEffect, useRef } from 'react'
+import React, { useState, useEffect, useRef, useCallback } from 'react'
 import {
   ChevronRight,
   ChevronDown,
+  ArrowDown,
   Brain,
   Wrench,
   CheckCircle2,
@@ -677,12 +678,20 @@ function PerTestGroup({ group, isActive, defaultOpen }) {
     pending: 'bg-surface-elevated border-border/50',
   }[status]
 
+  // Solid header tint so the sticky bar reads cleanly when entries scroll under it.
+  const headerTint = {
+    running: 'bg-yellow-500/20',
+    passed: 'bg-green-500/15',
+    failed: 'bg-red-500/15',
+    pending: 'bg-surface-elevated',
+  }[status]
+
   return (
-    <div className={`mt-2 first:mt-0 rounded-lg border ${statusClasses} overflow-hidden`}>
+    <div className={`mt-2 first:mt-0 rounded-lg border ${statusClasses}`}>
       <button
         type="button"
         onClick={() => setOpen(!open)}
-        className="w-full flex items-center gap-2 px-2.5 py-1.5 hover:bg-surface-hover/40 transition-colors text-left"
+        className={`sticky top-0 z-10 w-full flex items-center gap-2 px-2.5 py-1.5 ${headerTint} backdrop-blur-sm hover:brightness-110 transition rounded-t-lg text-left`}
       >
         <ChevronRight
           size={12}
@@ -728,12 +737,28 @@ export default function StreamingLogViewer({ logs, running }) {
   const entries = parseLogs(logs)
   const { preamble, tests } = groupEntriesByTest(entries)
 
-  // Auto-scroll to bottom when new logs arrive
-  useEffect(() => {
+  // Smart follow-tail: only auto-scroll when the user is parked at the bottom.
+  // First scroll-up disables follow; clicking the "Follow" pill re-enables it.
+  const [followTail, setFollowTail] = useState(true)
+
+  const scrollToBottom = useCallback(() => {
     if (bottomRef.current) {
       bottomRef.current.scrollIntoView({ behavior: 'smooth' })
     }
-  }, [logs])
+  }, [])
+
+  useEffect(() => {
+    if (followTail) scrollToBottom()
+  }, [logs, followTail, scrollToBottom])
+
+  const handleScroll = useCallback(() => {
+    const el = containerRef.current
+    if (!el) return
+    // Treat "near bottom" (within 32px) as still-following; this avoids the
+    // smooth-scroll overshoot from accidentally disabling follow.
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 32
+    setFollowTail((prev) => (prev !== atBottom ? atBottom : prev))
+  }, [])
 
   // Active test = last test_header without a test_result (only meaningful while running)
   let activeTestName = null
@@ -742,8 +767,15 @@ export default function StreamingLogViewer({ logs, running }) {
     if (!last.result) activeTestName = last.name
   }
 
+  const showFollowPill = running && !followTail
+
   return (
-    <div ref={containerRef} className="h-full overflow-auto px-3 py-2 bg-surface">
+    <div className="h-full relative">
+    <div
+      ref={containerRef}
+      onScroll={handleScroll}
+      className="h-full overflow-auto px-3 py-2 bg-surface"
+    >
       {entries.length === 0 ? (
         <div className="text-text-tertiary text-center py-4 text-xs">
           Waiting for test execution...
@@ -773,6 +805,21 @@ export default function StreamingLogViewer({ logs, running }) {
           <div ref={bottomRef} />
         </div>
       )}
+    </div>
+    {showFollowPill && (
+      <button
+        type="button"
+        onClick={() => {
+          setFollowTail(true)
+          scrollToBottom()
+        }}
+        className="absolute bottom-3 right-3 z-20 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-medium bg-primary text-white shadow-md hover:opacity-90 transition"
+        title="Resume following the latest log output"
+      >
+        <ArrowDown size={12} />
+        Follow
+      </button>
+    )}
     </div>
   )
 }

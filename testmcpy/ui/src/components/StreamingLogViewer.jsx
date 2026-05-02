@@ -3,6 +3,7 @@ import {
   ChevronRight,
   ChevronDown,
   ArrowDown,
+  Copy,
   Brain,
   Wrench,
   CheckCircle2,
@@ -720,10 +721,26 @@ function groupEntriesByTest(entries) {
 
 function PerTestGroup({ group, isActive, defaultOpen }) {
   const [open, setOpen] = useState(defaultOpen)
+  const [copied, setCopied] = useState(false)
   // Keep the active test open while it's running
   useEffect(() => {
     if (isActive) setOpen(true)
   }, [isActive])
+
+  const copyLogs = useCallback(
+    async (e) => {
+      e.stopPropagation()
+      const text = group.entries.map((entry) => entry.raw).filter(Boolean).join('\n')
+      try {
+        await navigator.clipboard.writeText(text)
+        setCopied(true)
+        setTimeout(() => setCopied(false), 1500)
+      } catch {
+        // clipboard write blocked (e.g. insecure context) — silently ignore
+      }
+    },
+    [group.entries],
+  )
 
   const passed = group.result?.passed
   const status = !group.result
@@ -774,6 +791,18 @@ function PerTestGroup({ group, isActive, defaultOpen }) {
           </span>
         )}
         <span className="text-[10px] text-text-disabled">{group.entries.length} entries</span>
+        <span
+          role="button"
+          tabIndex={0}
+          onClick={copyLogs}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' || e.key === ' ') copyLogs(e)
+          }}
+          title={copied ? 'Copied' : 'Copy this test’s logs'}
+          className="ml-1 p-0.5 rounded text-text-disabled hover:text-text-primary hover:bg-surface-hover transition"
+        >
+          {copied ? <CheckCircle2 size={11} className="text-green-400" /> : <Copy size={11} />}
+        </span>
       </button>
       {open && (
         <div className="px-2 pb-2 pt-1 border-t border-border/30">

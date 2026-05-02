@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react'
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import {
   Plus,
   Play,
@@ -13,6 +13,8 @@ import {
   Folder,
   ChevronRight,
   ChevronDown,
+  ChevronUp,
+  ChevronsUpDown,
   Loader2,
   Terminal,
   History,
@@ -21,6 +23,7 @@ import {
   DollarSign,
   Wand2,
   Server,
+  Search,
 } from 'lucide-react'
 import Editor from '@monaco-editor/react'
 import Wizard from '../components/Wizard'
@@ -372,6 +375,7 @@ function TestManager({ selectedProfiles = [], selectedLlmProfile = null, llmProf
     runningTests,
     testStatuses,
     activeTestFile,
+    pinnedHistoryRun,
     runTests: contextRunTests,
     runSingleTest: contextRunSingleTest,
     stopTests,
@@ -380,6 +384,7 @@ function TestManager({ selectedProfiles = [], selectedLlmProfile = null, llmProf
     resetTestStatuses,
     setTestStatuses,
     setTestResults,
+    setPinnedHistoryRun,
     setRunning,
     setRunningTests,
   } = useTestRun()
@@ -413,6 +418,10 @@ function TestManager({ selectedProfiles = [], selectedLlmProfile = null, llmProf
   const [resultsHistory, setResultsHistory] = useState([])
   const [showHistory, setShowHistory] = useState(false)
   const [selectedHistoryRun, setSelectedHistoryRun] = useState(null)
+  const [historyFilterQuery, setHistoryFilterQuery] = useState('')
+  const [historyProviderFilter, setHistoryProviderFilter] = useState(null) // null = all
+  const [historyFailedOnly, setHistoryFailedOnly] = useState(false)
+  const [historySort, setHistorySort] = useState({ key: 'timestamp', dir: 'desc' })
   const [bottomPanelTab, setBottomPanelTab] = useState('logs') // 'logs' or 'results'
   const [showFileTree, setShowFileTree] = useState(false)
   const [showTestWizard, setShowTestWizard] = useState(false)
@@ -599,6 +608,74 @@ function TestManager({ selectedProfiles = [], selectedLlmProfile = null, llmProf
       console.error('Failed to load results history:', error)
       setResultsHistory([])
     }
+  }
+
+  // Pin a historical run into the Results tab. Refuses to overwrite a live
+  // run in progress so users don't accidentally lose what they're watching.
+  const pinHistoryRun = async (runId) => {
+    if (!runId || running) return
+    try {
+      const res = await fetch(`/api/results/run/${encodeURIComponent(runId)}`)
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const data = await res.json()
+      setPinnedHistoryRun(data)
+      setBottomPanelTab('results')
+    } catch (error) {
+      console.error('Failed to load historical run:', error)
+    }
+  }
+
+  // Unique providers across all history runs — drives the provider chip filter.
+  const historyProviders = useMemo(
+    () => Array.from(new Set(resultsHistory.map((r) => r.provider).filter(Boolean))).sort(),
+    [resultsHistory],
+  )
+
+  // History view derives a filtered + sorted view; the source array is left
+  // untouched so the chart can still slice the most recent untouched runs if
+  // we want to switch back later.
+  const filteredHistory = useMemo(() => {
+    const q = historyFilterQuery.trim().toLowerCase()
+    const filtered = resultsHistory.filter((run) => {
+      if (historyProviderFilter && run.provider !== historyProviderFilter) return false
+      if (historyFailedOnly && (run.failed ?? 0) === 0) return false
+      if (q) {
+        const hay = `${run.provider || ''} ${run.model || ''} ${run.run_id || ''}`.toLowerCase()
+        if (!hay.includes(q)) return false
+      }
+      return true
+    })
+    const dir = historySort.dir === 'asc' ? 1 : -1
+    const cmp = (a, b) => {
+      switch (historySort.key) {
+        case 'pass':
+          return ((a.pass_rate ?? 0) - (b.pass_rate ?? 0)) * dir
+        case 'cost':
+          return ((a.total_cost ?? 0) - (b.total_cost ?? 0)) * dir
+        case 'duration':
+          return ((a.total_duration ?? 0) - (b.total_duration ?? 0)) * dir
+        case 'timestamp':
+        default:
+          return (new Date(a.timestamp) - new Date(b.timestamp)) * dir
+      }
+    }
+    return [...filtered].sort(cmp)
+  }, [resultsHistory, historyFilterQuery, historyProviderFilter, historyFailedOnly, historySort])
+
+  const toggleHistorySort = (key) => {
+    setHistorySort((prev) =>
+      prev.key === key
+        ? { key, dir: prev.dir === 'asc' ? 'desc' : 'asc' }
+        : { key, dir: key === 'timestamp' ? 'desc' : 'asc' },
+    )
+  }
+  const SortIcon = ({ k }) => {
+    if (historySort.key !== k) return <ChevronsUpDown size={10} className="text-text-disabled" />
+    return historySort.dir === 'asc' ? (
+      <ChevronUp size={10} className="text-primary" />
+    ) : (
+      <ChevronDown size={10} className="text-primary" />
+    )
   }
 
   // Load history when file changes
@@ -1462,7 +1539,7 @@ tests:
               </div>
 
               {/* Bottom Panel - Resizable via drag handle */}
-              {(running || streamingLogs.length > 0 || testResults) && (
+              {(running || streamingLogs.length > 0 || testResults || pinnedHistoryRun) && (
                 <>
                 {/* Drag handle */}
                 <div
@@ -1490,25 +1567,28 @@ tests:
                         <span className="px-1.5 py-0.5 rounded bg-surface text-[10px]">{streamingLogs.length}</span>
                       )}
                     </button>
-                    {/* Results Tab */}
-                    {testResults && (
-                      <button
-                        className={`px-3 py-2 text-xs font-medium flex items-center gap-2 border-b-2 transition-colors ${
-                          bottomPanelTab === 'results'
-                            ? 'border-primary text-primary'
-                            : 'border-transparent text-text-tertiary hover:text-text-secondary'
-                        }`}
-                        onClick={() => setBottomPanelTab('results')}
-                      >
-                        <CheckCircle size={12} />
-                        <span>Results</span>
-                        <span className={`px-1.5 py-0.5 rounded text-[10px] ${
-                          testResults.summary.failed > 0 ? 'bg-red-500/20 text-red-400' : 'bg-green-500/20 text-green-400'
-                        }`}>
-                          {testResults.summary.passed}/{testResults.summary.total}
-                        </span>
-                      </button>
-                    )}
+                    {/* Results Tab — backed by either the live run or a pinned history run */}
+                    {(pinnedHistoryRun || testResults) && (() => {
+                      const displayResults = pinnedHistoryRun || testResults
+                      return (
+                        <button
+                          className={`px-3 py-2 text-xs font-medium flex items-center gap-2 border-b-2 transition-colors ${
+                            bottomPanelTab === 'results'
+                              ? 'border-primary text-primary'
+                              : 'border-transparent text-text-tertiary hover:text-text-secondary'
+                          }`}
+                          onClick={() => setBottomPanelTab('results')}
+                        >
+                          <CheckCircle size={12} />
+                          <span>Results</span>
+                          <span className={`px-1.5 py-0.5 rounded text-[10px] ${
+                            displayResults.summary.failed > 0 ? 'bg-red-500/20 text-red-400' : 'bg-green-500/20 text-green-400'
+                          }`}>
+                            {displayResults.summary.passed}/{displayResults.summary.total}
+                          </span>
+                        </button>
+                      )
+                    })()}
                     {/* Spacer */}
                     <div className="flex-1" />
                     {/* Clear/Close buttons */}
@@ -1521,7 +1601,7 @@ tests:
                       </button>
                     )}
                     <button
-                      onClick={() => { clearResults(); setBottomPanelTab('logs'); }}
+                      onClick={() => { clearResults(); setPinnedHistoryRun(null); setBottomPanelTab('logs'); }}
                       className="p-1.5 text-text-tertiary hover:text-text-primary hover:bg-surface-hover rounded transition-colors"
                       title="Close panel"
                     >
@@ -1532,33 +1612,64 @@ tests:
                   {/* Panel Content */}
                   <div className="flex-1 overflow-hidden">
                     {/* Show content based on selected tab */}
-                    {bottomPanelTab === 'results' && testResults ? (
+                    {bottomPanelTab === 'results' && (pinnedHistoryRun || testResults) ? (
                       /* Results Content */
+                      (() => {
+                        const displayResults = pinnedHistoryRun || testResults
+                        return (
                       <div className="h-full flex flex-col">
+                        {/* Pinned-history banner — only shown when viewing a historical run */}
+                        {pinnedHistoryRun && (
+                          <div className="px-4 py-2 flex items-center gap-3 text-xs bg-primary/10 border-b border-primary/20">
+                            <History size={12} className="text-primary flex-shrink-0" />
+                            <span className="text-text-secondary">
+                              Viewing historical run from{' '}
+                              <span className="text-text-primary font-medium">
+                                {pinnedHistoryRun.metadata?.timestamp
+                                  ? new Date(pinnedHistoryRun.metadata.timestamp).toLocaleString()
+                                  : 'unknown date'}
+                              </span>
+                              {pinnedHistoryRun.metadata?.provider && (
+                                <> · <span className="text-text-tertiary">{pinnedHistoryRun.metadata.provider}</span></>
+                              )}
+                              {pinnedHistoryRun.metadata?.model && (
+                                <> · <span className="text-text-tertiary font-mono">{pinnedHistoryRun.metadata.model}</span></>
+                              )}
+                            </span>
+                            <span className="flex-1" />
+                            <button
+                              type="button"
+                              onClick={() => setPinnedHistoryRun(null)}
+                              className="px-2 py-0.5 rounded text-[11px] text-primary hover:bg-primary/20 transition"
+                            >
+                              Unpin
+                            </button>
+                          </div>
+                        )}
                         {/* Results Summary Bar */}
                         <div className="px-4 py-2 bg-surface-elevated/50 flex items-center gap-6 text-xs border-b border-border/50">
                           <div className="flex items-center gap-2">
                             <div className="w-2 h-2 rounded-full bg-green-500"></div>
                             <span className="text-text-tertiary">Passed:</span>
-                            <span className="font-semibold text-green-400">{testResults.summary.passed}</span>
+                            <span className="font-semibold text-green-400">{displayResults.summary.passed}</span>
                           </div>
                           <div className="flex items-center gap-2">
                             <div className="w-2 h-2 rounded-full bg-red-500"></div>
                             <span className="text-text-tertiary">Failed:</span>
-                            <span className="font-semibold text-red-400">{testResults.summary.failed}</span>
+                            <span className="font-semibold text-red-400">{displayResults.summary.failed}</span>
                           </div>
-                          {testResults.summary.total_cost > 0 && (
+                          {displayResults.summary.total_cost > 0 && (
                             <div className="flex items-center gap-2">
                               <span className="text-text-tertiary">Cost:</span>
-                              <span className="font-mono text-text-secondary">${testResults.summary.total_cost.toFixed(4)}</span>
+                              <span className="font-mono text-text-secondary">${displayResults.summary.total_cost.toFixed(4)}</span>
                             </div>
                           )}
                         </div>
                         {/* Results List */}
                         <div className="flex-1 overflow-auto p-3">
-                          {testResults.results && testResults.results.length > 0 ? (
+                          {displayResults.results && displayResults.results.length > 0 ? (
                             <div className="space-y-2">
-                              {testResults.results.map((result, idx) => (
+                              {displayResults.results.map((result, idx) => (
                                 <TestResultPanel
                                   key={idx}
                                   result={result}
@@ -1573,6 +1684,8 @@ tests:
                           )}
                         </div>
                       </div>
+                        )
+                      })()
                     ) : (
                       /* Logs Content */
                       <StreamingLogViewer logs={streamingLogs} running={running} />
@@ -1613,24 +1726,75 @@ tests:
                     </button>
                   </div>
 
+                  {/* Filter row */}
+                  <div className="flex-shrink-0 flex items-center gap-2 px-3 py-1.5 bg-surface border-b border-border">
+                    <div className="relative flex-1 max-w-sm">
+                      <Search
+                        size={12}
+                        className="absolute left-2 top-1/2 -translate-y-1/2 text-text-disabled pointer-events-none"
+                      />
+                      <input
+                        type="text"
+                        value={historyFilterQuery}
+                        onChange={(e) => setHistoryFilterQuery(e.target.value)}
+                        placeholder="Filter runs (provider, model, run id)…"
+                        className="w-full pl-7 pr-2 py-1 text-xs rounded bg-surface-elevated border border-border focus:border-primary focus:outline-none text-text-primary placeholder:text-text-disabled"
+                      />
+                    </div>
+                    {historyProviders.length > 1 &&
+                      historyProviders.map((p) => (
+                        <button
+                          key={p}
+                          type="button"
+                          onClick={() =>
+                            setHistoryProviderFilter((cur) => (cur === p ? null : p))
+                          }
+                          className={`px-1.5 py-0.5 rounded text-[10px] transition ${
+                            historyProviderFilter === p
+                              ? 'bg-primary/20 text-primary border border-primary/40'
+                              : 'bg-surface-elevated text-text-tertiary border border-border hover:text-text-secondary'
+                          }`}
+                        >
+                          {p}
+                        </button>
+                      ))}
+                    <label className="inline-flex items-center gap-1.5 text-[11px] text-text-tertiary cursor-pointer select-none">
+                      <input
+                        type="checkbox"
+                        checked={historyFailedOnly}
+                        onChange={(e) => setHistoryFailedOnly(e.target.checked)}
+                        className="accent-primary"
+                      />
+                      Failed only
+                    </label>
+                    <span className="text-[10px] text-text-disabled">
+                      {filteredHistory.length} / {resultsHistory.length}
+                    </span>
+                  </div>
+
                   <div className="flex-1 flex flex-col md:flex-row overflow-hidden">
-                    {/* Timeline Chart */}
+                    {/* Timeline Chart — uses the filtered set so the chart and table agree */}
                     <div className="w-full md:w-64 flex-shrink-0 border-b md:border-b-0 md:border-r border-border p-3 overflow-hidden">
                       <div className="text-xs text-text-tertiary mb-2 font-medium">Pass Rate Timeline</div>
                       <div className="h-full flex flex-col justify-end pb-6">
                         <div className="flex items-end gap-1 h-32">
-                          {resultsHistory.slice(0, 12).reverse().map((run, idx) => {
-                            const passRate = run.pass_rate * 100
+                          {filteredHistory.slice(0, 12).slice().reverse().map((run, idx) => {
+                            const passRate = (run.pass_rate ?? 0) * 100
                             const height = Math.max(4, passRate)
+                            const isPinned = pinnedHistoryRun?.metadata?.run_id === run.run_id
                             return (
-                              <div key={idx} className="flex-1 flex flex-col items-center gap-1">
-                                <div
+                              <div key={`${run.run_id}-${idx}`} className="flex-1 flex flex-col items-center gap-1">
+                                <button
+                                  type="button"
                                   className={`w-full rounded-t transition-all cursor-pointer hover:opacity-80 ${
                                     passRate === 100 ? 'bg-green-500' : passRate >= 50 ? 'bg-yellow-500' : 'bg-red-500'
-                                  }`}
+                                  } ${isPinned ? 'ring-2 ring-primary' : ''}`}
                                   style={{ height: `${height}%` }}
-                                  title={`${passRate.toFixed(0)}% - ${new Date(run.timestamp).toLocaleDateString()}`}
-                                  onClick={() => setSelectedHistoryRun(run)}
+                                  title={`Click to load · ${passRate.toFixed(0)}% · ${new Date(run.timestamp).toLocaleString()}`}
+                                  onClick={() => {
+                                    setSelectedHistoryRun(run)
+                                    pinHistoryRun(run.run_id)
+                                  }}
                                 />
                               </div>
                             )
@@ -1648,24 +1812,51 @@ tests:
                       <table className="w-full text-xs">
                         <thead className="sticky top-0 bg-surface-elevated">
                           <tr className="border-b border-border">
-                            <th className="text-left py-2 px-3 text-text-tertiary font-medium">Date</th>
+                            <th
+                              className="text-left py-2 px-3 text-text-tertiary font-medium cursor-pointer hover:text-text-secondary"
+                              onClick={() => toggleHistorySort('timestamp')}
+                            >
+                              <span className="inline-flex items-center gap-1">Date <SortIcon k="timestamp" /></span>
+                            </th>
                             <th className="text-left py-2 px-3 text-text-tertiary font-medium">Provider</th>
                             <th className="text-left py-2 px-3 text-text-tertiary font-medium">Model</th>
-                            <th className="text-center py-2 px-3 text-text-tertiary font-medium">Pass</th>
-                            <th className="text-right py-2 px-3 text-text-tertiary font-medium">Cost</th>
-                            <th className="text-right py-2 px-3 text-text-tertiary font-medium">Time</th>
+                            <th
+                              className="text-center py-2 px-3 text-text-tertiary font-medium cursor-pointer hover:text-text-secondary"
+                              onClick={() => toggleHistorySort('pass')}
+                            >
+                              <span className="inline-flex items-center gap-1">Pass <SortIcon k="pass" /></span>
+                            </th>
+                            <th
+                              className="text-right py-2 px-3 text-text-tertiary font-medium cursor-pointer hover:text-text-secondary"
+                              onClick={() => toggleHistorySort('cost')}
+                            >
+                              <span className="inline-flex items-center gap-1 justify-end">Cost <SortIcon k="cost" /></span>
+                            </th>
+                            <th
+                              className="text-right py-2 px-3 text-text-tertiary font-medium cursor-pointer hover:text-text-secondary"
+                              onClick={() => toggleHistorySort('duration')}
+                            >
+                              <span className="inline-flex items-center gap-1 justify-end">Time <SortIcon k="duration" /></span>
+                            </th>
                           </tr>
                         </thead>
                         <tbody>
-                          {resultsHistory.map((run, idx) => (
+                          {filteredHistory.map((run, idx) => {
+                            const isPinned = pinnedHistoryRun?.metadata?.run_id === run.run_id
+                            return (
                             <tr
-                              key={idx}
+                              key={run.run_id || idx}
                               className={`border-b border-border/30 cursor-pointer transition-colors ${
-                                selectedHistoryRun?.run_id === run.run_id
+                                isPinned
+                                  ? 'bg-primary/15'
+                                  : selectedHistoryRun?.run_id === run.run_id
                                   ? 'bg-primary/10'
                                   : 'hover:bg-surface-hover'
                               }`}
-                              onClick={() => setSelectedHistoryRun(selectedHistoryRun?.run_id === run.run_id ? null : run)}
+                              onClick={() => {
+                                setSelectedHistoryRun(run)
+                                pinHistoryRun(run.run_id)
+                              }}
                             >
                               <td className="py-2 px-3 text-text-secondary">
                                 {new Date(run.timestamp).toLocaleDateString()} {new Date(run.timestamp).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
@@ -1692,7 +1883,8 @@ tests:
                                 {run.total_duration?.toFixed(1)}s
                               </td>
                             </tr>
-                          ))}
+                            )
+                          })}
                         </tbody>
                       </table>
                     </div>

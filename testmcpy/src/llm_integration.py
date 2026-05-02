@@ -1613,6 +1613,14 @@ class ClaudeSDKProvider(LLMProvider):
                 disallowed_tools=_builtin_tools_to_block,
                 system_prompt=system_prompt,
                 debug_stderr=None,  # Suppress CLI debug output
+                # Isolate from the host machine's Claude Code config: don't read
+                # ~/.claude/settings.json (or project/local equivalents) and don't
+                # load any installed plugins. Without this, the SDK merges in the
+                # user's personal MCP servers (playwright, notion, sdx, …) and
+                # the test LLM sees tools that have nothing to do with the MCP
+                # under test.
+                setting_sources=[],
+                plugins=[],
             )
 
             # Execute query with timeout

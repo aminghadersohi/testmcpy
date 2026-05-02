@@ -1408,8 +1408,14 @@ tests:
             {/* Split view: Editor + Bottom Panel */}
             <div ref={containerRef} className="flex-1 flex flex-col overflow-hidden relative min-h-0">
               {/* Editor area - always takes remaining space; column-flex so the
-                  status bar sits flush below Monaco without re-flowing on resize. */}
-              <div className="flex-1 flex flex-col overflow-hidden min-h-0 min-h-[250px]">
+                  status bar sits flush below Monaco without re-flowing on resize.
+                  In edit mode the warning-tinted left border makes it obvious the
+                  buffer is mutable (paired with the EDIT badge in the status bar). */}
+              <div
+                className={`flex-1 flex flex-col overflow-hidden min-h-0 min-h-[250px] border-l-2 transition-colors ${
+                  editMode ? 'border-warning/60' : 'border-transparent'
+                }`}
+              >
                 <div className="flex-1 min-h-0">
                   <Editor
                     height="100%"

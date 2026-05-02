@@ -320,6 +320,27 @@ export function TestRunProvider({ children }) {
     }
   }, [running])
 
+  // Stop a running test — sends a stop message to the server and closes the socket.
+  // The server-side task will be cancelled; results received so far are preserved.
+  const stopTests = useCallback(() => {
+    const ws = wsRef.current
+    if (ws) {
+      try {
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: 'stop' }))
+        }
+      } catch (e) {
+        // ignore — we're closing anyway
+      }
+      try { ws.close() } catch (e) { /* noop */ }
+      wsRef.current = null
+    }
+    setStreamingLogs(prev => [...prev, '🛑 Stopped by user'])
+    setRunning(false)
+    setRunningTestName(null)
+    setRunningTests(prev => ({ ...prev, current: null, status: 'stopped' }))
+  }, [])
+
   // Clear logs
   const clearLogs = useCallback(() => {
     setStreamingLogs([])
@@ -353,6 +374,7 @@ export function TestRunProvider({ children }) {
     // Actions
     runTests,
     runSingleTest,
+    stopTests,
     clearLogs,
     clearResults,
     resetTestStatuses,

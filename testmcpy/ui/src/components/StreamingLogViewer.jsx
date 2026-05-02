@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react'
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import {
   ChevronRight,
   ChevronDown,
@@ -8,6 +8,7 @@ import {
   CheckCircle2,
   XCircle,
   AlertTriangle,
+  AlertOctagon,
   Loader2,
   MessageSquare,
   FileText,
@@ -19,6 +20,7 @@ import {
   Activity,
   Play,
   BarChart3,
+  Search,
 } from 'lucide-react'
 
 /**
@@ -636,6 +638,63 @@ function renderEntry(entry, idx) {
   }
 }
 
+// Tell whether an entry should be kept under the "errors only" filter.
+// Captures errors, failing evaluators, failing test results, plus any
+// test_header (so failed tests don't render as orphans).
+function isErrorEntry(entry) {
+  if (entry.type === 'test_header') return true
+  if (entry.type === 'error') return true
+  if (entry.type === 'evaluator' && entry.passed === false) return true
+  if (entry.type === 'test_result' && entry.passed === false) return true
+  return false
+}
+
+// Apply user filters (free-text + errors-only) to entries before grouping.
+// Always keep the active running test's entries so users don't lose the
+// live view while filtering.
+function filterEntries(entries, query, errorsOnly, activeTestName) {
+  const q = query.trim().toLowerCase()
+  if (!q && !errorsOnly) return entries
+
+  // First pass: per-entry keep decision.
+  const baseKeep = entries.map((e) => {
+    if (errorsOnly && !isErrorEntry(e)) return false
+    if (!q) return true
+    const haystack = [e.text, e.name, e.args, e.raw, e.provider, e.messageType]
+      .filter(Boolean)
+      .join(' ')
+      .toLowerCase()
+    return haystack.includes(q)
+  })
+
+  // Second pass: keep parent test_header for any visible non-header entry,
+  // and never hide the active running test's entries.
+  let currentHeaderIdx = -1
+  let currentIsActive = false
+  let currentHasVisibleChild = false
+  const finalize = (out) => {
+    if (currentHeaderIdx >= 0) {
+      if (currentIsActive || currentHasVisibleChild) out[currentHeaderIdx] = true
+    }
+  }
+  const result = baseKeep.slice()
+  entries.forEach((e, i) => {
+    if (e.type === 'test_header') {
+      finalize(result)
+      currentHeaderIdx = i
+      currentIsActive = e.name === activeTestName
+      currentHasVisibleChild = false
+      result[i] = baseKeep[i] || currentIsActive
+    } else if (currentHeaderIdx >= 0) {
+      if (currentIsActive) result[i] = true
+      if (result[i]) currentHasVisibleChild = true
+    }
+  })
+  finalize(result)
+
+  return entries.filter((_, i) => result[i])
+}
+
 // Bucket entries into per-test groups so users can see the full log of every
 // test in a multi-test run (not just the latest one). Entries before the first
 // test header become the "preamble" group.
@@ -734,8 +793,33 @@ function PerTestGroup({ group, isActive, defaultOpen }) {
 export default function StreamingLogViewer({ logs, running }) {
   const containerRef = useRef(null)
   const bottomRef = useRef(null)
-  const entries = parseLogs(logs)
-  const { preamble, tests } = groupEntriesByTest(entries)
+  const allEntries = parseLogs(logs)
+
+  // Filter UI state
+  const [filterQuery, setFilterQuery] = useState('')
+  const [errorsOnly, setErrorsOnly] = useState(false)
+
+  // Compute active test name from the *unfiltered* entries so it survives
+  // the filter. (The filter then preserves this group's entries.)
+  let activeTestName = null
+  if (running) {
+    for (let i = allEntries.length - 1; i >= 0; i--) {
+      const e = allEntries[i]
+      if (e.type === 'test_result') break
+      if (e.type === 'test_header') {
+        activeTestName = e.name
+        break
+      }
+    }
+  }
+
+  const visibleEntries = useMemo(
+    () => filterEntries(allEntries, filterQuery, errorsOnly, activeTestName),
+    [allEntries, filterQuery, errorsOnly, activeTestName],
+  )
+  const { preamble, tests } = groupEntriesByTest(visibleEntries)
+  const filterActive = filterQuery.trim().length > 0 || errorsOnly
+  const hiddenCount = allEntries.length - visibleEntries.length
 
   // Smart follow-tail: only auto-scroll when the user is parked at the bottom.
   // First scroll-up disables follow; clicking the "Follow" pill re-enables it.
@@ -760,21 +844,60 @@ export default function StreamingLogViewer({ logs, running }) {
     setFollowTail((prev) => (prev !== atBottom ? atBottom : prev))
   }, [])
 
-  // Active test = last test_header without a test_result (only meaningful while running)
-  let activeTestName = null
-  if (running && tests.length > 0) {
-    const last = tests[tests.length - 1]
-    if (!last.result) activeTestName = last.name
-  }
-
   const showFollowPill = running && !followTail
 
   return (
-    <div className="h-full relative">
+    <div className="h-full relative flex flex-col">
+    {/* Filter toolbar */}
+    <div className="flex-shrink-0 flex items-center gap-2 px-3 py-1.5 bg-surface-elevated border-b border-border">
+      <div className="relative flex-1 max-w-sm">
+        <Search
+          size={12}
+          className="absolute left-2 top-1/2 -translate-y-1/2 text-text-disabled pointer-events-none"
+        />
+        <input
+          type="text"
+          value={filterQuery}
+          onChange={(e) => setFilterQuery(e.target.value)}
+          placeholder="Filter logs (tool name, text, args)…"
+          className="w-full pl-7 pr-2 py-1 text-xs rounded bg-surface border border-border focus:border-primary focus:outline-none text-text-primary placeholder:text-text-disabled"
+        />
+      </div>
+      <button
+        type="button"
+        onClick={() => setErrorsOnly((v) => !v)}
+        title="Show only errors and failing evaluators/results"
+        className={`inline-flex items-center gap-1 px-2 py-1 rounded text-[10px] uppercase tracking-wide transition-colors ${
+          errorsOnly
+            ? 'bg-red-500/15 text-red-300 border border-red-500/40'
+            : 'bg-surface text-text-disabled border border-border hover:text-text-secondary'
+        }`}
+      >
+        <AlertOctagon size={10} />
+        Errors only
+      </button>
+      {filterActive && (
+        <span className="text-[10px] text-text-tertiary">
+          {hiddenCount > 0 ? `${hiddenCount} hidden` : 'no matches hidden'}
+        </span>
+      )}
+      {filterActive && (
+        <button
+          type="button"
+          onClick={() => {
+            setFilterQuery('')
+            setErrorsOnly(false)
+          }}
+          className="text-[10px] text-text-tertiary hover:text-text-primary"
+        >
+          Clear
+        </button>
+      )}
+    </div>
     <div
       ref={containerRef}
       onScroll={handleScroll}
-      className="h-full overflow-auto px-3 py-2 bg-surface"
+      className="flex-1 overflow-auto px-3 py-2 bg-surface"
     >
       {entries.length === 0 ? (
         <div className="text-text-tertiary text-center py-4 text-xs">

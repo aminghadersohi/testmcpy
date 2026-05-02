@@ -30,6 +30,7 @@ import { useKeyboardShortcuts, useAnnounce } from '../hooks/useKeyboardShortcuts
 import { useTestRun } from '../contexts/TestRunContext'
 import { useEditorTheme } from '../hooks/useEditorTheme'
 import StreamingLogViewer from '../components/StreamingLogViewer'
+import EditorStatusBar from '../components/EditorStatusBar'
 
 // Parse YAML content to find test locations (line numbers)
 function parseTestLocations(content) {
@@ -391,6 +392,8 @@ function TestManager({ selectedProfiles = [], selectedLlmProfile = null, llmProf
   const [newFileName, setNewFileName] = useState('')
   const [showNewFileDialog, setShowNewFileDialog] = useState(false)
   const [testLocations, setTestLocations] = useState([])
+  // Editor cursor position for the IDE-style status bar (1-based to match Monaco).
+  const [editorCursor, setEditorCursor] = useState({ line: 1, column: 1 })
   const editorRef = useRef(null)
   const monacoRef = useRef(null)
   const testLocationsRef = useRef([]) // Ref to avoid stale closure in click handler
@@ -795,6 +798,11 @@ function TestManager({ selectedProfiles = [], selectedLlmProfile = null, llmProf
           runSingleTest(test.name)
         }
       }
+    })
+
+    // Track cursor position for the status bar.
+    editor.onDidChangeCursorPosition((e) => {
+      setEditorCursor({ line: e.position.lineNumber, column: e.position.column })
     })
 
     // Initial decoration update - multiple attempts to ensure it works
@@ -1400,26 +1408,36 @@ tests:
 
             {/* Split view: Editor + Bottom Panel */}
             <div ref={containerRef} className="flex-1 flex flex-col overflow-hidden relative min-h-0">
-              {/* Editor area - always takes remaining space */}
-              <div className="flex-1 overflow-hidden min-h-0 min-h-[250px]">
-                <Editor
-                  height="100%"
-                  defaultLanguage="yaml"
-                  theme={monacoTheme}
-                  value={fileContent}
-                  onChange={(value) => setFileContent(value || '')}
-                  onMount={handleEditorDidMount}
-                  options={{
-                    readOnly: !editMode,
-                    minimap: { enabled: false },
-                    fontSize: 14,
-                    lineNumbers: 'on',
-                    scrollBeyondLastLine: false,
-                    automaticLayout: true,
-                    glyphMargin: true,
-                    folding: true,
-                    lineDecorationsWidth: 5,
-                  }}
+              {/* Editor area - always takes remaining space; column-flex so the
+                  status bar sits flush below Monaco without re-flowing on resize. */}
+              <div className="flex-1 flex flex-col overflow-hidden min-h-0 min-h-[250px]">
+                <div className="flex-1 min-h-0">
+                  <Editor
+                    height="100%"
+                    defaultLanguage="yaml"
+                    theme={monacoTheme}
+                    value={fileContent}
+                    onChange={(value) => setFileContent(value || '')}
+                    onMount={handleEditorDidMount}
+                    options={{
+                      readOnly: !editMode,
+                      minimap: { enabled: false },
+                      fontSize: 14,
+                      lineNumbers: 'on',
+                      scrollBeyondLastLine: false,
+                      automaticLayout: true,
+                      glyphMargin: true,
+                      folding: true,
+                      lineDecorationsWidth: 5,
+                    }}
+                  />
+                </div>
+                <EditorStatusBar
+                  line={editorCursor.line}
+                  column={editorCursor.column}
+                  language="YAML"
+                  editMode={editMode}
+                  dirty={editMode && fileContent !== selectedFile.content}
                 />
               </div>
 

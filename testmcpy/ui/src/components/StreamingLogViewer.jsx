@@ -594,13 +594,139 @@ function TokensEntry({ entry }) {
 }
 
 
+// Render any entry by type (used for both grouped and ungrouped sections)
+function renderEntry(entry, idx) {
+  const key = `${idx}-${entry.type}`
+  switch (entry.type) {
+    case 'prompt':
+      return <PromptEntry key={key} entry={entry} />
+    case 'thinking':
+      return <ThinkingEntry key={key} entry={entry} />
+    case 'tool_call':
+      return <ToolCallEntry key={key} entry={entry} />
+    case 'llm_text':
+      return <LlmTextEntry key={key} entry={entry} />
+    case 'llm_response':
+      return <LlmResponseEntry key={key} entry={entry} />
+    case 'evaluator':
+      return <EvaluatorEntry key={key} entry={entry} />
+    case 'test_result':
+      return <TestResultEntry key={key} entry={entry} />
+    case 'tool_count':
+      return <ToolCountEntry key={key} entry={entry} />
+    case 'token_detail':
+      return <TokenDetailEntry key={key} entry={entry} />
+    case 'tokens':
+      return <TokensEntry key={key} entry={entry} />
+    case 'cost':
+      return <CostEntry key={key} entry={entry} />
+    case 'summary':
+      return <SummaryEntry key={key} entry={entry} />
+    case 'status':
+      return <StatusEntry key={key} entry={entry} />
+    case 'provider_status':
+      return <ProviderStatusEntry key={key} entry={entry} />
+    case 'provider_message':
+      return <ProviderMessageEntry key={key} entry={entry} />
+    case 'error':
+      return <ErrorEntry key={key} entry={entry} />
+    default:
+      return <GenericEntry key={key} entry={entry} />
+  }
+}
+
+// Bucket entries into per-test groups so users can see the full log of every
+// test in a multi-test run (not just the latest one). Entries before the first
+// test header become the "preamble" group.
+function groupEntriesByTest(entries) {
+  const preamble = []
+  const tests = []
+  let current = null
+  for (const entry of entries) {
+    if (entry.type === 'test_header') {
+      current = { name: entry.name, header: entry, entries: [], result: null }
+      tests.push(current)
+      continue
+    }
+    if (current) {
+      if (entry.type === 'test_result') current.result = entry
+      current.entries.push(entry)
+    } else {
+      preamble.push(entry)
+    }
+  }
+  return { preamble, tests }
+}
+
+function PerTestGroup({ group, isActive, defaultOpen }) {
+  const [open, setOpen] = useState(defaultOpen)
+  // Keep the active test open while it's running
+  useEffect(() => {
+    if (isActive) setOpen(true)
+  }, [isActive])
+
+  const passed = group.result?.passed
+  const status = !group.result
+    ? (isActive ? 'running' : 'pending')
+    : (passed ? 'passed' : 'failed')
+
+  const statusClasses = {
+    running: 'bg-yellow-500/10 border-yellow-500/30',
+    passed: 'bg-green-500/5 border-green-500/30',
+    failed: 'bg-red-500/5 border-red-500/30',
+    pending: 'bg-surface-elevated border-border/50',
+  }[status]
+
+  return (
+    <div className={`mt-2 first:mt-0 rounded-lg border ${statusClasses} overflow-hidden`}>
+      <button
+        type="button"
+        onClick={() => setOpen(!open)}
+        className="w-full flex items-center gap-2 px-2.5 py-1.5 hover:bg-surface-hover/40 transition-colors text-left"
+      >
+        <ChevronRight
+          size={12}
+          className="text-text-disabled transition-transform"
+          style={{ transform: open ? 'rotate(90deg)' : 'rotate(0deg)' }}
+        />
+        {status === 'running' ? (
+          <Loader2 size={13} className="animate-spin text-yellow-400 flex-shrink-0" />
+        ) : status === 'passed' ? (
+          <CheckCircle2 size={13} className="text-green-400 flex-shrink-0" />
+        ) : status === 'failed' ? (
+          <XCircle size={13} className="text-red-400 flex-shrink-0" />
+        ) : (
+          <Play size={13} className="text-primary flex-shrink-0" />
+        )}
+        <span className="text-xs font-semibold text-text-primary truncate flex-1">{group.name}</span>
+        {group.result?.time && (
+          <span className="text-[10px] text-text-tertiary flex items-center gap-0.5">
+            <Clock size={10} />
+            {group.result.time}s
+          </span>
+        )}
+        <span className="text-[10px] text-text-disabled">{group.entries.length} entries</span>
+      </button>
+      {open && (
+        <div className="px-2 pb-2 pt-1 border-t border-border/30">
+          {group.entries.map((entry, idx) => renderEntry(entry, idx))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 /**
  * StreamingLogViewer - Renders parsed, structured, animated test runner logs.
+ *
+ * Groups entries per-test so a multi-test run shows the full log of every test
+ * (collapsible), not just the latest. The currently running test is auto-expanded.
  */
 export default function StreamingLogViewer({ logs, running }) {
   const containerRef = useRef(null)
   const bottomRef = useRef(null)
   const entries = parseLogs(logs)
+  const { preamble, tests } = groupEntriesByTest(entries)
 
   // Auto-scroll to bottom when new logs arrive
   useEffect(() => {
@@ -609,16 +735,11 @@ export default function StreamingLogViewer({ logs, running }) {
     }
   }, [logs])
 
-  // Track which test is currently active (last test_header without a following test_result)
+  // Active test = last test_header without a test_result (only meaningful while running)
   let activeTestName = null
-  if (running) {
-    for (let i = entries.length - 1; i >= 0; i--) {
-      if (entries[i].type === 'test_result') break
-      if (entries[i].type === 'test_header') {
-        activeTestName = entries[i].name
-        break
-      }
-    }
+  if (running && tests.length > 0) {
+    const last = tests[tests.length - 1]
+    if (!last.result) activeTestName = last.name
   }
 
   return (
@@ -629,48 +750,21 @@ export default function StreamingLogViewer({ logs, running }) {
         </div>
       ) : (
         <div className="space-y-0">
-          {entries.map((entry, idx) => {
-            const key = `${idx}-${entry.type}`
-            switch (entry.type) {
-              case 'test_header':
-                return <TestHeaderEntry key={key} entry={entry} isActive={running && entry.name === activeTestName} />
-              case 'prompt':
-                return <PromptEntry key={key} entry={entry} />
-              case 'thinking':
-                return <ThinkingEntry key={key} entry={entry} />
-              case 'tool_call':
-                return <ToolCallEntry key={key} entry={entry} />
-              case 'llm_text':
-                return <LlmTextEntry key={key} entry={entry} />
-              case 'llm_response':
-                return <LlmResponseEntry key={key} entry={entry} />
-              case 'evaluator':
-                return <EvaluatorEntry key={key} entry={entry} />
-              case 'test_result':
-                return <TestResultEntry key={key} entry={entry} />
-              case 'tool_count':
-                return <ToolCountEntry key={key} entry={entry} />
-              case 'token_detail':
-                return <TokenDetailEntry key={key} entry={entry} />
-              case 'tokens':
-                return <TokensEntry key={key} entry={entry} />
-              case 'cost':
-                return <CostEntry key={key} entry={entry} />
-              case 'summary':
-                return <SummaryEntry key={key} entry={entry} />
-              case 'status':
-                return <StatusEntry key={key} entry={entry} />
-              case 'provider_status':
-                return <ProviderStatusEntry key={key} entry={entry} />
-              case 'provider_message':
-                return <ProviderMessageEntry key={key} entry={entry} />
-              case 'error':
-                return <ErrorEntry key={key} entry={entry} />
-              default:
-                return <GenericEntry key={key} entry={entry} />
-            }
+          {preamble.map((entry, idx) => renderEntry(entry, idx))}
+          {tests.map((group, idx) => {
+            const isActive = group.name === activeTestName
+            // Default-open: actively running test, or the only test, or any failed test
+            const defaultOpen = isActive || tests.length === 1 || group.result?.passed === false
+            return (
+              <PerTestGroup
+                key={`${idx}-${group.name}`}
+                group={group}
+                isActive={isActive}
+                defaultOpen={defaultOpen}
+              />
+            )
           })}
-          {running && (
+          {running && tests.length === 0 && (
             <div className="flex items-center gap-2 py-2 px-1.5 animate-pulse">
               <Loader2 size={12} className="animate-spin text-primary" />
               <span className="text-[11px] text-text-tertiary">Running...</span>

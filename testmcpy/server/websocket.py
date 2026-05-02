@@ -39,7 +39,8 @@ class ConnectionManager:
         self.active_connections.append(websocket)
 
     def disconnect(self, websocket: WebSocket):
-        self.active_connections.remove(websocket)
+        if websocket in self.active_connections:
+            self.active_connections.remove(websocket)
 
     async def send_message(self, message: dict, websocket: WebSocket):
         await websocket.send_json(message)
@@ -185,6 +186,233 @@ async def handle_chat_websocket(websocket: WebSocket, mcp_client: MCPClient):
         manager.disconnect(websocket)
 
 
+async def _run_test_command(websocket: WebSocket, data: dict, config, send_log):
+    """Execute a single 'run_test' command from the client.
+
+    Extracted to module scope so it can be wrapped in an asyncio.Task and
+    cancelled by `handle_test_websocket` when the user clicks Stop.
+    Cooperative cancellation is honored at every `await` point.
+    """
+    test_path = Path(data.get("test_path", ""))
+    test_name = data.get("test_name")
+    model = data.get("model") or config.default_model
+    provider = data.get("provider") or config.default_provider
+    profile = data.get("profile")
+
+    if not test_path.exists():
+        await manager.send_message(
+            {"type": "error", "message": f"Test file not found: {test_path}"},
+            websocket,
+        )
+        return
+
+    await send_log(f"📁 Loading test file: {test_path}")
+
+    try:
+        # Load test cases
+        with open(test_path) as f:
+            file_data = yaml.safe_load(f)
+
+        test_cases = []
+        if "tests" in file_data:
+            for test_data in file_data["tests"]:
+                test_cases.append(TestCase.from_dict(test_data))
+        else:
+            test_cases.append(TestCase.from_dict(file_data))
+
+        # Check for suite-level provider override
+        suite_provider = file_data.get("provider")
+        suite_provider_config = file_data.get("provider_config", {})
+        suite_model = file_data.get("model")
+
+        effective_provider = suite_provider or provider
+        effective_model = suite_model or model
+
+        # Filter to specific test if requested
+        if test_name:
+            test_cases = [tc for tc in test_cases if tc.name == test_name]
+            if not test_cases:
+                await manager.send_message(
+                    {"type": "error", "message": f"Test '{test_name}' not found"},
+                    websocket,
+                )
+                return
+
+        await send_log(f"📋 Found {len(test_cases)} test(s) to run")
+        await send_log(f"🤖 Provider: {effective_provider}, Model: {effective_model}")
+        if suite_provider:
+            await send_log(f"📝 Suite-level provider override: {suite_provider}")
+
+        # Get MCP client - use profile or default
+        mcp_client = None
+        effective_profile = profile
+        if not effective_profile:
+            # Try to get default profile from config
+            from testmcpy.server.helpers.mcp_config import load_mcp_yaml
+
+            mcp_config = load_mcp_yaml()
+            effective_profile = mcp_config.get("default")
+            if effective_profile:
+                await send_log(f"🔌 Using default MCP profile: {effective_profile}")
+
+        if effective_profile:
+            await send_log(f"🔌 Loading MCP profile: {effective_profile}")
+            mcp_client = await get_or_create_mcp_client(effective_profile)
+            if mcp_client is None:
+                await manager.send_message(
+                    {
+                        "type": "error",
+                        "message": (
+                            f"MCP profile '{effective_profile}' not found. "
+                            f"Check your MCP Profiles configuration."
+                        ),
+                    },
+                    websocket,
+                )
+                return
+
+        # Get MCP URL from the selected profile's client, not the default config
+        effective_mcp_url = config.get_mcp_url()
+        if mcp_client and hasattr(mcp_client, "base_url") and mcp_client.base_url:
+            effective_mcp_url = mcp_client.base_url
+
+        # Create runner with streaming log callback
+        runner = TestRunner(
+            model=effective_model,
+            provider=effective_provider,
+            mcp_url=effective_mcp_url,
+            mcp_client=mcp_client,
+            verbose=True,
+            hide_tool_output=False,
+            log_callback=send_log,
+            provider_config=suite_provider_config,
+        )
+
+        await send_log("⚙️ Initializing test runner...")
+        await runner.initialize()
+        await send_log("✅ Test runner ready")
+
+        # Run each test one at a time
+        all_results = []
+        for i, tc in enumerate(test_cases):
+            await manager.send_message(
+                {
+                    "type": "test_start",
+                    "test_name": tc.name,
+                    "index": i,
+                    "total": len(test_cases),
+                },
+                websocket,
+            )
+
+            await send_log(f"\n{'=' * 50}")
+            await send_log(f"🧪 Running test {i + 1}/{len(test_cases)}: {tc.name}")
+            await send_log(f"📝 Prompt: {tc.prompt[:100]}...")
+            await send_log(f"⏱️ Timeout: {tc.timeout}s")
+
+            start_time = time.time()
+            result = await runner.run_test(tc)
+            elapsed = time.time() - start_time
+
+            # Send logs from the result
+            if hasattr(result, "logs") and result.logs:
+                for log_line in result.logs:
+                    await send_log(log_line)
+
+            # Send test result
+            status = "✅ PASSED" if result.passed else "❌ FAILED"
+            await send_log(f"{status} in {elapsed:.2f}s")
+
+            if result.tool_calls:
+                await send_log(f"🔧 Tool calls: {len(result.tool_calls)}")
+                for tc_call in result.tool_calls:
+                    await send_log(f"   - {tc_call.get('name', 'unknown')}")
+
+            if result.error:
+                await send_log(f"⚠️ Error: {result.error}")
+
+            await manager.send_message(
+                {
+                    "type": "test_complete",
+                    "test_name": tc.name,
+                    "result": result.to_dict(),
+                },
+                websocket,
+            )
+
+            all_results.append(result)
+
+        # Send final summary
+        passed = sum(1 for r in all_results if r.passed)
+        failed = len(all_results) - passed
+        total_cost = sum(r.cost for r in all_results)
+
+        await send_log(f"\n{'=' * 50}")
+        await send_log(f"📊 SUMMARY: {passed} passed, {failed} failed")
+        if total_cost > 0:
+            await send_log(f"💰 Total cost: ${total_cost:.4f}")
+
+        results_list = [r.to_dict() for r in all_results]
+        summary = {
+            "total": len(all_results),
+            "passed": passed,
+            "failed": failed,
+            "total_cost": total_cost,
+        }
+
+        # Save results to history
+        try:
+            from testmcpy.server.routers.results import save_test_run_to_file
+
+            # Get relative path from tests directory if possible
+            tests_dir = Path.cwd() / "tests"
+            if test_path.is_relative_to(tests_dir):
+                test_file_name = str(test_path.relative_to(tests_dir))
+            else:
+                test_file_name = test_path.name
+
+            save_data = {
+                "test_file": test_file_name,
+                "test_file_path": str(test_path),
+                "provider": provider,
+                "model": model,
+                "mcp_profile": effective_profile,
+                "results": results_list,
+                "summary": summary,
+            }
+            save_result = save_test_run_to_file(save_data)
+            await send_log(f"💾 Results saved: {save_result.get('run_id')}")
+        except Exception as save_err:
+            await send_log(f"⚠️ Failed to save results: {save_err}")
+
+        await manager.send_message(
+            {
+                "type": "all_complete",
+                "summary": summary,
+                "results": results_list,
+            },
+            websocket,
+        )
+
+    except asyncio.CancelledError:
+        # Stopped by user — let the caller emit the user-facing message.
+        raise
+    except Exception as e:
+        import traceback
+
+        tb = traceback.format_exc()
+        try:
+            await send_log(f"❌ Error: {str(e)}")
+            await send_log(f"Traceback:\n{tb}")
+            await manager.send_message(
+                {"type": "error", "message": str(e), "traceback": tb},
+                websocket,
+            )
+        except Exception:
+            # Socket may already be closed (client disconnected mid-run)
+            pass
+
+
 async def handle_test_websocket(websocket: WebSocket):
     """
     Handle WebSocket for streaming test execution with real-time logs.
@@ -199,6 +427,9 @@ async def handle_test_websocket(websocket: WebSocket):
         "profile": "mcp_profile_id"
     }
 
+    Or:
+    { "type": "stop" }   # cancel the in-flight run
+
     Message format to client:
     {
         "type": "log" | "test_start" | "test_complete" | "all_complete" | "error",
@@ -211,225 +442,58 @@ async def handle_test_websocket(websocket: WebSocket):
     config = get_config()
 
     async def send_log(msg: str):
-        """Send a log message to the client."""
-        await manager.send_message({"type": "log", "message": msg}, websocket)
+        """Send a log message to the client (best-effort)."""
+        try:
+            await manager.send_message({"type": "log", "message": msg}, websocket)
+        except Exception:
+            # Socket closed underneath us — drop the message.
+            pass
+
+    async def _watch_for_stop():
+        """Block until the client sends a 'stop' message.
+
+        Raises WebSocketDisconnect if the client disconnects.
+        """
+        while True:
+            msg = await websocket.receive_json()
+            if msg.get("type") == "stop":
+                return
 
     try:
         while True:
             data = await websocket.receive_json()
 
-            if data.get("type") == "run_test":
-                test_path = Path(data.get("test_path", ""))
-                test_name = data.get("test_name")
-                model = data.get("model") or config.default_model
-                provider = data.get("provider") or config.default_provider
-                profile = data.get("profile")
+            if data.get("type") != "run_test":
+                continue
 
-                if not test_path.exists():
-                    await manager.send_message(
-                        {"type": "error", "message": f"Test file not found: {test_path}"},
-                        websocket,
-                    )
-                    continue
+            run_task = asyncio.create_task(_run_test_command(websocket, data, config, send_log))
+            stop_task = asyncio.create_task(_watch_for_stop())
 
-                await send_log(f"📁 Loading test file: {test_path}")
+            done, _pending = await asyncio.wait(
+                {run_task, stop_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
 
+            if stop_task in done:
+                # Either client sent {"type": "stop"} or disconnected.
+                stop_exc = stop_task.exception()
+                run_task.cancel()
                 try:
-                    # Load test cases
-                    with open(test_path) as f:
-                        file_data = yaml.safe_load(f)
-
-                    test_cases = []
-                    if "tests" in file_data:
-                        for test_data in file_data["tests"]:
-                            test_cases.append(TestCase.from_dict(test_data))
-                    else:
-                        test_cases.append(TestCase.from_dict(file_data))
-
-                    # Check for suite-level provider override
-                    suite_provider = file_data.get("provider")
-                    suite_provider_config = file_data.get("provider_config", {})
-                    suite_model = file_data.get("model")
-
-                    effective_provider = suite_provider or provider
-                    effective_model = suite_model or model
-
-                    # Filter to specific test if requested
-                    if test_name:
-                        test_cases = [tc for tc in test_cases if tc.name == test_name]
-                        if not test_cases:
-                            await manager.send_message(
-                                {"type": "error", "message": f"Test '{test_name}' not found"},
-                                websocket,
-                            )
-                            continue
-
-                    await send_log(f"📋 Found {len(test_cases)} test(s) to run")
-                    await send_log(f"🤖 Provider: {effective_provider}, Model: {effective_model}")
-                    if suite_provider:
-                        await send_log(f"📝 Suite-level provider override: {suite_provider}")
-
-                    # Get MCP client - use profile or default
-                    mcp_client = None
-                    effective_profile = profile
-                    if not effective_profile:
-                        # Try to get default profile from config
-                        from testmcpy.server.helpers.mcp_config import load_mcp_yaml
-
-                        mcp_config = load_mcp_yaml()
-                        effective_profile = mcp_config.get("default")
-                        if effective_profile:
-                            await send_log(f"🔌 Using default MCP profile: {effective_profile}")
-
-                    if effective_profile:
-                        await send_log(f"🔌 Loading MCP profile: {effective_profile}")
-                        mcp_client = await get_or_create_mcp_client(effective_profile)
-                        if mcp_client is None:
-                            await manager.send_message(
-                                {
-                                    "type": "error",
-                                    "message": (
-                                        f"MCP profile '{effective_profile}' not found. "
-                                        f"Check your MCP Profiles configuration."
-                                    ),
-                                },
-                                websocket,
-                            )
-                            continue
-
-                    # Get MCP URL from the selected profile's client, not the default config
-                    effective_mcp_url = config.get_mcp_url()
-                    if mcp_client and hasattr(mcp_client, "base_url") and mcp_client.base_url:
-                        effective_mcp_url = mcp_client.base_url
-
-                    # Create runner with streaming log callback
-                    runner = TestRunner(
-                        model=effective_model,
-                        provider=effective_provider,
-                        mcp_url=effective_mcp_url,
-                        mcp_client=mcp_client,
-                        verbose=True,
-                        hide_tool_output=False,
-                        log_callback=send_log,
-                        provider_config=suite_provider_config,
-                    )
-
-                    await send_log("⚙️ Initializing test runner...")
-                    await runner.initialize()
-                    await send_log("✅ Test runner ready")
-
-                    # Run each test one at a time
-                    all_results = []
-                    for i, tc in enumerate(test_cases):
-                        await manager.send_message(
-                            {
-                                "type": "test_start",
-                                "test_name": tc.name,
-                                "index": i,
-                                "total": len(test_cases),
-                            },
-                            websocket,
-                        )
-
-                        await send_log(f"\n{'=' * 50}")
-                        await send_log(f"🧪 Running test {i + 1}/{len(test_cases)}: {tc.name}")
-                        await send_log(f"📝 Prompt: {tc.prompt[:100]}...")
-                        await send_log(f"⏱️ Timeout: {tc.timeout}s")
-
-                        start_time = time.time()
-                        result = await runner.run_test(tc)
-                        elapsed = time.time() - start_time
-
-                        # Send logs from the result
-                        if hasattr(result, "logs") and result.logs:
-                            for log_line in result.logs:
-                                await send_log(log_line)
-
-                        # Send test result
-                        status = "✅ PASSED" if result.passed else "❌ FAILED"
-                        await send_log(f"{status} in {elapsed:.2f}s")
-
-                        if result.tool_calls:
-                            await send_log(f"🔧 Tool calls: {len(result.tool_calls)}")
-                            for tc_call in result.tool_calls:
-                                await send_log(f"   - {tc_call.get('name', 'unknown')}")
-
-                        if result.error:
-                            await send_log(f"⚠️ Error: {result.error}")
-
-                        await manager.send_message(
-                            {
-                                "type": "test_complete",
-                                "test_name": tc.name,
-                                "result": result.to_dict(),
-                            },
-                            websocket,
-                        )
-
-                        all_results.append(result)
-
-                    # Send final summary
-                    passed = sum(1 for r in all_results if r.passed)
-                    failed = len(all_results) - passed
-                    total_cost = sum(r.cost for r in all_results)
-
-                    await send_log(f"\n{'=' * 50}")
-                    await send_log(f"📊 SUMMARY: {passed} passed, {failed} failed")
-                    if total_cost > 0:
-                        await send_log(f"💰 Total cost: ${total_cost:.4f}")
-
-                    results_list = [r.to_dict() for r in all_results]
-                    summary = {
-                        "total": len(all_results),
-                        "passed": passed,
-                        "failed": failed,
-                        "total_cost": total_cost,
-                    }
-
-                    # Save results to history
-                    try:
-                        from testmcpy.server.routers.results import save_test_run_to_file
-
-                        # Get relative path from tests directory if possible
-                        tests_dir = Path.cwd() / "tests"
-                        if test_path.is_relative_to(tests_dir):
-                            test_file_name = str(test_path.relative_to(tests_dir))
-                        else:
-                            test_file_name = test_path.name
-
-                        save_data = {
-                            "test_file": test_file_name,
-                            "test_file_path": str(test_path),
-                            "provider": provider,
-                            "model": model,
-                            "mcp_profile": effective_profile,
-                            "results": results_list,
-                            "summary": summary,
-                        }
-                        save_result = save_test_run_to_file(save_data)
-                        await send_log(f"💾 Results saved: {save_result.get('run_id')}")
-                    except Exception as save_err:
-                        await send_log(f"⚠️ Failed to save results: {save_err}")
-
-                    await manager.send_message(
-                        {
-                            "type": "all_complete",
-                            "summary": summary,
-                            "results": results_list,
-                        },
-                        websocket,
-                    )
-
-                except Exception as e:
-                    import traceback
-
-                    tb = traceback.format_exc()
-                    await send_log(f"❌ Error: {str(e)}")
-                    await send_log(f"Traceback:\n{tb}")
-                    await manager.send_message(
-                        {"type": "error", "message": str(e), "traceback": tb},
-                        websocket,
-                    )
+                    await run_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+                if stop_exc is not None:
+                    # Disconnect (or other recv failure) — propagate to outer handler.
+                    raise stop_exc
+                await send_log("🛑 Test run stopped by user")
+            else:
+                # Run finished naturally — cancel the stop watcher so we can
+                # re-enter the outer receive loop for the next command.
+                stop_task.cancel()
+                try:
+                    await stop_task
+                except (asyncio.CancelledError, Exception):
+                    pass
 
     except WebSocketDisconnect:
         manager.disconnect(websocket)

@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react'
 import {
   Plus,
   Play,
+  Square,
   Trash2,
   Edit,
   Save,
@@ -371,6 +372,7 @@ function TestManager({ selectedProfiles = [], selectedLlmProfile = null, llmProf
     activeTestFile,
     runTests: contextRunTests,
     runSingleTest: contextRunSingleTest,
+    stopTests,
     clearLogs,
     clearResults,
     resetTestStatuses,
@@ -411,7 +413,8 @@ function TestManager({ selectedProfiles = [], selectedLlmProfile = null, llmProf
     const saved = localStorage.getItem('testManagerSidebarWidth')
     return saved ? Number(saved) : 300
   })
-  const containerRef = useRef(null)
+  const containerRef = useRef(null)  // inner editor/panel split container (used by bottom-panel drag)
+  const sidebarRef = useRef(null)
   const overlayRef = useRef(null)
   const rafRef = useRef(null)
 
@@ -465,14 +468,15 @@ function TestManager({ selectedProfiles = [], selectedLlmProfile = null, llmProf
   const handleSidebarDragStart = useCallback((e) => {
     e.preventDefault()
     showOverlay('col-resize')
-    const sidebarEl = containerRef.current?.querySelector('[data-sidebar]')
+    const sidebarEl = sidebarRef.current
+    // Capture sidebar's left edge once at drag start (it doesn't move during drag).
+    const sidebarLeft = sidebarEl?.getBoundingClientRect().left ?? 0
     let currentWidth = sidebarWidth
 
     const onMove = (e) => {
       if (rafRef.current) cancelAnimationFrame(rafRef.current)
       rafRef.current = requestAnimationFrame(() => {
-        const left = containerRef.current?.getBoundingClientRect().left || 0
-        const w = Math.min(Math.max(e.clientX - left, 180), 600)
+        const w = Math.min(Math.max(e.clientX - sidebarLeft, 180), 600)
         currentWidth = w
         if (sidebarEl) sidebarEl.style.width = `${w}px`
       })
@@ -1063,11 +1067,12 @@ tests:
 
   return (
     <div className="h-full flex flex-col">
-      <div className="flex-1 flex flex-col md:flex-row overflow-hidden min-h-0 relative" ref={containerRef}>
+      <div className="flex-1 flex flex-col md:flex-row overflow-hidden min-h-0 relative">
         {/* Permanent overlay — shown/hidden via ref during drag to prevent Monaco from stealing mouse events. Never triggers React re-render. */}
         <div ref={overlayRef} className="absolute inset-0 z-30" style={{ display: 'none' }} />
         {/* File List Sidebar — resizable */}
         <div
+          ref={sidebarRef}
           data-sidebar
           className={`flex-shrink-0 border-b md:border-b-0 md:border-r border-border ${showFileTree ? 'flex flex-col' : 'hidden'} md:flex md:flex-col bg-surface-elevated overflow-hidden max-h-[40vh] md:max-h-none`}
           style={{ width: typeof window !== 'undefined' && window.innerWidth >= 768 ? sidebarWidth : '100%' }}
@@ -1352,6 +1357,16 @@ tests:
                     )}
                     <span>{running && runAllLlmsMode ? `${runningTests.completed}/${runningTests.total}` : 'All LLMs'}</span>
                   </button>
+                  {running && !runAllLlmsMode && (
+                    <button
+                      onClick={stopTests}
+                      className="btn btn-error text-sm"
+                      title="Stop the current test run"
+                    >
+                      <Square size={14} fill="currentColor" />
+                      <span>Stop</span>
+                    </button>
+                  )}
                   {resultsHistory.length > 0 && (
                     <button
                       onClick={() => setShowHistory(!showHistory)}

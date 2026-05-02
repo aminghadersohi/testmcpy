@@ -1,12 +1,29 @@
 import React from 'react'
-import { Lock, Pencil } from 'lucide-react'
+import { Lock, Pencil, WrapText, Map } from 'lucide-react'
+
+function ToggleChip({ active, onClick, title, icon, label }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={title}
+      className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] uppercase tracking-wide transition-colors ${
+        active
+          ? 'bg-primary/15 text-primary'
+          : 'bg-surface text-text-disabled hover:text-text-secondary'
+      }`}
+    >
+      {icon}
+      {label}
+    </button>
+  )
+}
 
 /**
  * IDE-style status bar that sits flush under the Monaco editor.
  *
- * Shows cursor position, language, edit/read-only mode, and an
- * unsaved-changes dot. Toggle slots on the right are reserved for
- * follow-up commits (word-wrap, minimap).
+ * Shows cursor position, language, edit/read-only mode, an
+ * unsaved-changes dot, and view toggles (word-wrap, minimap).
  */
 export default function EditorStatusBar({
   line = 1,
@@ -14,6 +31,10 @@ export default function EditorStatusBar({
   language = 'YAML',
   editMode = false,
   dirty = false,
+  wordWrap = false,
+  onToggleWordWrap,
+  minimap = false,
+  onToggleMinimap,
   rightSlot = null,
 }) {
   return (
@@ -43,6 +64,25 @@ export default function EditorStatusBar({
       )}
 
       <span className="flex-1" />
+
+      {onToggleWordWrap && (
+        <ToggleChip
+          active={wordWrap}
+          onClick={onToggleWordWrap}
+          title={wordWrap ? 'Disable word wrap' : 'Enable word wrap'}
+          icon={<WrapText size={10} />}
+          label="Wrap"
+        />
+      )}
+      {onToggleMinimap && (
+        <ToggleChip
+          active={minimap}
+          onClick={onToggleMinimap}
+          title={minimap ? 'Hide minimap' : 'Show minimap'}
+          icon={<Map size={10} />}
+          label="Map"
+        />
+      )}
 
       {rightSlot}
 

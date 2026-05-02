@@ -394,6 +394,13 @@ function TestManager({ selectedProfiles = [], selectedLlmProfile = null, llmProf
   const [testLocations, setTestLocations] = useState([])
   // Editor cursor position for the IDE-style status bar (1-based to match Monaco).
   const [editorCursor, setEditorCursor] = useState({ line: 1, column: 1 })
+  // Persisted Monaco view options exposed via the status bar.
+  const [editorWordWrap, setEditorWordWrap] = useState(() => {
+    return localStorage.getItem('testManagerEditorWordWrap') === '1'
+  })
+  const [editorMinimap, setEditorMinimap] = useState(() => {
+    return localStorage.getItem('testManagerEditorMinimap') === '1'
+  })
   const editorRef = useRef(null)
   const monacoRef = useRef(null)
   const testLocationsRef = useRef([]) // Ref to avoid stale closure in click handler
@@ -1421,7 +1428,8 @@ tests:
                     onMount={handleEditorDidMount}
                     options={{
                       readOnly: !editMode,
-                      minimap: { enabled: false },
+                      minimap: { enabled: editorMinimap },
+                      wordWrap: editorWordWrap ? 'on' : 'off',
                       fontSize: 14,
                       lineNumbers: 'on',
                       scrollBeyondLastLine: false,
@@ -1438,6 +1446,20 @@ tests:
                   language="YAML"
                   editMode={editMode}
                   dirty={editMode && fileContent !== selectedFile.content}
+                  wordWrap={editorWordWrap}
+                  onToggleWordWrap={() => {
+                    setEditorWordWrap((v) => {
+                      localStorage.setItem('testManagerEditorWordWrap', v ? '0' : '1')
+                      return !v
+                    })
+                  }}
+                  minimap={editorMinimap}
+                  onToggleMinimap={() => {
+                    setEditorMinimap((v) => {
+                      localStorage.setItem('testManagerEditorMinimap', v ? '0' : '1')
+                      return !v
+                    })
+                  }}
                 />
               </div>
 

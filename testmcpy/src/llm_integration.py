@@ -1419,7 +1419,15 @@ class ClaudeSDKProvider(LLMProvider):
             elif auth_type == "bearer":
                 token = self.auth_config.get("token", "")
             elif auth_type == "oauth":
-                token = await self._fetch_oauth_token()
+                # oauth_auto_discover (the fastmcp browser flow) caches its
+                # access_token to ~/.fastmcp/oauth-mcp-client-cache/. The
+                # client_credentials grant in _fetch_oauth_token doesn't apply
+                # here — most servers don't accept it. Reuse the cached token
+                # so the SDK doesn't kick off its own claude.ai/oauth flow.
+                if self.auth_config.get("oauth_auto_discover"):
+                    token = await self._read_cached_oauth_token()
+                else:
+                    token = await self._fetch_oauth_token()
 
         if token:
             server_config["headers"] = {"Authorization": f"Bearer {token}"}
@@ -1503,6 +1511,64 @@ class ClaudeSDKProvider(LLMProvider):
             except (httpx.HTTPStatusError, httpx.ConnectError, httpx.TimeoutException) as e:
                 _claude_sdk_logger.warning("[ClaudeSDK] Failed to fetch OAuth token: %s", e)
                 return None
+
+    async def _read_cached_oauth_token(self) -> str | None:
+        """Reuse the access token fastmcp's OAuth flow already cached.
+
+        When the MCP profile uses oauth_auto_discover, MCPClient.initialize()
+        runs fastmcp's browser OAuth flow and stores the resulting tokens at
+        ~/.fastmcp/oauth-mcp-client-cache/<host>_tokens.json. We need that
+        same token here so the SDK's separate MCP connection authenticates
+        without triggering a second OAuth flow against claude.ai/oauth.
+
+        Returns None if there is no cached token or it is expired —
+        FileTokenStorage.get_tokens() handles the expiration check. In that
+        case the user needs to (re-)authenticate the MCP profile (e.g. via
+        the MCP Profiles page) before re-running the test.
+        """
+        try:
+            from urllib.parse import urlparse
+
+            from fastmcp.client.auth.oauth import FileTokenStorage
+        except ImportError as e:
+            _claude_sdk_logger.warning(
+                "[ClaudeSDK] fastmcp not available for cached-token lookup: %s", e
+            )
+            return None
+
+        parsed = urlparse(self.mcp_url)
+        server_base_url = f"{parsed.scheme}://{parsed.netloc}"
+
+        try:
+            storage = FileTokenStorage(server_url=server_base_url)
+            oauth_token = await storage.get_tokens()
+        except (OSError, ValueError) as e:
+            _claude_sdk_logger.warning(
+                "[ClaudeSDK] Failed to read cached OAuth token for %s: %s",
+                server_base_url,
+                e,
+            )
+            return None
+
+        if oauth_token is None:
+            _claude_sdk_logger.warning(
+                "[ClaudeSDK] No cached OAuth token for %s — authenticate the "
+                "MCP profile first (e.g. open it on the MCP Profiles page or "
+                "run a smoke test) and re-run the test.",
+                server_base_url,
+            )
+            return None
+
+        access_token = getattr(oauth_token, "access_token", None)
+        if not access_token:
+            return None
+
+        _claude_sdk_logger.info(
+            "[ClaudeSDK] Reusing cached OAuth token for %s (length: %d)",
+            server_base_url,
+            len(access_token),
+        )
+        return access_token
 
     async def generate_with_tools(
         self,

@@ -10,12 +10,15 @@ Tests cover:
   success_rate_above, latency_percentile, response_matches_pattern
 """
 
+from unittest.mock import AsyncMock, patch
+
 import pytest
 
 from testmcpy.evals.base_evaluators import _match_tool_name, create_evaluator
 from testmcpy.src.llm_integration import (
     AnthropicProvider,
     AssistantProvider,
+    ClaudeSDKProvider,
     LLMResult,
     OpenAIProvider,
     OpenRouterProvider,
@@ -56,6 +59,98 @@ class TestProviderFactory:
         p2 = create_llm_provider("claude-code", "claude-sonnet-4-20250514")
         assert type(p1).__name__ == "ClaudeSDKProvider"
         assert type(p2).__name__ == "ClaudeSDKProvider"
+
+
+# ---------------------------------------------------------------------------
+# ClaudeSDKProvider OAuth Tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def fake_claude_sdk_module(monkeypatch):
+    """Stub claude_agent_sdk so .initialize() doesn't require the real package."""
+    import sys
+    import types
+
+    # Provide just enough surface for ClaudeSDKProvider.initialize().
+    fake_pkg = types.ModuleType("claude_agent_sdk")
+    fake_pkg.CLINotFoundError = type("CLINotFoundError", (Exception,), {})
+    fake_types = types.ModuleType("claude_agent_sdk.types")
+    fake_types.McpHttpServerConfig = dict  # used as a type alias only
+    monkeypatch.setitem(sys.modules, "claude_agent_sdk", fake_pkg)
+    monkeypatch.setitem(sys.modules, "claude_agent_sdk.types", fake_types)
+    return fake_pkg
+
+
+class TestClaudeSDKProviderOAuth:
+    """Cover the OAuth branches in ClaudeSDKProvider.initialize().
+
+    These exist because the SDK's MCP transport will silently fall back to
+    its own claude.ai/oauth flow if no Authorization header is set, which
+    masks misconfiguration. The provider must either supply a Bearer token
+    or fail loudly.
+    """
+
+    @pytest.mark.asyncio
+    async def test_oauth_auto_discover_uses_cached_token(self, fake_claude_sdk_module):
+        """When oauth_auto_discover is set, the cached fastmcp token is used as Bearer."""
+        provider = ClaudeSDKProvider(
+            model="claude-sonnet-4-5",
+            mcp_url="https://mcp.example.com/mcp",
+            auth={"type": "oauth", "oauth_auto_discover": True},
+        )
+        with patch.object(
+            ClaudeSDKProvider,
+            "_read_cached_oauth_token",
+            new=AsyncMock(return_value="cached-access-token-abc"),
+        ) as read_cached:
+            await provider.initialize()
+            read_cached.assert_awaited_once()
+        headers = provider._mcp_server_config.get("headers", {})
+        assert headers.get("Authorization") == "Bearer cached-access-token-abc"
+
+    @pytest.mark.asyncio
+    async def test_oauth_auto_discover_missing_token_fails_fast(self, fake_claude_sdk_module):
+        """No cached token must raise so the SDK can't bounce to claude.ai/oauth."""
+        provider = ClaudeSDKProvider(
+            model="claude-sonnet-4-5",
+            mcp_url="https://mcp.example.com/mcp",
+            auth={"type": "oauth", "oauth_auto_discover": True},
+        )
+        with patch.object(
+            ClaudeSDKProvider, "_read_cached_oauth_token", new=AsyncMock(return_value=None)
+        ):
+            with pytest.raises(ValueError, match="No usable cached OAuth token"):
+                await provider.initialize()
+
+    @pytest.mark.asyncio
+    async def test_oauth_client_credentials_path_unchanged(self, fake_claude_sdk_module):
+        """Profiles without oauth_auto_discover still use the client_credentials grant."""
+        provider = ClaudeSDKProvider(
+            model="claude-sonnet-4-5",
+            mcp_url="https://mcp.example.com/mcp",
+            auth={
+                "type": "oauth",
+                "client_id": "id",
+                "client_secret": "secret",
+                "token_url": "https://auth.example.com/token",
+            },
+        )
+        with (
+            patch.object(
+                ClaudeSDKProvider,
+                "_fetch_oauth_token",
+                new=AsyncMock(return_value="cc-token-xyz"),
+            ) as fetch_cc,
+            patch.object(
+                ClaudeSDKProvider, "_read_cached_oauth_token", new=AsyncMock()
+            ) as read_cached,
+        ):
+            await provider.initialize()
+            fetch_cc.assert_awaited_once()
+            read_cached.assert_not_awaited()
+        headers = provider._mcp_server_config.get("headers", {})
+        assert headers.get("Authorization") == "Bearer cc-token-xyz"
 
 
 # ---------------------------------------------------------------------------

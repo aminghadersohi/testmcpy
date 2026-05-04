@@ -1006,6 +1006,7 @@ class MCPClient:
         if not self.client:
             return MCPToolResult(
                 tool_call_id=tool_call.id or "unknown",
+                tool_name=tool_call.name,
                 content=None,
                 is_error=True,
                 error_message="MCP client not initialized. Call initialize() first.",
@@ -1050,6 +1051,7 @@ class MCPClient:
 
             return MCPToolResult(
                 tool_call_id=tool_call.id or "unknown",
+                tool_name=tool_call.name,
                 content=result.content,
                 is_error=result.isError if hasattr(result, "isError") else False,
                 error_message=None,
@@ -1058,6 +1060,7 @@ class MCPClient:
         except asyncio.TimeoutError:
             return MCPToolResult(
                 tool_call_id=tool_call.id or "unknown",
+                tool_name=tool_call.name,
                 content=None,
                 is_error=True,
                 error_message=f"Tool call '{tool_call.name}' timed out after {timeout}s",
@@ -1087,6 +1090,7 @@ class MCPClient:
                 except (TokenRefreshError, httpx.HTTPError) as refresh_err:
                     return MCPToolResult(
                         tool_call_id=tool_call.id or "unknown",
+                        tool_name=tool_call.name,
                         content=None,
                         is_error=True,
                         error_message=(
@@ -1097,6 +1101,7 @@ class MCPClient:
 
             return MCPToolResult(
                 tool_call_id=tool_call.id or "unknown",
+                tool_name=tool_call.name,
                 content=None,
                 is_error=True,
                 error_message=f"Tool call '{tool_call.name}' failed: {str(e)}",
@@ -1380,12 +1385,14 @@ class StdioMCPClient:
             )
             return MCPToolResult(
                 tool_call_id=tool_call.id or "unknown",
+                tool_name=tool_call.name,
                 content=result.get("content"),
                 is_error=result.get("isError", False),
             )
         except asyncio.TimeoutError:
             return MCPToolResult(
                 tool_call_id=tool_call.id or "unknown",
+                tool_name=tool_call.name,
                 content=None,
                 is_error=True,
                 error_message=f"Tool call '{tool_call.name}' timed out after {timeout}s",
@@ -1393,6 +1400,7 @@ class StdioMCPClient:
         except MCPError as e:
             return MCPToolResult(
                 tool_call_id=tool_call.id or "unknown",
+                tool_name=tool_call.name,
                 content=None,
                 is_error=True,
                 error_message=str(e),

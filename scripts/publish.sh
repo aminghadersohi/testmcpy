@@ -92,13 +92,14 @@ else
 
     echo -e "\n${GREEN}🔐 SHA256: ${SHA256}${NC}"
 
-    # Update Homebrew formula
+    # Update Homebrew formula (URL + SHA256 must stay in sync)
     echo -e "\n${GREEN}📝 Updating Homebrew formula...${NC}"
+    sed -i '' "s|testmcpy-[0-9.]*\.tar\.gz|testmcpy-${VERSION}.tar.gz|" Formula/testmcpy.rb
     sed -i '' "s/sha256 \".*\"/sha256 \"${SHA256}\"/" Formula/testmcpy.rb
 
     # Commit the formula update
     git add Formula/testmcpy.rb
-    git commit -m "Update Homebrew formula SHA256 for v${VERSION}"
+    git commit -m "Update Homebrew formula for v${VERSION}"
     
     echo -e "${GREEN}✅ Homebrew formula updated${NC}"
 fi

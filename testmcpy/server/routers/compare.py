@@ -57,6 +57,9 @@ async def compare_runs(request: CompareRequest) -> dict[str, Any]:
                 "passed": passed,
                 "failed": total - passed,
                 "pass_rate": round((passed / total * 100) if total > 0 else 0, 1),
+                "total_cost": run["summary"].get("total_cost_usd", 0),
+                "total_tokens": run["summary"].get("total_tokens", 0),
+                "total_duration_ms": run["summary"].get("total_duration_ms", 0),
             }
         )
 
@@ -94,6 +97,7 @@ async def compare_runs(request: CompareRequest) -> dict[str, Any]:
                     "answer_snippet": answer_snippet,
                     "tokens_input": match.get("tokens_input", 0),
                     "tokens_output": match.get("tokens_output", 0),
+                    "cost_usd": match.get("cost_usd", 0),
                 }
             else:
                 cells[run["run_id"]] = {

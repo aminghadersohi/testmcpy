@@ -45,6 +45,7 @@ class MockToolResult:
     content: Any
     is_error: bool = False
     error_message: str | None = None
+    tool_name: str | None = None
 
 
 class TestToolNameMatching:
@@ -185,6 +186,51 @@ class TestExecutionSuccessful:
         assert result.passed is False
         assert result.score == 0.0
         assert "No tool execution results" in result.reason
+
+    def test_skips_sdk_file_system_server_not_found(self):
+        """SDK saves oversized tool outputs to a file and tells the model to
+        read them via ReadMcpResourceTool. No file-system MCP server is
+        registered, so the recovery attempt fails with a 'Server "file-system"
+        not found' error. That should not count as a tool execution error.
+        """
+        evaluator = ExecutionSuccessful()
+        context = {
+            "tool_results": [
+                MockToolResult(tool_call_id="1", content="OK", is_error=False),
+                MockToolResult(
+                    tool_call_id="2",
+                    content=None,
+                    is_error=True,
+                    error_message=(
+                        'Server "file-system" not found. Available servers: '
+                        "mcp-service, claude.ai preset stg"
+                    ),
+                ),
+            ]
+        }
+        result = evaluator.evaluate(context)
+        assert result.passed is True
+        assert result.score == 1.0
+
+    def test_skips_read_mcp_resource_tool_by_name(self):
+        """When tool_name is set on the result, ReadMcpResourceTool failures
+        should be ignored regardless of the error text.
+        """
+        evaluator = ExecutionSuccessful()
+        context = {
+            "tool_results": [
+                MockToolResult(
+                    tool_call_id="1",
+                    content=None,
+                    is_error=True,
+                    error_message="Some unrelated error",
+                    tool_name="ReadMcpResourceTool",
+                ),
+            ]
+        }
+        result = evaluator.evaluate(context)
+        assert result.passed is True
+        assert result.score == 1.0
 
 
 class TestFinalAnswerContains:

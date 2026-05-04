@@ -1877,6 +1877,7 @@ class ClaudeSDKProvider(LLMProvider):
                     result_data = tool_results_map[tc_id]
                     mcp_result = MCPToolResult(
                         tool_call_id=tc_id,
+                        tool_name=tc.get("name"),
                         content=result_data.get("content", ""),
                         is_error=result_data.get("is_error", False),
                         error_message=str(result_data.get("content", ""))

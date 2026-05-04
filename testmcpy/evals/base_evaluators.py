@@ -187,6 +187,25 @@ class ExecutionSuccessful(BaseEvaluator):
     def description(self) -> str:
         return "Checks if tool execution completed without errors"
 
+    # Tools blocked by the SDK harness — errors from these are expected and should be ignored
+    _BLOCKED_TOOLS = {
+        "Read",
+        "Bash",
+        "Edit",
+        "Write",
+        "Grep",
+        "Glob",
+        "ToolSearch",
+        "Skill",
+        "TodoWrite",
+        "Agent",
+        "WebFetch",
+        "WebSearch",
+        "NotebookEdit",
+        "EnterWorktree",
+        "ExitWorktree",
+    }
+
     def evaluate(self, context: dict[str, Any]) -> EvalResult:
         tool_results = context.get("tool_results", [])
 
@@ -196,9 +215,15 @@ class ExecutionSuccessful(BaseEvaluator):
         errors = []
         for result in tool_results:
             if result.is_error:
-                errors.append(
-                    {"tool": result.tool_call_id, "error": result.error_message or "Unknown error"}
-                )
+                error_msg = result.error_message or "Unknown error"
+                # Skip errors from blocked/disallowed tools (expected failures)
+                if "No such tool available" in error_msg or "not enabled" in error_msg:
+                    continue
+                # Also check tool name against known blocked tools
+                tool_id = result.tool_call_id or ""
+                if any(blocked in tool_id for blocked in self._BLOCKED_TOOLS):
+                    continue
+                errors.append({"tool": tool_id, "error": error_msg})
 
         if errors:
             return EvalResult(

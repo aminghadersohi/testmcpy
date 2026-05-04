@@ -11,6 +11,9 @@ import {
   Plus,
   Cpu,
   Clock,
+  DollarSign,
+  Hash,
+  Trophy,
   RefreshCw,
 } from 'lucide-react'
 
@@ -20,6 +23,19 @@ function formatDuration(ms) {
   return `${Math.round(ms)}ms`
 }
 
+function formatCost(cost) {
+  if (!cost) return '$0.00'
+  if (cost < 0.01) return `$${cost.toFixed(4)}`
+  return `$${cost.toFixed(2)}`
+}
+
+function formatTokens(tokens) {
+  if (!tokens) return '0'
+  if (tokens >= 1000000) return `${(tokens / 1000000).toFixed(1)}M`
+  if (tokens >= 1000) return `${(tokens / 1000).toFixed(0)}K`
+  return tokens.toString()
+}
+
 function RunComparison() {
   const [runs, setRuns] = useState([])
   const [selectedRunIds, setSelectedRunIds] = useState([])
@@ -27,11 +43,26 @@ function RunComparison() {
   const [loading, setLoading] = useState(false)
   const [loadingRuns, setLoadingRuns] = useState(true)
   const [error, setError] = useState(null)
+  const [filterModel, setFilterModel] = useState('')
+  const [filterTestFile, setFilterTestFile] = useState('')
+  const [filterOptions, setFilterOptions] = useState({ models: [], providers: [], test_files: [] })
+
+  const loadFilterOptions = useCallback(async () => {
+    try {
+      const res = await fetch('/api/results/filters')
+      if (res.ok) setFilterOptions(await res.json())
+    } catch (err) {
+      console.error('Failed to load filters:', err)
+    }
+  }, [])
 
   const loadRuns = useCallback(async () => {
     setLoadingRuns(true)
     try {
-      const res = await fetch('/api/results/list?limit=100')
+      const params = new URLSearchParams({ limit: '200' })
+      if (filterModel) params.set('model', filterModel)
+      if (filterTestFile) params.set('test_file', filterTestFile)
+      const res = await fetch(`/api/results/list?${params}`)
       if (res.ok) {
         const data = await res.json()
         setRuns(data.runs || [])
@@ -41,8 +72,14 @@ function RunComparison() {
     } finally {
       setLoadingRuns(false)
     }
-  }, [])
+  }, [filterModel, filterTestFile])
 
+  // Fetch filter options once on mount
+  useEffect(() => {
+    loadFilterOptions()
+  }, [loadFilterOptions])
+
+  // Fetch runs when filters change
   useEffect(() => {
     loadRuns()
   }, [loadRuns])
@@ -135,9 +172,41 @@ function RunComparison() {
         {/* Run selector */}
         {!comparison && (
           <div className="p-4 rounded-xl bg-surface border border-border">
-            <h3 className="text-sm font-semibold text-text-primary mb-3">
-              Select runs to compare (min 2)
-            </h3>
+            <div className="flex items-center gap-3 mb-3 flex-wrap">
+              <h3 className="text-sm font-semibold text-text-primary">
+                Select runs to compare (min 2)
+              </h3>
+              <div className="flex items-center gap-2 ml-auto">
+                {filterOptions.models.length > 1 && (
+                  <select
+                    value={filterModel}
+                    onChange={(e) => setFilterModel(e.target.value)}
+                    className="text-xs py-1 px-2 rounded border border-border bg-surface-elevated text-text-primary"
+                  >
+                    <option value="">All Models</option>
+                    {filterOptions.models.map(m => <option key={m} value={m}>{m}</option>)}
+                  </select>
+                )}
+                {filterOptions.test_files.length > 1 && (
+                  <select
+                    value={filterTestFile}
+                    onChange={(e) => setFilterTestFile(e.target.value)}
+                    className="text-xs py-1 px-2 rounded border border-border bg-surface-elevated text-text-primary"
+                  >
+                    <option value="">All Test Files</option>
+                    {filterOptions.test_files.map(f => <option key={f} value={f}>{f.split('/').pop()}</option>)}
+                  </select>
+                )}
+                {(filterModel || filterTestFile) && (
+                  <button
+                    onClick={() => { setFilterModel(''); setFilterTestFile('') }}
+                    className="text-xs text-text-tertiary hover:text-text-secondary"
+                  >
+                    Clear
+                  </button>
+                )}
+              </div>
+            </div>
             {loadingRuns ? (
               <div className="flex items-center justify-center py-8">
                 <Loader2 className="animate-spin text-primary" size={24} />
@@ -199,7 +268,14 @@ function RunComparison() {
         )}
 
         {/* Comparison matrix */}
-        {comparison && (
+        {comparison && (() => {
+          const bestPassRate = Math.max(...comparison.columns.map(c => c.pass_rate))
+          const nonzeroCosts = comparison.columns.filter(c => c.total_cost > 0).map(c => Math.round(c.total_cost * 100))
+          const minCostCents = nonzeroCosts.length > 0 ? Math.min(...nonzeroCosts) : null
+          const isBestCol = (col) => col.pass_rate === bestPassRate
+          const isCheapestCol = (col) => col.total_cost > 0 && minCostCents !== null && Math.round(col.total_cost * 100) === minCostCents
+
+          return (
           <>
             <div className="flex items-center justify-between">
               <h3 className="text-sm font-semibold text-text-primary">
@@ -220,18 +296,35 @@ function RunComparison() {
                     <th className="p-3 text-left text-xs text-text-tertiary uppercase tracking-wide sticky left-0 bg-surface z-10">
                       Test Case
                     </th>
-                    {comparison.columns.map(col => (
-                      <th key={col.run_id} className="p-3 text-center min-w-[140px]">
-                        <div className="text-xs font-semibold text-text-primary">{col.model}</div>
-                        <div className="text-[10px] text-text-tertiary">{col.provider}</div>
-                        <div className={`text-xs font-bold mt-1 ${
-                          col.pass_rate >= 90 ? 'text-success' :
-                          col.pass_rate >= 70 ? 'text-warning' : 'text-error'
-                        }`}>
-                          {col.pass_rate}%
-                        </div>
-                      </th>
-                    ))}
+                    {comparison.columns.map((col) => {
+                      const isBestPassRate = isBestCol(col)
+                      const isCheapest = isCheapestCol(col)
+                      return (
+                        <th key={col.run_id} className="p-3 text-center min-w-[160px]">
+                          <div className="text-xs font-semibold text-text-primary">{col.model}</div>
+                          <div className="text-[10px] text-text-tertiary">{col.provider}</div>
+                          <div className={`text-xs font-bold mt-1 ${
+                            col.pass_rate >= 90 ? 'text-success' :
+                            col.pass_rate >= 70 ? 'text-warning' : 'text-error'
+                          }`}>
+                            {isBestPassRate && <Trophy size={10} className="inline mr-0.5" />}
+                            {col.pass_rate}%
+                          </div>
+                          <div className="flex items-center justify-center gap-2 mt-1 text-[10px] text-text-tertiary">
+                            {col.total_cost > 0 && (
+                              <span className={`flex items-center gap-0.5 ${isCheapest ? 'text-success font-semibold' : ''}`}>
+                                <DollarSign size={8} />{formatCost(col.total_cost)}
+                              </span>
+                            )}
+                            {col.total_tokens > 0 && (
+                              <span className="flex items-center gap-0.5">
+                                <Hash size={8} />{formatTokens(col.total_tokens)}
+                              </span>
+                            )}
+                          </div>
+                        </th>
+                      )
+                    })}
                   </tr>
                 </thead>
                 <tbody>
@@ -260,12 +353,51 @@ function RunComparison() {
                                 <Clock size={8} /> {formatDuration(cell.duration_ms)}
                               </div>
                             )}
+                            {cell?.cost_usd > 0 && (
+                              <div className="text-[10px] text-text-tertiary mt-0.5 flex items-center justify-center gap-0.5">
+                                <DollarSign size={8} /> {formatCost(cell.cost_usd)}
+                              </div>
+                            )}
                           </td>
                         )
                       })}
                     </tr>
                   ))}
                 </tbody>
+                <tfoot>
+                  <tr className="border-t-2 border-border bg-surface-elevated">
+                    <td className="p-3 text-xs font-semibold text-text-primary sticky left-0 bg-surface-elevated z-10">
+                      Summary
+                    </td>
+                    {comparison.columns.map(col => {
+                      const isBest = isBestCol(col)
+                      const isCheapest = isCheapestCol(col)
+                      return (
+                        <td key={col.run_id} className="p-3 text-center">
+                          <div className={`text-xs font-bold ${isBest ? 'text-success' : 'text-text-secondary'}`}>
+                            {isBest && <Trophy size={10} className="inline mr-0.5" />}
+                            {col.passed}/{col.total} ({col.pass_rate}%)
+                          </div>
+                          {col.total_cost > 0 && (
+                            <div className={`text-[10px] mt-0.5 ${isCheapest ? 'text-success font-semibold' : 'text-text-tertiary'}`}>
+                              {isCheapest && '(cheapest) '}{formatCost(col.total_cost)}
+                            </div>
+                          )}
+                          {col.total_tokens > 0 && (
+                            <div className="text-[10px] text-text-tertiary mt-0.5">
+                              {formatTokens(col.total_tokens)} tokens
+                            </div>
+                          )}
+                          {col.total_duration_ms > 0 && (
+                            <div className="text-[10px] text-text-tertiary mt-0.5">
+                              {formatDuration(col.total_duration_ms)} total
+                            </div>
+                          )}
+                        </td>
+                      )
+                    })}
+                  </tr>
+                </tfoot>
               </table>
             </div>
 
@@ -278,7 +410,8 @@ function RunComparison() {
               <span className="flex items-center gap-1"><ArrowUp size={12} className="text-success" /> Improvement</span>
             </div>
           </>
-        )}
+          )
+        })()}
       </div>
     </div>
   )

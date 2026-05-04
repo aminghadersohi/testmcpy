@@ -204,7 +204,24 @@ class ExecutionSuccessful(BaseEvaluator):
         "NotebookEdit",
         "EnterWorktree",
         "ExitWorktree",
+        # SDK-internal resource tool used when output is saved to a file —
+        # the model often hallucinates a non-existent "file-system" / "file" server.
+        "ReadMcpResourceTool",
     }
+
+    # Error message substrings that indicate SDK-internal recoveries the model
+    # tried (e.g. fetching a saved-to-file tool result via a non-existent
+    # MCP server). These should not count as "tool execution errors".
+    _SKIP_ERROR_PATTERNS = (
+        "No such tool available",
+        "not enabled",
+        # The SDK saves oversized tool outputs to a file and tells the model
+        # to read them via ReadMcpResourceTool, but no file-system MCP server
+        # is registered, so the recovery attempt fails.
+        'Server "file-system" not found',
+        'Server "file" not found',
+        "Server not found",
+    )
 
     def evaluate(self, context: dict[str, Any]) -> EvalResult:
         tool_results = context.get("tool_results", [])
@@ -217,13 +234,17 @@ class ExecutionSuccessful(BaseEvaluator):
             if result.is_error:
                 error_msg = result.error_message or "Unknown error"
                 # Skip errors from blocked/disallowed tools (expected failures)
-                if "No such tool available" in error_msg or "not enabled" in error_msg:
+                if any(pattern in error_msg for pattern in self._SKIP_ERROR_PATTERNS):
                     continue
-                # Also check tool name against known blocked tools
+                # Check the tool name against the blocked list
+                tool_name = getattr(result, "tool_name", None) or ""
+                if tool_name in self._BLOCKED_TOOLS:
+                    continue
+                # Fallback: check tool_call_id for embedded tool name (legacy path)
                 tool_id = result.tool_call_id or ""
                 if any(blocked in tool_id for blocked in self._BLOCKED_TOOLS):
                     continue
-                errors.append({"tool": tool_id, "error": error_msg})
+                errors.append({"tool": tool_name or tool_id, "error": error_msg})
 
         if errors:
             return EvalResult(

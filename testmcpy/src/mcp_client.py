@@ -275,6 +275,7 @@ class MCPToolResult:
     content: Any
     is_error: bool = False
     error_message: str | None = None
+    tool_name: str | None = None
 
 
 class MCPClient:

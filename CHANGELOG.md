@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-05-04
+
+### Changed
+- `ExecutionSuccessful` evaluator now ignores SDK-internal recovery errors that
+  the model triggers when a tool result exceeds the SDK token limit and is
+  saved to a file. Specifically: errors matching `Server "file-system" not
+  found` / `Server "file" not found` are skipped, and `ReadMcpResourceTool`
+  is treated as a blocked tool (its failures don't count against the test).
+- `MCPToolResult` now carries the `tool_name` so evaluators can match against
+  the tool name directly instead of inferring from the `tool_call_id`.
+
+## [0.5.0]
+
 ### Added
 - Docker Compose configuration for containerized deployment
 - MCP service profiles (`mcp_services.yaml`) with local profile

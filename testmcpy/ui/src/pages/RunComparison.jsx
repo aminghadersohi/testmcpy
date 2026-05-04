@@ -74,10 +74,15 @@ function RunComparison() {
     }
   }, [filterModel, filterTestFile])
 
+  // Fetch filter options once on mount
+  useEffect(() => {
+    loadFilterOptions()
+  }, [loadFilterOptions])
+
+  // Fetch runs when filters change
   useEffect(() => {
     loadRuns()
-    loadFilterOptions()
-  }, [loadRuns, loadFilterOptions])
+  }, [loadRuns])
 
   const toggleRun = (runId) => {
     setSelectedRunIds(prev => {
@@ -263,7 +268,14 @@ function RunComparison() {
         )}
 
         {/* Comparison matrix */}
-        {comparison && (
+        {comparison && (() => {
+          const bestPassRate = Math.max(...comparison.columns.map(c => c.pass_rate))
+          const nonzeroCosts = comparison.columns.filter(c => c.total_cost > 0).map(c => Math.round(c.total_cost * 100))
+          const minCostCents = nonzeroCosts.length > 0 ? Math.min(...nonzeroCosts) : null
+          const isBestCol = (col) => col.pass_rate === bestPassRate
+          const isCheapestCol = (col) => col.total_cost > 0 && minCostCents !== null && Math.round(col.total_cost * 100) === minCostCents
+
+          return (
           <>
             <div className="flex items-center justify-between">
               <h3 className="text-sm font-semibold text-text-primary">
@@ -284,9 +296,9 @@ function RunComparison() {
                     <th className="p-3 text-left text-xs text-text-tertiary uppercase tracking-wide sticky left-0 bg-surface z-10">
                       Test Case
                     </th>
-                    {comparison.columns.map((col, idx) => {
-                      const isBestPassRate = col.pass_rate === Math.max(...comparison.columns.map(c => c.pass_rate))
-                      const isCheapest = col.total_cost > 0 && col.total_cost === Math.min(...comparison.columns.filter(c => c.total_cost > 0).map(c => c.total_cost))
+                    {comparison.columns.map((col) => {
+                      const isBestPassRate = isBestCol(col)
+                      const isCheapest = isCheapestCol(col)
                       return (
                         <th key={col.run_id} className="p-3 text-center min-w-[160px]">
                           <div className="text-xs font-semibold text-text-primary">{col.model}</div>
@@ -358,8 +370,8 @@ function RunComparison() {
                       Summary
                     </td>
                     {comparison.columns.map(col => {
-                      const isBest = col.pass_rate === Math.max(...comparison.columns.map(c => c.pass_rate))
-                      const isCheapest = col.total_cost > 0 && col.total_cost === Math.min(...comparison.columns.filter(c => c.total_cost > 0).map(c => c.total_cost))
+                      const isBest = isBestCol(col)
+                      const isCheapest = isCheapestCol(col)
                       return (
                         <td key={col.run_id} className="p-3 text-center">
                           <div className={`text-xs font-bold ${isBest ? 'text-success' : 'text-text-secondary'}`}>
@@ -398,7 +410,8 @@ function RunComparison() {
               <span className="flex items-center gap-1"><ArrowUp size={12} className="text-success" /> Improvement</span>
             </div>
           </>
-        )}
+          )
+        })()}
       </div>
     </div>
   )

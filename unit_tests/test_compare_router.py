@@ -38,13 +38,13 @@ def storage_with_comparable_runs(storage):
         started_at=datetime.now(timezone.utc).isoformat(),
     )
     storage.save_question_result(
-        run_id="run-a", question_id="q1", passed=True, score=1.0, duration_ms=500
+        run_id="run-a", question_id="q1", passed=True, score=1.0, duration_ms=500, cost_usd=0.05
     )
     storage.save_question_result(
-        run_id="run-a", question_id="q2", passed=True, score=0.9, duration_ms=600
+        run_id="run-a", question_id="q2", passed=True, score=0.9, duration_ms=600, cost_usd=0.08
     )
     storage.save_question_result(
-        run_id="run-a", question_id="q3", passed=False, score=0.1, duration_ms=300
+        run_id="run-a", question_id="q3", passed=False, score=0.1, duration_ms=300, cost_usd=0.03
     )
     storage.complete_run("run-a", datetime.now(timezone.utc).isoformat())
 
@@ -58,13 +58,13 @@ def storage_with_comparable_runs(storage):
         started_at=datetime.now(timezone.utc).isoformat(),
     )
     storage.save_question_result(
-        run_id="run-b", question_id="q1", passed=True, score=1.0, duration_ms=400
+        run_id="run-b", question_id="q1", passed=True, score=1.0, duration_ms=400, cost_usd=0.02
     )
     storage.save_question_result(
-        run_id="run-b", question_id="q2", passed=False, score=0.2, duration_ms=700
+        run_id="run-b", question_id="q2", passed=False, score=0.2, duration_ms=700, cost_usd=0.04
     )
     storage.save_question_result(
-        run_id="run-b", question_id="q3", passed=True, score=0.95, duration_ms=350
+        run_id="run-b", question_id="q3", passed=True, score=0.95, duration_ms=350, cost_usd=0.01
     )
     storage.complete_run("run-b", datetime.now(timezone.utc).isoformat())
 
@@ -142,3 +142,27 @@ def test_question_durations_stored(storage_with_comparable_runs):
     run_a = storage.get_run("run-a")
     q1_a = [q for q in run_a["question_results"] if q["question_id"] == "q1"][0]
     assert q1_a["duration_ms"] == 500
+
+
+def test_question_cost_stored(storage_with_comparable_runs):
+    """Test that per-question cost_usd is stored and retrievable."""
+    storage = storage_with_comparable_runs
+
+    run_a = storage.get_run("run-a")
+    q1_a = [q for q in run_a["question_results"] if q["question_id"] == "q1"][0]
+    assert q1_a["cost_usd"] == 0.05
+
+    run_b = storage.get_run("run-b")
+    q1_b = [q for q in run_b["question_results"] if q["question_id"] == "q1"][0]
+    assert q1_b["cost_usd"] == 0.02
+
+
+def test_run_summary_includes_cost(storage_with_comparable_runs):
+    """Test that run summary aggregates total cost."""
+    storage = storage_with_comparable_runs
+
+    run_a = storage.get_run("run-a")
+    assert run_a["summary"]["total_cost_usd"] == pytest.approx(0.16, abs=0.01)
+
+    run_b = storage.get_run("run-b")
+    assert run_b["summary"]["total_cost_usd"] == pytest.approx(0.07, abs=0.01)

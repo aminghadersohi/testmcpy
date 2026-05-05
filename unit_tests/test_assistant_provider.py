@@ -32,11 +32,16 @@ class TestAssistantProviderConstruction:
         assert provider.workspace_hash == "ws-abc"
 
     @patch.dict("os.environ", {"ASSISTANT_WORKSPACE_HASH": "ws-env"}, clear=False)
-    def test_workspace_hash_from_env(self):
+    def test_env_vars_are_ignored(self):
+        """testmcpy code does not read env vars directly. Even with
+        ASSISTANT_WORKSPACE_HASH set, the constructor must require an
+        explicit workspace_hash kwarg.
+        """
         provider = AssistantProvider(domain="example.com")
-        assert provider.workspace_hash == "ws-env"
+        assert provider.workspace_hash == ""
 
-    def test_kwargs_override_env(self):
+    def test_kwargs_only(self):
+        """Confirm that kwargs are the sole source of config."""
         with patch.dict("os.environ", {"ASSISTANT_WORKSPACE_HASH": "ws-env"}, clear=False):
             provider = AssistantProvider(workspace_hash="ws-kwarg", domain="example.com")
             assert provider.workspace_hash == "ws-kwarg"
@@ -152,6 +157,16 @@ class TestAssistantProviderApiUrl:
         assert provider.api_url == "https://custom-auth.example.com/auth/"
 
     @patch.dict("os.environ", {"ASSISTANT_API_URL": "https://env-auth.com/auth/"}, clear=False)
-    def test_api_url_from_env(self):
-        provider = AssistantProvider(workspace_hash="ws-abc", domain="test.com")
-        assert provider.api_url == "https://env-auth.com/auth/"
+    def test_api_url_env_var_ignored(self):
+        """ASSISTANT_API_URL set in the environment must not leak into the
+        provider — code must rely on the api_url kwarg only. We pass an
+        explicit value to verify it wins over the env var (if env-var
+        reading were re-introduced, this assertion would fail).
+        """
+        provider = AssistantProvider(
+            workspace_hash="ws-abc",
+            domain="test.com",
+            api_url="https://kwarg-auth.com/auth/",
+        )
+        assert provider.api_url == "https://kwarg-auth.com/auth/"
+        assert "env-auth.com" not in provider.api_url

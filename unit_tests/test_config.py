@@ -93,35 +93,37 @@ class TestConfigInitialization:
 
 
 class TestEnvironmentVariables:
-    """Test configuration loading from environment variables."""
+    """Confirm that Config does NOT load credentials from environment
+    variables. Env vars must only enter via ${VAR} substitution inside
+    YAML config files, or via the env-format files ~/.testmcpy / .env.
+    """
 
-    def test_generic_keys_from_environment(self, clean_env, mock_profile_modules):
-        """Test loading generic keys from environment variables."""
-        clean_env.setenv("ANTHROPIC_API_KEY", "test-anthropic-key")
-        clean_env.setenv("OPENAI_API_KEY", "test-openai-key")
-        clean_env.setenv("OLLAMA_BASE_URL", "http://localhost:11434")
+    def test_env_vars_not_loaded_directly(self, clean_env, mock_profile_modules):
+        """ANTHROPIC_API_KEY / OPENAI_API_KEY / OLLAMA_BASE_URL set in the
+        environment must NOT leak into Config when no .env / ~/.testmcpy
+        file is present.
+        """
+        clean_env.setenv("ANTHROPIC_API_KEY", "leaked-anthropic-key")
+        clean_env.setenv("OPENAI_API_KEY", "leaked-openai-key")
+        clean_env.setenv("OLLAMA_BASE_URL", "http://leaked.local:11434")
 
         with patch("pathlib.Path.exists", return_value=False):
             config = Config()
 
-            assert config.get("ANTHROPIC_API_KEY") == "test-anthropic-key"
-            assert config.get("OPENAI_API_KEY") == "test-openai-key"
-            assert config.get("OLLAMA_BASE_URL") == "http://localhost:11434"
-            assert config.get_source("ANTHROPIC_API_KEY") == "Environment"
-            assert config.get_source("OPENAI_API_KEY") == "Environment"
-            assert config.get_source("OLLAMA_BASE_URL") == "Environment"
+            assert config.get("ANTHROPIC_API_KEY") is None
+            assert config.get("OPENAI_API_KEY") is None
+            assert config.get("OLLAMA_BASE_URL") is None
 
-    def test_testmcpy_keys_from_environment(self, clean_env, mock_profile_modules):
-        """Test loading testmcpy-specific keys from environment variables."""
-        clean_env.setenv("DEFAULT_MODEL", "claude-3-opus")
+    def test_default_keys_not_loaded_from_env(self, clean_env, mock_profile_modules):
+        """DEFAULT_MODEL / DEFAULT_PROVIDER in env must NOT leak into Config."""
+        clean_env.setenv("DEFAULT_MODEL", "leaked-claude-3-opus")
         clean_env.setenv("DEFAULT_PROVIDER", "anthropic")
 
         with patch("pathlib.Path.exists", return_value=False):
             config = Config()
 
-            assert config.get("DEFAULT_MODEL") == "claude-3-opus"
-            assert config.get("DEFAULT_PROVIDER") == "anthropic"
-            assert config.get_source("DEFAULT_MODEL") == "Environment"
+            assert config.get("DEFAULT_MODEL") is None
+            assert config.get("DEFAULT_PROVIDER") is None
 
     def test_environment_variables_ignored_if_not_in_keys(self, clean_env, mock_profile_modules):
         """Test that environment variables not in GENERIC_KEYS or TESTMCPY_KEYS are ignored."""
@@ -265,10 +267,10 @@ class TestConfigPriority:
             assert config.get("ANTHROPIC_API_KEY") == "cwd-key"
             assert config.get_source("ANTHROPIC_API_KEY") == ".env (current dir)"
 
-    def test_environment_not_overridden_by_config_files_for_generic_keys(
-        self, clean_env, mock_profile_modules
-    ):
-        """Test that environment variables for generic keys are not overridden by config files."""
+    def test_env_var_ignored_when_env_file_present(self, clean_env, mock_profile_modules):
+        """When ANTHROPIC_API_KEY is set in the environment AND a .env file
+        defines it, the .env value wins (env vars aren't read directly).
+        """
         clean_env.setenv("ANTHROPIC_API_KEY", "env-key")
 
         env_content = "ANTHROPIC_API_KEY=file-key"
@@ -278,9 +280,7 @@ class TestConfigPriority:
         ):
             config = Config()
 
-            # Environment should NOT be overridden for generic keys
-            assert config.get("ANTHROPIC_API_KEY") == "env-key"
-            assert config.get_source("ANTHROPIC_API_KEY") == "Environment"
+            assert config.get("ANTHROPIC_API_KEY") == "file-key"
 
     def test_testmcpy_keys_overridden_by_config_files(self, clean_env, mock_profile_modules):
         """Test that testmcpy-specific keys from environment are overridden by config files."""
@@ -556,19 +556,23 @@ class TestConfigProperties:
             assert config.default_provider == "anthropic"
 
     def test_anthropic_api_key_property(self, clean_env, mock_profile_modules):
-        """Test anthropic_api_key property."""
-        clean_env.setenv("ANTHROPIC_API_KEY", "test-key")
-        with patch("pathlib.Path.exists", return_value=False):
+        """Test anthropic_api_key property — value sourced from .env file."""
+        env_content = "ANTHROPIC_API_KEY=test-key"
+        with (
+            patch("pathlib.Path.exists", return_value=True),
+            patch("builtins.open", mock_open(read_data=env_content)),
+        ):
             config = Config()
-
             assert config.anthropic_api_key == "test-key"
 
     def test_openai_api_key_property(self, clean_env, mock_profile_modules):
-        """Test openai_api_key property."""
-        clean_env.setenv("OPENAI_API_KEY", "test-key")
-        with patch("pathlib.Path.exists", return_value=False):
+        """Test openai_api_key property — value sourced from .env file."""
+        env_content = "OPENAI_API_KEY=test-key"
+        with (
+            patch("pathlib.Path.exists", return_value=True),
+            patch("builtins.open", mock_open(read_data=env_content)),
+        ):
             config = Config()
-
             assert config.openai_api_key == "test-key"
 
     def test_properties_return_none_when_not_set(self, clean_env, mock_profile_modules):
@@ -600,20 +604,24 @@ class TestConfigGetters:
             assert config.get("NONEXISTENT_KEY") is None
 
     def test_get_existing_value(self, clean_env, mock_profile_modules):
-        """Test get method for existing value."""
-        clean_env.setenv("ANTHROPIC_API_KEY", "test-key")
-        with patch("pathlib.Path.exists", return_value=False):
+        """Test get method for existing value — sourced from .env file."""
+        env_content = "ANTHROPIC_API_KEY=test-key"
+        with (
+            patch("pathlib.Path.exists", return_value=True),
+            patch("builtins.open", mock_open(read_data=env_content)),
+        ):
             config = Config()
-
             assert config.get("ANTHROPIC_API_KEY") == "test-key"
 
     def test_get_source_for_existing_key(self, clean_env, mock_profile_modules):
-        """Test get_source method for existing key."""
-        clean_env.setenv("ANTHROPIC_API_KEY", "test-key")
-        with patch("pathlib.Path.exists", return_value=False):
+        """Test get_source method — value sourced from .env file."""
+        env_content = "ANTHROPIC_API_KEY=test-key"
+        with (
+            patch("pathlib.Path.exists", return_value=True),
+            patch("builtins.open", mock_open(read_data=env_content)),
+        ):
             config = Config()
-
-            assert config.get_source("ANTHROPIC_API_KEY") == "Environment"
+            assert config.get_source("ANTHROPIC_API_KEY") == ".env (current dir)"
 
     def test_get_source_for_nonexistent_key(self, clean_env, mock_profile_modules):
         """Test get_source method for nonexistent key."""
@@ -623,11 +631,12 @@ class TestConfigGetters:
             assert config.get_source("NONEXISTENT_KEY") == "Not set"
 
     def test_get_all(self, clean_env, mock_profile_modules):
-        """Test get_all method."""
-        clean_env.setenv("ANTHROPIC_API_KEY", "test-key")
-        clean_env.setenv("OPENAI_API_KEY", "openai-key")
-
-        with patch("pathlib.Path.exists", return_value=False):
+        """Test get_all method — values sourced from .env file."""
+        env_content = "ANTHROPIC_API_KEY=test-key\nOPENAI_API_KEY=openai-key"
+        with (
+            patch("pathlib.Path.exists", return_value=True),
+            patch("builtins.open", mock_open(read_data=env_content)),
+        ):
             config = Config()
 
             all_config = config.get_all()
@@ -639,14 +648,16 @@ class TestConfigGetters:
             assert config.get("NEW_KEY") is None
 
     def test_get_all_with_sources(self, clean_env, mock_profile_modules):
-        """Test get_all_with_sources method."""
-        clean_env.setenv("ANTHROPIC_API_KEY", "test-key")
-
-        with patch("pathlib.Path.exists", return_value=False):
+        """Test get_all_with_sources method — value sourced from .env file."""
+        env_content = "ANTHROPIC_API_KEY=test-key"
+        with (
+            patch("pathlib.Path.exists", return_value=True),
+            patch("builtins.open", mock_open(read_data=env_content)),
+        ):
             config = Config()
 
             all_with_sources = config.get_all_with_sources()
-            assert all_with_sources["ANTHROPIC_API_KEY"] == ("test-key", "Environment")
+            assert all_with_sources["ANTHROPIC_API_KEY"] == ("test-key", ".env (current dir)")
 
 
 class TestGetDefaultLLMProvider:
@@ -845,11 +856,11 @@ DEFAULT_MODEL=cwd-model
             config = Config(llm_profile="production")
 
             # Verify priority order
-            # ANTHROPIC_API_KEY: Environment (generic key, not overridden)
-            assert config.get("ANTHROPIC_API_KEY") == "env-key"
-            assert config.get_source("ANTHROPIC_API_KEY") == "Environment"
+            # ANTHROPIC_API_KEY: env var is IGNORED (not loaded by code), so
+            # this should be None — not set in any config file in this test.
+            assert config.get("ANTHROPIC_API_KEY") is None
 
-            # DEFAULT_MODEL: CWD .env (testmcpy key, overridden by file)
+            # DEFAULT_MODEL: CWD .env wins over ~/.testmcpy
             assert config.get("DEFAULT_MODEL") == "cwd-model"
 
             # OPENAI_API_KEY: User config (only set there)

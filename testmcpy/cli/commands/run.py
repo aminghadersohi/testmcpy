@@ -230,26 +230,39 @@ def run(
     auth_token: Optional[str] = typer.Option(
         None,
         "--auth-token",
-        envvar="MCP_AUTH_TOKEN",
         help="Bearer token or API key for MCP auth",
     ),
     jwt_url: Optional[str] = typer.Option(
         None,
         "--jwt-url",
-        envvar="MCP_JWT_URL",
-        help="JWT auth endpoint URL (for --auth-type jwt)",
+        help="JWT auth endpoint URL (used by --auth-type jwt and the assistant/chatbot provider)",
     ),
     jwt_token: Optional[str] = typer.Option(
         None,
         "--jwt-token",
-        envvar="MCP_JWT_TOKEN",
-        help="JWT API token / key name (for --auth-type jwt)",
+        help="JWT API token / key name (used by --auth-type jwt and the assistant/chatbot provider)",
     ),
     jwt_secret: Optional[str] = typer.Option(
         None,
         "--jwt-secret",
-        envvar="MCP_JWT_SECRET",
-        help="JWT API secret (for --auth-type jwt)",
+        help="JWT API secret (used by --auth-type jwt and the assistant/chatbot provider)",
+    ),
+    # Assistant / chatbot provider config (used when --provider assistant or chatbot).
+    # JWT auth is shared with --jwt-url / --jwt-token / --jwt-secret above.
+    workspace_hash: Optional[str] = typer.Option(
+        None,
+        "--workspace-hash",
+        help="Workspace hash (assistant/chatbot provider only)",
+    ),
+    domain: Optional[str] = typer.Option(
+        None,
+        "--domain",
+        help="Workspace domain, e.g. us1a.app-stg.example.com (assistant/chatbot provider only)",
+    ),
+    environment: Optional[str] = typer.Option(
+        None,
+        "--environment",
+        help="Environment name: staging, production, local (assistant/chatbot provider only)",
     ),
 ):
     """
@@ -395,6 +408,24 @@ def run(
         effective_provider = suite_provider or provider.value
         effective_model = suite_model or model
 
+        # If running an assistant/chatbot provider, fold the assistant-specific
+        # CLI flags into provider_config so they reach AssistantProvider.__init__
+        # via create_llm_provider's **kwargs filtering. CLI values take
+        # precedence over suite YAML (--workspace-hash > suite_provider_config).
+        effective_provider_config = dict(suite_provider_config or {})
+        if effective_provider in ("assistant", "chatbot"):
+            cli_assistant_kwargs = {
+                "workspace_hash": workspace_hash,
+                "domain": domain,
+                "environment": environment,
+                "api_url": jwt_url,
+                "api_token": jwt_token,
+                "api_secret": jwt_secret,
+            }
+            for key, value in cli_assistant_kwargs.items():
+                if value is not None:
+                    effective_provider_config[key] = value
+
         if suite_provider and verbose:
             console.print(f"[yellow]Suite-level provider override:[/yellow] {suite_provider}")
             if suite_provider_config:
@@ -414,7 +445,7 @@ def run(
             mcp_client=mcp_client,
             verbose=verbose,
             hide_tool_output=hide_tool_output,
-            provider_config=suite_provider_config,
+            provider_config=effective_provider_config,
             log_callback=cli_log_callback if verbose else None,
         )
 

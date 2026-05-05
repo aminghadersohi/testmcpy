@@ -517,22 +517,19 @@ class OpenRouterProvider(OpenAIProvider):
     """
 
     def __init__(self, model: str, api_key: str | None = None):
-        resolved_key = api_key or os.environ.get("OPENROUTER_API_KEY", "")
         super().__init__(
             model=model,
-            api_key=resolved_key,
+            api_key=api_key or "",
             base_url="https://openrouter.ai/api/v1",
         )
 
     async def initialize(self):
         """Validate that an API key is available."""
         if not self.api_key:
-            config = get_config()
-            self.api_key = config.get("OPENROUTER_API_KEY", "")
-        if not self.api_key:
             raise ValueError(
                 "OpenRouter API key not provided. "
-                "Set OPENROUTER_API_KEY in ~/.testmcpy or environment."
+                "Configure it in .llm_providers.yaml using ${OPENROUTER_API_KEY} "
+                "substitution, or pass api_key directly."
             )
 
     async def generate_with_tools(
@@ -646,21 +643,19 @@ class XAIProvider(OpenAIProvider):
     """
 
     def __init__(self, model: str, api_key: str | None = None):
-        resolved_key = api_key or os.environ.get("XAI_API_KEY", "")
         super().__init__(
             model=model,
-            api_key=resolved_key,
+            api_key=api_key or "",
             base_url="https://api.x.ai/v1",
         )
 
     async def initialize(self):
         """Validate that an API key is available."""
         if not self.api_key:
-            config = get_config()
-            self.api_key = config.get("XAI_API_KEY", "")
-        if not self.api_key:
             raise ValueError(
-                "xAI API key not provided. Set XAI_API_KEY in ~/.testmcpy or environment."
+                "xAI API key not provided. "
+                "Configure it in .llm_providers.yaml using ${XAI_API_KEY} "
+                "substitution, or pass api_key directly."
             )
 
 
@@ -2004,20 +1999,18 @@ class AssistantProvider(LLMProvider):
         if default_mcp and default_mcp.auth:
             auth_cfg = default_mcp.auth.to_dict()
 
-        self.workspace_hash = workspace_hash or os.environ.get("ASSISTANT_WORKSPACE_HASH", "")
-        self.domain = domain or os.environ.get("ASSISTANT_DOMAIN", "")
-        self.environment = environment or os.environ.get("ASSISTANT_ENVIRONMENT", "staging")
-        self.api_token = (
-            api_token or os.environ.get("ASSISTANT_API_TOKEN") or auth_cfg.get("api_token", "")
-        )
-        self.api_secret = (
-            api_secret or os.environ.get("ASSISTANT_API_SECRET") or auth_cfg.get("api_secret", "")
-        )
+        # Resolution: explicit kwargs > MCP profile auth (.mcp_services.yaml).
+        # Environment variables are NOT consulted in code paths — they're
+        # only resolved by ${VAR} substitution inside the YAML config files
+        # at load time. CLI users pass these via --workspace-hash / --domain
+        # / --environment / --jwt-url / --jwt-token / --jwt-secret.
+        self.workspace_hash = workspace_hash or ""
+        self.domain = domain or ""
+        self.environment = environment or "staging"
+        self.api_token = api_token or auth_cfg.get("api_token", "")
+        self.api_secret = api_secret or auth_cfg.get("api_secret", "")
         self.api_url = (
-            api_url
-            or os.environ.get("ASSISTANT_API_URL")
-            or auth_cfg.get("api_url", "")
-            or self._ENV_API_URLS.get(self.environment, "")
+            api_url or auth_cfg.get("api_url", "") or self._ENV_API_URLS.get(self.environment, "")
         )
 
         # Derive base workspace URL if domain is set

@@ -92,36 +92,36 @@ class Config:
         self._load_config()
 
     def _load_config(self):
-        """Load configuration from all sources in priority order."""
+        """Load configuration from all sources in priority order.
 
-        # 1. Load from environment variables first (lowest priority for testmcpy keys)
-        for key in self.GENERIC_KEYS | self.TESTMCPY_KEYS:
-            value = os.getenv(key)
-            if value:
-                self._config[key] = value
-                self._sources[key] = "Environment"
+        Note: testmcpy code does not read environment variables directly
+        via os.getenv. Credentials and API keys belong in config files —
+        ``.llm_providers.yaml`` / ``.mcp_services.yaml`` (which support
+        ``${VAR}`` substitution at YAML-load time, the sanctioned env-var
+        path), or the env-format files ``~/.testmcpy`` / ``./.env``.
+        """
 
-        # 2. Load from ~/.testmcpy (user config)
+        # 1. Load from ~/.testmcpy (user config — env-format file)
         user_config_file = Path.home() / ".testmcpy"
         if user_config_file.exists():
             self._load_env_file(user_config_file, "~/.testmcpy")
 
-        # 3. Load from .env in current directory
+        # 2. Load from .env in current directory (env-format file)
         cwd_env_file = Path.cwd() / ".env"
         if cwd_env_file.exists():
             self._load_env_file(cwd_env_file, ".env (current dir)")
 
-        # 4. Load from MCP profile (.mcp_services.yaml)
+        # 3. Load from MCP profile (.mcp_services.yaml)
         # Always try to load - if profile_id is None, it loads the default profile
         self._load_profile(self._profile_id)
 
-        # 5. Load from LLM profile (.llm_providers.yaml)
+        # 4. Load from LLM profile (.llm_providers.yaml)
         self._load_llm_profile(self._llm_profile_id)
 
-        # 6. Load from Test profile (.test_profiles.yaml)
+        # 5. Load from Test profile (.test_profiles.yaml)
         self._load_test_profile(self._test_profile_id)
 
-        # 7. Apply defaults for missing values
+        # 6. Apply defaults for missing values
         for key, default_value in self.DEFAULTS.items():
             if key not in self._config:
                 self._config[key] = default_value

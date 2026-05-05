@@ -101,3 +101,5 @@ class ModelProvider(str, Enum):
     claude_sdk = "claude-sdk"
     claude_cli = "claude-cli"
     claude_code = "claude-code"
+    assistant = "assistant"
+    chatbot = "chatbot"

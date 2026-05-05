@@ -62,10 +62,16 @@ class Config:
     # Use .llm_providers.yaml to configure LLM models and providers instead.
     DEFAULTS = {}
 
-    # Generic keys that should fall back to environment variables
+    # Generic keys recognized when loading the env-format config files
+    # (~/.testmcpy and ./.env). These are the LLM provider API keys
+    # callers may want to set without going through .llm_providers.yaml.
     GENERIC_KEYS = {
         "ANTHROPIC_API_KEY",
         "OPENAI_API_KEY",
+        "OPENROUTER_API_KEY",
+        "XAI_API_KEY",
+        "GOOGLE_API_KEY",
+        "GEMINI_API_KEY",
         "OLLAMA_BASE_URL",
     }
 

@@ -35,11 +35,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `MCP_AUTH_TOKEN` / `MCP_JWT_*` from the environment.
 
 ### Added
-- CLI flags `--workspace-hash`, `--domain`, `--environment` on
-  `testmcpy run` to configure the assistant/chatbot provider without
-  env vars. The existing `--jwt-url` / `--jwt-token` / `--jwt-secret`
-  are now also forwarded to assistant/chatbot providers as their
-  api_url / api_token / api_secret.
+- CLI flags `--workspace-hash`, `--domain`, `--environment`,
+  `--assistant-api-url`, `--assistant-api-token`,
+  `--assistant-api-secret` on `testmcpy run` to configure the
+  assistant/chatbot provider without env vars. The MCP `--jwt-*`
+  flags are also accepted as a fallback when MCP and assistant share
+  the same JWT credentials.
+- `assistant` and `chatbot` are now valid values for `--provider`
+  (added to the `ModelProvider` enum).
+- `OPENROUTER_API_KEY`, `XAI_API_KEY`, `GOOGLE_API_KEY`, and
+  `GEMINI_API_KEY` are now recognized in the `~/.testmcpy` and
+  `./.env` env-format config files (added to `Config.GENERIC_KEYS`).
 - CLI flag values for `assistant` / `chatbot` providers are folded into
   `provider_config` and reach `AssistantProvider.__init__` via
   `create_llm_provider`'s kwarg filtering.

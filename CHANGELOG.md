@@ -15,7 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   MCP server-side, so the local runner shouldn't be opening an MCP
   connection — doing so was triggering an unwanted OAuth flow against
   the workspace's MCP URL and loading auth from `.mcp_services.yaml`
-  that the user hadn't asked for.
+  that the user hadn't asked for. Patched in three places:
+  the CLI (`run.py`), `TestRunner.initialize()`, and the inner
+  per-test loops that previously called `mcp_client.list_tools()`.
+  For the assistant/chatbot providers, no local tool discovery is
+  performed — the chatbot endpoint owns the tool registry server-side.
 - `AssistantProvider` now returns `tool_results` as a list of
   `MCPToolResult` objects (matching `ClaudeSDKProvider`), instead of
   raw dicts. The previous shape caused evaluators to fail with

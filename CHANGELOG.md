@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-05-05
+
+### Added
+- Dedicated `--assistant-api-url` / `--assistant-api-token` /
+  `--assistant-api-secret` CLI flags so MCP and the assistant
+  endpoint can use different JWT credentials in the same command.
+  The MCP `--jwt-*` flags are still accepted as a fallback for
+  shared-cred setups.
+- `assistant` and `chatbot` are now valid values for `--provider`
+  (added to the `ModelProvider` enum so typer accepts them).
+- `OPENROUTER_API_KEY`, `XAI_API_KEY`, `GOOGLE_API_KEY`, and
+  `GEMINI_API_KEY` are now recognized in `~/.testmcpy` and `./.env`
+  (added to `Config.GENERIC_KEYS`).
+
+### Fixed
+- `AssistantProvider.initialize()` validation error messages now
+  point users at the new CLI flags / config files instead of the
+  removed `ASSISTANT_*` env vars.
+
 ## [0.6.0] - 2026-05-05
 
 ### Changed (BREAKING)

@@ -10,7 +10,6 @@ Priority order (highest to lowest):
 6. Built-in defaults
 """
 
-import os
 from pathlib import Path
 from typing import Any
 

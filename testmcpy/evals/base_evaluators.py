@@ -1599,8 +1599,6 @@ Respond in this exact JSON format:
 
     async def _call_llm(self, prompt: str) -> str:
         """Call LLM API for judging."""
-        import os
-
         import httpx
 
         # Get config

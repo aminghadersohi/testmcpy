@@ -280,6 +280,22 @@ def run(
         "--assistant-api-secret",
         help="JWT API secret for the assistant/chatbot provider",
     ),
+    assistant_conversations_path: Optional[str] = typer.Option(
+        None,
+        "--assistant-conversations-path",
+        help=(
+            "Override the conversations endpoint path on the assistant/chatbot "
+            "provider (default: provider class's _DEFAULT_CONVERSATIONS_PATH)"
+        ),
+    ),
+    assistant_completions_path: Optional[str] = typer.Option(
+        None,
+        "--assistant-completions-path",
+        help=(
+            "Override the completions endpoint path on the assistant/chatbot "
+            "provider (default: provider class's _DEFAULT_COMPLETIONS_PATH)"
+        ),
+    ),
 ):
     """
     Run test cases against MCP service.
@@ -447,6 +463,8 @@ def run(
                 "api_url": assistant_api_url or jwt_url,
                 "api_token": assistant_api_token or jwt_token,
                 "api_secret": assistant_api_secret or jwt_secret,
+                "conversations_path": assistant_conversations_path,
+                "completions_path": assistant_completions_path,
             }
             for key, value in cli_assistant_kwargs.items():
                 if value is not None:

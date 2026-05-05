@@ -112,19 +112,19 @@ class TestAssistantProviderHeaders:
 
     def test_headers_include_jwt(self):
         provider = AssistantProvider(workspace_hash="ws-abc", domain="test.com")
-        provider._jwt_token = "jwt-test-token"
+        provider._session_token = "jwt-test-token"
         headers = provider._build_headers()
         assert headers["Authorization"] == "Bearer jwt-test-token"
 
     def test_headers_include_csrf(self):
         provider = AssistantProvider(workspace_hash="ws-abc", domain="test.com")
-        provider._jwt_token = "jwt-test-token"
+        provider._session_token = "jwt-test-token"
         headers = provider._build_headers()
         assert "csrf_access_token" in headers["Cookie"]
 
     def test_headers_include_referer(self):
         provider = AssistantProvider(workspace_hash="ws-abc", domain="test.com")
-        provider._jwt_token = "jwt-test-token"
+        provider._session_token = "jwt-test-token"
         headers = provider._build_headers()
         assert "Referer" in headers
 

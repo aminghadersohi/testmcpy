@@ -1955,23 +1955,66 @@ class ClaudeSDKProvider(LLMProvider):
 _assistant_logger = logging.getLogger(__name__ + ".AssistantProvider")
 
 
+@dataclass
+class _SSEStreamState:
+    """Mutable state accumulated as we parse a chatbot SSE response."""
+
+    response_text: str = ""
+    tool_calls: list[dict[str, Any]] = field(default_factory=list)
+    tool_results: list[Any] = field(default_factory=list)
+    token_usage: dict[str, int] | None = None
+    got_final: bool = False
+    got_error: bool = False
+    error_message: str = ""
+    tti_ms: int | None = None
+    token_event_count: int = 0
+
+
 class AssistantProvider(LLMProvider):
-    """LLM provider that sends prompts to the AI assistant conversation endpoint.
+    """Generic LLM provider for chatbot/assistant HTTP endpoints.
 
-    Uses the same auth flow as MCP JWT auth to obtain a JWT token, then
-    creates a assistant conversation and streams SSE completions via httpx.
+    The chatbot endpoint owns the LLM and any tool-calling integration
+    server-side; testmcpy just POSTs the prompt and reads back a
+    streaming response. testmcpy does not list tools, mint conversations
+    locally, or call MCP itself when this provider is in use.
 
-    Config is resolved from kwargs, then env vars, then the default MCP
-    profile auth settings (in that order).
+    Protocol contract this provider expects:
+
+    1. **Auth**: POST ``api_url`` with body
+       ``{"name": api_token, "secret": api_secret}``; the response JSON
+       has ``payload.access_token`` (a Bearer JWT).
+    2. **Conversation**: POST ``{base_url}{conversations_path}`` with
+       body ``{"conversation_starter": []}`` (Bearer-authenticated);
+       the response JSON has ``id`` (the conversation id).
+    3. **Completions**: POST ``{base_url}{completions_path}`` with
+       body ``{"conversation_id", "messages": [{"role", "content"}],
+       "model_override"?}`` and consume a ``text/event-stream`` of
+       ``event:`` / ``data:`` pairs.
+
+    Recognized SSE events (any others are ignored):
+
+    - ``token``: ``{"chunk": "<text>"}`` — appended to the running
+      response text. The first ``token`` event records TTI.
+    - ``tool_call``: ``{"tool_call_id", "tool_name", "input"}`` — the
+      backend invoked a tool.
+    - ``tool_result``: ``{"tool_call_id", "tool_name?", "result",
+      "is_error?", "duration_ms?"}`` — wrapped in :class:`MCPToolResult`
+      so evaluators see the same shape across providers.
+    - ``usage``: ``{"input_tokens", "output_tokens", "total_tokens"}``.
+    - ``final``: end-of-response sentinel; may carry an ``answer`` /
+      ``message`` field used as fallback when no ``token`` events came.
+    - ``error``: ``{"error" | "message"}``.
+
+    To target a vendor that diverges from this contract, subclass and
+    override the relevant hook (``_authenticate``, ``_open_conversation``,
+    ``_build_headers``, ``_build_completions_payload``,
+    ``_handle_sse_event``).
     """
 
-    # Default environments map to manager API URLs.
-    # Override via ASSISTANT_API_URL env var or api_url kwarg.
-    _ENV_API_URLS: dict[str, str] = {
-        "staging": "",
-        "production": "",
-        "local": "",
-    }
+    # Default endpoint paths. Override via ``conversations_path`` /
+    # ``completions_path`` kwargs (or the matching CLI flags).
+    _DEFAULT_CONVERSATIONS_PATH = "/api/v1/copilot/conversations"
+    _DEFAULT_COMPLETIONS_PATH = "/api/v1/copilot/completions"
 
     def __init__(
         self,
@@ -1983,87 +2026,207 @@ class AssistantProvider(LLMProvider):
         api_secret: str | None = None,
         api_url: str | None = None,
         model_override: str | None = None,
-        conversations_path: str = "/api/v1/copilot/conversations",
-        completions_path: str = "/api/v1/copilot/completions",
+        conversations_path: str | None = None,
+        completions_path: str | None = None,
         **kwargs,
     ):
         self.model = model
         self.model_override = model_override
-        self.conversations_path = conversations_path
-        self.completions_path = completions_path
-
-        # Resolve config: kwargs > env vars > MCP profile auth
-        config = get_config()
-        default_mcp = config.get_default_mcp_server()
-        auth_cfg = {}
-        if default_mcp and default_mcp.auth:
-            auth_cfg = default_mcp.auth.to_dict()
+        self.conversations_path = conversations_path or self._DEFAULT_CONVERSATIONS_PATH
+        self.completions_path = completions_path or self._DEFAULT_COMPLETIONS_PATH
 
         # Resolution: explicit kwargs > MCP profile auth (.mcp_services.yaml).
         # Environment variables are NOT consulted in code paths — they're
         # only resolved by ${VAR} substitution inside the YAML config files
         # at load time. CLI users pass these via --workspace-hash / --domain
-        # / --environment / --jwt-url / --jwt-token / --jwt-secret.
+        # / --environment / --assistant-api-* (or --jwt-* fallback).
+        config = get_config()
+        default_mcp = config.get_default_mcp_server()
+        auth_cfg: dict[str, Any] = {}
+        if default_mcp and default_mcp.auth:
+            auth_cfg = default_mcp.auth.to_dict()
+
         self.workspace_hash = workspace_hash or ""
         self.domain = domain or ""
         self.environment = environment or "staging"
         self.api_token = api_token or auth_cfg.get("api_token", "")
         self.api_secret = api_secret or auth_cfg.get("api_secret", "")
-        self.api_url = (
-            api_url or auth_cfg.get("api_url", "") or self._ENV_API_URLS.get(self.environment, "")
-        )
+        self.api_url = api_url or auth_cfg.get("api_url", "")
 
-        # Derive base workspace URL if domain is set
+        # Derive base workspace URL. Both workspace_hash and domain are
+        # required — environment alone isn't enough since we don't ship
+        # any environment→domain mapping in code.
         if self.workspace_hash and self.domain:
             self.base_url = f"https://{self.workspace_hash}.{self.domain}"
-        elif self.workspace_hash and self.environment:
-            # Derive domain from environment — set via ASSISTANT_DOMAIN
-            # or override env_domains in a subclass.
-            env_domains = {
-                "staging": "",
-                "production": "",
-                "local": "",
-            }
-            d = env_domains.get(self.environment, "")
-            if d:
-                self.base_url = f"https://{self.workspace_hash}.{d}"
-            else:
-                self.base_url = ""
         else:
             self.base_url = ""
 
-        self._jwt_token: str | None = None
+        # Session state populated by initialize()
+        self._session_token: str | None = None
         self._csrf_token: str = str(uuid.uuid4())
         self._conversation_id: str | None = None
         self._client: httpx.AsyncClient | None = None
 
+    # --- Public API -------------------------------------------------
+
     async def initialize(self):
-        """Fetch JWT token and create a assistant conversation."""
+        """Validate config, create an HTTP client, authenticate, open conv."""
+        cls_name = type(self).__name__
         if not self.base_url:
             raise ValueError(
-                "AssistantProvider requires workspace_hash + domain (or environment). "
-                "Pass them via the `--workspace-hash` / `--domain` / `--environment` "
-                "CLI flags on `testmcpy run`, or as kwargs to AssistantProvider()."
+                f"{cls_name} requires workspace_hash AND domain. "
+                "Pass them via the `--workspace-hash` and `--domain` CLI flags "
+                f"on `testmcpy run`, or as kwargs to {cls_name}()."
             )
         if not self.api_token or not self.api_secret:
             raise ValueError(
-                "AssistantProvider requires api_token and api_secret for JWT auth. "
+                f"{cls_name} requires api_token and api_secret for auth. "
                 "Pass them via the `--assistant-api-token` / `--assistant-api-secret` "
-                "CLI flags (or `--jwt-token` / `--jwt-secret` if MCP and assistant "
-                "share creds), or configure them in the MCP profile auth block."
+                "CLI flags (or `--jwt-token` / `--jwt-secret` if MCP and the "
+                "assistant share creds), or configure them in the MCP profile "
+                "auth block."
             )
         if not self.api_url or not str(self.api_url).strip():
             raise ValueError(
-                "AssistantProvider requires a non-empty api_url. "
+                f"{cls_name} requires a non-empty api_url. "
                 "Pass it via the `--assistant-api-url` CLI flag (or `--jwt-url` "
-                "if MCP and assistant share auth), or configure api_url in the "
-                "MCP profile."
+                "if MCP and the assistant share auth), or configure api_url in "
+                "the MCP profile."
             )
 
         self._client = httpx.AsyncClient(timeout=60.0)
+        await self._authenticate()
+        await self._open_conversation()
 
-        # --- Fetch JWT ---
-        _assistant_logger.info("[Assistant] Fetching JWT from: %s", self.api_url)
+    async def close(self):
+        """Close the httpx client."""
+        if self._client:
+            await self._client.aclose()
+            self._client = None
+
+    async def generate_with_tools(
+        self,
+        prompt: str,
+        tools: list[dict[str, Any]] | None = None,
+        timeout: float = 120.0,
+        messages: list[dict[str, Any]] | None = None,
+        **kwargs,
+    ) -> LLMResult:
+        """POST the prompt and stream the SSE response.
+
+        Tool schemas are ignored — the chatbot endpoint owns its tool
+        registry server-side.
+        """
+        start_time = time.time()
+        logs: list[str] = []
+
+        def log(msg: str):
+            _assistant_logger.info(msg)
+            logs.append(msg)
+
+        if not self._client or not self._session_token or not self._conversation_id:
+            return LLMResult(
+                response=(
+                    f"Error: {type(self).__name__} not initialized. Call initialize() first."
+                ),
+                tool_calls=[],
+                duration=time.time() - start_time,
+                logs=logs,
+            )
+
+        payload = self._build_completions_payload(prompt)
+        completions_url = f"{self.base_url}{self.completions_path}"
+        headers = {**self._build_headers(), "Accept": "text/event-stream"}
+
+        log(f"[Assistant] POST {completions_url} (conversation={self._conversation_id})")
+
+        state = _SSEStreamState()
+        try:
+            async with self._client.stream(
+                "POST", completions_url, headers=headers, json=payload, timeout=timeout
+            ) as resp:
+                if resp.status_code != 200:
+                    body = await resp.aread()
+                    raise RuntimeError(
+                        f"Assistant API error: HTTP {resp.status_code} - "
+                        f"{body.decode('utf-8', errors='replace')}"
+                    )
+
+                current_event: str | None = None
+                async for raw_line in resp.aiter_lines():
+                    line = raw_line.strip()
+                    if not line:
+                        current_event = None
+                        continue
+                    if line.startswith("event:"):
+                        current_event = line[6:].strip()
+                        continue
+                    if not line.startswith("data:") or current_event is None:
+                        continue
+
+                    json_str = line[5:].strip()
+                    if not json_str:
+                        continue
+
+                    if state.tti_ms is None and current_event == self._first_token_event():
+                        state.tti_ms = int((time.time() - start_time) * 1000)
+
+                    try:
+                        data = json.loads(json_str)
+                    except json.JSONDecodeError:
+                        log(f"[Assistant] Failed to parse SSE data: {json_str[:100]}")
+                        continue
+
+                    self._handle_sse_event(current_event, data, state, log)
+
+        except httpx.TimeoutException:
+            duration = time.time() - start_time
+            log(f"[Assistant] TIMEOUT after {duration:.1f}s")
+            return LLMResult(
+                response=f"Error: Assistant request timed out after {timeout}s",
+                tool_calls=state.tool_calls,
+                duration=duration,
+                logs=logs,
+            )
+        except (httpx.HTTPStatusError, httpx.ConnectError, RuntimeError) as e:
+            duration = time.time() - start_time
+            log(f"[Assistant] Request failed: {e}")
+            return LLMResult(
+                response=f"Error: {e}",
+                tool_calls=state.tool_calls,
+                duration=duration,
+                logs=logs,
+            )
+
+        duration = time.time() - start_time
+        if state.got_error and not state.response_text:
+            state.response_text = f"Error: {state.error_message}"
+
+        log(
+            f"[Assistant] Done: {len(state.response_text)} chars, "
+            f"{len(state.tool_calls)} tool calls, {state.token_event_count} tokens, "
+            f"final={'yes' if state.got_final else 'no'}, "
+            f"error={'yes' if state.got_error else 'no'}, "
+            f"{duration:.2f}s"
+        )
+
+        return LLMResult(
+            response=state.response_text,
+            tool_calls=state.tool_calls,
+            tool_results=state.tool_results,
+            token_usage=state.token_usage,
+            cost=0.0,
+            duration=duration,
+            tti_ms=state.tti_ms,
+            logs=logs,
+        )
+
+    # --- Hooks (override to target a different vendor) -------------
+
+    async def _authenticate(self) -> None:
+        """Exchange (api_token, api_secret) for a Bearer session token."""
+        assert self._client is not None
+        _assistant_logger.info("[Assistant] Authenticating at: %s", self.api_url)
         try:
             resp = await self._client.post(
                 self.api_url,
@@ -2073,18 +2236,22 @@ class AssistantProvider(LLMProvider):
             )
             resp.raise_for_status()
             data = resp.json()
-            self._jwt_token = data.get("payload", {}).get("access_token", "")
-            if not self._jwt_token:
+            self._session_token = data.get("payload", {}).get("access_token", "")
+            if not self._session_token:
                 raise ValueError(f"No access_token in auth response: {data}")
-            _assistant_logger.info("[Assistant] JWT obtained (length: %d)", len(self._jwt_token))
+            _assistant_logger.info(
+                "[Assistant] Session token obtained (length: %d)", len(self._session_token)
+            )
         except httpx.HTTPStatusError as e:
             raise RuntimeError(
-                f"JWT auth failed: HTTP {e.response.status_code} - {e.response.text}"
+                f"Auth failed: HTTP {e.response.status_code} - {e.response.text}"
             ) from e
         except httpx.ConnectError as e:
-            raise RuntimeError(f"JWT auth connection failed: {e}") from e
+            raise RuntimeError(f"Auth connection failed: {e}") from e
 
-        # --- Create conversation ---
+    async def _open_conversation(self) -> None:
+        """POST to ``conversations_path`` to start a session."""
+        assert self._client is not None
         conv_url = f"{self.base_url}{self.conversations_path}"
         _assistant_logger.info("[Assistant] Creating conversation at: %s", conv_url)
         try:
@@ -2106,234 +2273,99 @@ class AssistantProvider(LLMProvider):
             ) from e
 
     def _build_headers(self) -> dict[str, str]:
-        """Build auth headers with JWT, CSRF cookie, and referer."""
+        """Auth headers for the conversation + completions calls.
+
+        Bearer + cookie + CSRF, since some chatbot backends are served
+        from the same web app as a UI and require the CSRF guard.
+        """
         return {
-            "Authorization": f"Bearer {self._jwt_token}",
-            "Cookie": f"__s__={self._jwt_token}; csrf_access_token={self._csrf_token}",
+            "Authorization": f"Bearer {self._session_token}",
+            "Cookie": f"__s__={self._session_token}; csrf_access_token={self._csrf_token}",
             "X-CSRFToken": self._csrf_token,
             "Content-Type": "application/json",
             "Referer": f"{self.base_url}/",
         }
 
-    async def generate_with_tools(
-        self,
-        prompt: str,
-        tools: list[dict[str, Any]] | None = None,
-        timeout: float = 120.0,
-        messages: list[dict[str, Any]] | None = None,
-        **kwargs,
-    ) -> LLMResult:
-        """Send prompt to assistant completions endpoint and stream SSE response.
+    def _build_completions_payload(self, prompt: str) -> dict[str, Any]:
+        """Body for the streaming POST.
 
-        The assistant endpoint handles tool calling internally (server-side),
-        so we do not send tool schemas. Instead we parse SSE events for
-        tool_call / tool_result events emitted by the assistant backend.
+        Default: ``{conversation_id, messages, model_override?}``.
         """
-        start_time = time.time()
-        logs: list[str] = []
-
-        def log(msg: str):
-            _assistant_logger.info(msg)
-            logs.append(msg)
-
-        if not self._client or not self._jwt_token or not self._conversation_id:
-            return LLMResult(
-                response="Error: AssistantProvider not initialized. Call initialize() first.",
-                tool_calls=[],
-                duration=time.time() - start_time,
-                logs=logs,
-            )
-
-        # Build completions payload
         payload: dict[str, Any] = {
             "conversation_id": self._conversation_id,
             "messages": [{"role": "user", "content": prompt}],
         }
         if self.model_override or (self.model and self.model != "default"):
             payload["model_override"] = self.model_override or self.model
+        return payload
 
-        completions_url = f"{self.base_url}{self.completions_path}"
-        headers = {**self._build_headers(), "Accept": "text/event-stream"}
+    def _first_token_event(self) -> str:
+        """Name of the SSE event that signals the first content token.
 
-        log(f"[Assistant] POST {completions_url} (conversation={self._conversation_id})")
+        Used to record TTI (time-to-first-token).
+        """
+        return "token"
 
-        response_text = ""
-        tool_calls: list[dict[str, Any]] = []
-        # tool_results holds MCPToolResult objects (same shape as the
-        # claude-sdk provider) so evaluators can read .is_error / .tool_name
-        # uniformly across providers.
+    def _handle_sse_event(
+        self, event: str, data: dict[str, Any], state: _SSEStreamState, log
+    ) -> None:
+        """Process a single SSE event and mutate ``state``."""
         from testmcpy.src.mcp_client import MCPToolResult
 
-        tool_results: list[MCPToolResult] = []
-        token_usage: dict[str, int] | None = None
-        got_final = False
-        got_error = False
-        error_message = ""
-        tti_ms: int | None = None
-        token_event_count = 0
+        if event == "token":
+            chunk = data.get("chunk", "")
+            state.response_text += chunk
+            state.token_event_count += 1
+        elif event == "tool_call":
+            tc = {
+                "id": data.get("tool_call_id", ""),
+                "name": data.get("tool_name", ""),
+                "arguments": data.get("input", {}),
+            }
+            state.tool_calls.append(tc)
+            log(f"[Assistant] Tool call: {tc['name']} (id={tc['id']})")
+        elif event == "tool_result":
+            result_payload = data.get("result")
+            is_error = bool(data.get("is_error", False))
+            if not is_error and isinstance(result_payload, dict):
+                if result_payload.get("isError") or result_payload.get("is_error"):
+                    is_error = True
 
-        try:
-            async with self._client.stream(
-                "POST",
-                completions_url,
-                headers=headers,
-                json=payload,
-                timeout=timeout,
-            ) as resp:
-                if resp.status_code != 200:
-                    body = await resp.aread()
-                    raise RuntimeError(
-                        f"Assistant API error: HTTP {resp.status_code} - {body.decode('utf-8', errors='replace')}"
-                    )
-
-                current_event: str | None = None
-
-                async for raw_line in resp.aiter_lines():
-                    line = raw_line.strip()
-                    if not line:
-                        current_event = None
-                        continue
-
-                    if line.startswith("event:"):
-                        current_event = line[6:].strip()
-                        continue
-
-                    if not line.startswith("data:"):
-                        continue
-
-                    json_str = line[5:].strip()
-                    if not json_str:
-                        continue
-
-                    # Track time to first token
-                    if current_event == "token" and tti_ms is None:
-                        tti_ms = int((time.time() - start_time) * 1000)
-
-                    try:
-                        data = json.loads(json_str)
-                    except json.JSONDecodeError:
-                        log(f"[Assistant] Failed to parse SSE data: {json_str[:100]}")
-                        continue
-
-                    if current_event == "token":
-                        chunk = data.get("chunk", "")
-                        response_text += chunk
-                        token_event_count += 1
-
-                    elif current_event == "tool_call":
-                        tc = {
-                            "id": data.get("tool_call_id", ""),
-                            "name": data.get("tool_name", ""),
-                            "arguments": data.get("input", {}),
-                        }
-                        tool_calls.append(tc)
-                        log(f"[Assistant] Tool call: {tc['name']} (id={tc['id']})")
-
-                    elif current_event == "tool_result":
-                        # Convert to MCPToolResult so evaluators (which read
-                        # .is_error / .tool_name / .error_message attributes)
-                        # work the same as for the claude-sdk provider.
-                        from testmcpy.src.mcp_client import MCPToolResult
-
-                        result_payload = data.get("result")
-                        is_error = bool(data.get("is_error", False))
-                        # Heuristic: chatbot SSE may not flag errors explicitly.
-                        # Inspect the payload for an obvious error marker.
-                        if not is_error and isinstance(result_payload, dict):
-                            if result_payload.get("isError") or result_payload.get("is_error"):
-                                is_error = True
-
-                        # Map tool_call_id back to tool name when possible
-                        tool_call_id = data.get("tool_call_id", "")
-                        tool_name = data.get("tool_name") or next(
-                            (tc.get("name") for tc in tool_calls if tc.get("id") == tool_call_id),
-                            None,
-                        )
-
-                        tr = MCPToolResult(
-                            tool_call_id=tool_call_id,
-                            tool_name=tool_name,
-                            content=result_payload,
-                            is_error=is_error,
-                            error_message=str(result_payload) if is_error else None,
-                        )
-                        tool_results.append(tr)
-                        log(
-                            f"[Assistant] Tool result: id={tool_call_id}, "
-                            f"tool={tool_name}, "
-                            f"duration={data.get('duration_ms')}ms"
-                        )
-
-                    elif current_event == "usage":
-                        token_usage = {
-                            "prompt": data.get("input_tokens", 0),
-                            "completion": data.get("output_tokens", 0),
-                            "total": data.get("total_tokens", 0),
-                        }
-                        log(f"[Assistant] Usage: {token_usage}")
-
-                    elif current_event == "final":
-                        got_final = True
-                        # The final event may contain the full answer
-                        final_answer = data.get("answer", "") or data.get("message", "")
-                        if final_answer and not response_text:
-                            response_text = final_answer
-                        log(f"[Assistant] Final event received ({len(response_text)} chars)")
-
-                    elif current_event == "error":
-                        got_error = True
-                        error_message = data.get("error", "") or data.get(
-                            "message", "unknown error"
-                        )
-                        log(f"[Assistant] Error event: {error_message}")
-
-        except httpx.TimeoutException:
-            duration = time.time() - start_time
-            log(f"[Assistant] TIMEOUT after {duration:.1f}s")
-            return LLMResult(
-                response=f"Error: Assistant request timed out after {timeout}s",
-                tool_calls=tool_calls,
-                duration=duration,
-                logs=logs,
-            )
-        except (httpx.HTTPStatusError, httpx.ConnectError, RuntimeError) as e:
-            duration = time.time() - start_time
-            log(f"[Assistant] Request failed: {e}")
-            return LLMResult(
-                response=f"Error: {e}",
-                tool_calls=tool_calls,
-                duration=duration,
-                logs=logs,
+            tool_call_id = data.get("tool_call_id", "")
+            tool_name = data.get("tool_name") or next(
+                (tc.get("name") for tc in state.tool_calls if tc.get("id") == tool_call_id),
+                None,
             )
 
-        duration = time.time() - start_time
-
-        if got_error and not response_text:
-            response_text = f"Error: {error_message}"
-
-        log(
-            f"[Assistant] Done: {len(response_text)} chars, "
-            f"{len(tool_calls)} tool calls, {token_event_count} tokens, "
-            f"final={'yes' if got_final else 'no'}, error={'yes' if got_error else 'no'}, "
-            f"{duration:.2f}s"
-        )
-
-        return LLMResult(
-            response=response_text,
-            tool_calls=tool_calls,
-            tool_results=tool_results,
-            token_usage=token_usage,
-            cost=0.0,  # Assistant usage is bundled with workspace subscription
-            duration=duration,
-            tti_ms=tti_ms,
-            logs=logs,
-        )
-
-    async def close(self):
-        """Close the httpx client."""
-        if self._client:
-            await self._client.aclose()
-            self._client = None
+            tr = MCPToolResult(
+                tool_call_id=tool_call_id,
+                tool_name=tool_name,
+                content=result_payload,
+                is_error=is_error,
+                error_message=str(result_payload) if is_error else None,
+            )
+            state.tool_results.append(tr)
+            log(
+                f"[Assistant] Tool result: id={tool_call_id}, "
+                f"tool={tool_name}, duration={data.get('duration_ms')}ms"
+            )
+        elif event == "usage":
+            state.token_usage = {
+                "prompt": data.get("input_tokens", 0),
+                "completion": data.get("output_tokens", 0),
+                "total": data.get("total_tokens", 0),
+            }
+            log(f"[Assistant] Usage: {state.token_usage}")
+        elif event == "final":
+            state.got_final = True
+            final_answer = data.get("answer", "") or data.get("message", "")
+            if final_answer and not state.response_text:
+                state.response_text = final_answer
+            log(f"[Assistant] Final event received ({len(state.response_text)} chars)")
+        elif event == "error":
+            state.got_error = True
+            state.error_message = data.get("error", "") or data.get("message", "unknown error")
+            log(f"[Assistant] Error event: {state.error_message}")
 
 
 class GeminiProvider(LLMProvider):
@@ -2961,8 +2993,8 @@ def create_llm_provider(provider: str, model: str, **kwargs) -> LLMProvider:
         "claude-sdk": ClaudeSDKProvider,  # Claude Agent SDK (uses Claude CLI)
         "claude-cli": ClaudeSDKProvider,  # Alias → claude-sdk
         "claude-code": ClaudeSDKProvider,  # Alias → claude-sdk
-        "assistant": AssistantProvider,  # AI assistant conversation endpoint
-        "chatbot": AssistantProvider,  # Alias → assistant
+        "assistant": AssistantProvider,
+        "chatbot": AssistantProvider,
         "codex-cli": CodexCLIProvider,
         "codex": CodexCLIProvider,  # Alias
         "gemini-cli": GeminiCLIProvider,

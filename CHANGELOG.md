@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-05-05
+
+### Changed
+- `AssistantProvider` is now a vendor-neutral chatbot client. The class
+  docstring documents the protocol contract it expects (JWT auth →
+  conversation create → SSE completions stream with `token` /
+  `tool_call` / `tool_result` / `usage` / `final` / `error` events).
+  No vendor-specific class names, paths, or branding live in the
+  source. To target a vendor that diverges from the contract, subclass
+  and override one of the hooks: `_authenticate`, `_open_conversation`,
+  `_build_headers`, `_build_completions_payload`, `_handle_sse_event`.
+- The SSE-loop's mutable state is factored into a `_SSEStreamState`
+  dataclass so subclasses can replace event handling without
+  re-implementing the loop.
+
+### Added
+- CLI flags `--assistant-conversations-path` and
+  `--assistant-completions-path` so users can override the endpoint
+  paths without subclassing (e.g., to target a different chatbot
+  backend). Both are optional; if omitted, the provider's
+  `_DEFAULT_CONVERSATIONS_PATH` / `_DEFAULT_COMPLETIONS_PATH` are
+  used.
+- `TestRunner.initialize()` and per-test loops skip MCP client init
+  + `list_tools()` for the `assistant` / `chatbot` providers — the
+  chatbot endpoint owns its tool registry server-side. (Folds in the
+  fix from PR #51.)
+
+### Fixed
+- Internal session-token attribute renamed `_jwt_token` → `_session_token`
+  for consistency with the vendor-neutral framing. Callers that poked
+  at the old name need to be updated (caught one in
+  `unit_tests/test_assistant_provider.py`).
+
 ## [0.6.2] - 2026-05-05
 
 ### Fixed

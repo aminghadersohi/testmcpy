@@ -300,12 +300,15 @@ class TestRunner:
             await self.llm_provider.initialize()
 
         # The assistant/chatbot providers talk to a chatbot endpoint that
-        # calls MCP server-side — we don't need a local MCP client for them.
-        # Skip the connection so we don't trigger OAuth flows or hit the
-        # workspace's MCP URL with no auth and 401 out.
-        if not self.mcp_client and self.provider not in ("assistant", "chatbot"):
+        # calls MCP server-side, so they should not eagerly open a local MCP
+        # connection during runner initialization. However, setup/teardown
+        # hooks still rely on a test MCP client object existing, so always
+        # create the client when missing and only skip the eager connection
+        # for assistant/chatbot providers.
+        if not self.mcp_client:
             self.mcp_client = MCPClient(self.mcp_url)
-            await self.mcp_client.initialize()
+            if self.provider not in ("assistant", "chatbot"):
+                await self.mcp_client.initialize()
 
     async def _call_llm_with_rate_limiting(
         self, prompt: str, tools: list[dict], timeout: float, max_retries: int = 3, **kwargs

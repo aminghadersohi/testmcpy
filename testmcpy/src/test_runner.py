@@ -299,7 +299,11 @@ class TestRunner:
             )
             await self.llm_provider.initialize()
 
-        if not self.mcp_client:
+        # The assistant/chatbot providers talk to a chatbot endpoint that
+        # calls MCP server-side — we don't need a local MCP client for them.
+        # Skip the connection so we don't trigger OAuth flows or hit the
+        # workspace's MCP URL with no auth and 401 out.
+        if not self.mcp_client and self.provider not in ("assistant", "chatbot"):
             self.mcp_client = MCPClient(self.mcp_url)
             await self.mcp_client.initialize()
 
@@ -481,29 +485,38 @@ class TestRunner:
                         if self.verbose:
                             self._log(f"  Setup: {tool_name}({tool_args})")
 
-            # Get available MCP tools
-            mcp_tools = await test_mcp_client.list_tools()
+            # Get available MCP tools.
+            #
+            # The assistant/chatbot providers have their own server-side tool
+            # registry — we don't list tools locally and we don't pass any
+            # tool schema to the provider (the chatbot endpoint already knows
+            # what it can call). For other providers we do the usual MCP
+            # discovery + filtering.
+            if self.provider in ("assistant", "chatbot"):
+                formatted_tools = []
+            else:
+                mcp_tools = await test_mcp_client.list_tools()
 
-            # Apply tool filtering (include_tools / exclude_tools)
-            if test_case.include_tools:
-                include_set = {t.lower() for t in test_case.include_tools}
-                mcp_tools = [t for t in mcp_tools if t.name.lower() in include_set]
-            if test_case.exclude_tools:
-                exclude_set = {t.lower() for t in test_case.exclude_tools}
-                mcp_tools = [t for t in mcp_tools if t.name.lower() not in exclude_set]
+                # Apply tool filtering (include_tools / exclude_tools)
+                if test_case.include_tools:
+                    include_set = {t.lower() for t in test_case.include_tools}
+                    mcp_tools = [t for t in mcp_tools if t.name.lower() in include_set]
+                if test_case.exclude_tools:
+                    exclude_set = {t.lower() for t in test_case.exclude_tools}
+                    mcp_tools = [t for t in mcp_tools if t.name.lower() not in exclude_set]
 
-            # Format tools for LLM
-            formatted_tools = [
-                {
-                    "type": "function",
-                    "function": {
-                        "name": tool.name,
-                        "description": tool.description,
-                        "parameters": tool.input_schema,
-                    },
-                }
-                for tool in mcp_tools
-            ]
+                # Format tools for LLM
+                formatted_tools = [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": tool.name,
+                            "description": tool.description,
+                            "parameters": tool.input_schema,
+                        },
+                    }
+                    for tool in mcp_tools
+                ]
 
             # Always notify callback of test start (for spinner updates)
             self._log(f"Running test: {test_case.name}")
@@ -949,19 +962,23 @@ class TestRunner:
         try:
             await self.initialize()
 
-            # Get MCP tools once
-            mcp_tools = await self.mcp_client.list_tools()
-            formatted_tools = [
-                {
-                    "type": "function",
-                    "function": {
-                        "name": tool.name,
-                        "description": tool.description,
-                        "parameters": tool.input_schema,
-                    },
-                }
-                for tool in mcp_tools
-            ]
+            # Get MCP tools once. Assistant/chatbot providers have their own
+            # server-side tool registry — skip local MCP discovery for them.
+            if self.provider in ("assistant", "chatbot") or not self.mcp_client:
+                formatted_tools = []
+            else:
+                mcp_tools = await self.mcp_client.list_tools()
+                formatted_tools = [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": tool.name,
+                            "description": tool.description,
+                            "parameters": tool.input_schema,
+                        },
+                    }
+                    for tool in mcp_tools
+                ]
 
             overall_passed = True
 

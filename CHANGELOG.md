@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-05-05
+
+### Fixed
+- `testmcpy run --provider assistant` (or `chatbot`) no longer
+  initializes a local MCP client. The assistant endpoint talks to
+  MCP server-side, so the local runner shouldn't be opening an MCP
+  connection — doing so was triggering an unwanted OAuth flow against
+  the workspace's MCP URL and loading auth from `.mcp_services.yaml`
+  that the user hadn't asked for.
+- `AssistantProvider` now returns `tool_results` as a list of
+  `MCPToolResult` objects (matching `ClaudeSDKProvider`), instead of
+  raw dicts. The previous shape caused evaluators to fail with
+  `'dict' object has no attribute 'is_error'` on every test.
+
 ## [0.6.1] - 2026-05-05
 
 ### Added

@@ -2159,7 +2159,12 @@ class AssistantProvider(LLMProvider):
 
         response_text = ""
         tool_calls: list[dict[str, Any]] = []
-        tool_results: list[dict[str, Any]] = []
+        # tool_results holds MCPToolResult objects (same shape as the
+        # claude-sdk provider) so evaluators can read .is_error / .tool_name
+        # uniformly across providers.
+        from testmcpy.src.mcp_client import MCPToolResult
+
+        tool_results: list[MCPToolResult] = []
         token_usage: dict[str, int] | None = None
         got_final = False
         got_error = False
@@ -2225,14 +2230,38 @@ class AssistantProvider(LLMProvider):
                         log(f"[Assistant] Tool call: {tc['name']} (id={tc['id']})")
 
                     elif current_event == "tool_result":
-                        tr = {
-                            "tool_call_id": data.get("tool_call_id", ""),
-                            "result": data.get("result"),
-                            "duration_ms": data.get("duration_ms"),
-                        }
+                        # Convert to MCPToolResult so evaluators (which read
+                        # .is_error / .tool_name / .error_message attributes)
+                        # work the same as for the claude-sdk provider.
+                        from testmcpy.src.mcp_client import MCPToolResult
+
+                        result_payload = data.get("result")
+                        is_error = bool(data.get("is_error", False))
+                        # Heuristic: chatbot SSE may not flag errors explicitly.
+                        # Inspect the payload for an obvious error marker.
+                        if not is_error and isinstance(result_payload, dict):
+                            if result_payload.get("isError") or result_payload.get("is_error"):
+                                is_error = True
+
+                        # Map tool_call_id back to tool name when possible
+                        tool_call_id = data.get("tool_call_id", "")
+                        tool_name = data.get("tool_name") or next(
+                            (tc.get("name") for tc in tool_calls if tc.get("id") == tool_call_id),
+                            None,
+                        )
+
+                        tr = MCPToolResult(
+                            tool_call_id=tool_call_id,
+                            tool_name=tool_name,
+                            content=result_payload,
+                            is_error=is_error,
+                            error_message=str(result_payload) if is_error else None,
+                        )
                         tool_results.append(tr)
                         log(
-                            f"[Assistant] Tool result: id={tr['tool_call_id']}, duration={tr['duration_ms']}ms"
+                            f"[Assistant] Tool result: id={tool_call_id}, "
+                            f"tool={tool_name}, "
+                            f"duration={data.get('duration_ms')}ms"
                         )
 
                     elif current_event == "usage":

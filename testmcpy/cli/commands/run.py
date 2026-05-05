@@ -330,10 +330,18 @@ def run(
         from testmcpy.server.state import get_or_create_mcp_client
         from testmcpy.src.test_runner import TestCase, TestRunner
 
-        # Get authenticated MCP client
+        # Get authenticated MCP client.
+        #
+        # The assistant/chatbot providers talk to a chatbot endpoint that
+        # internally calls MCP server-side — we don't need a local MCP
+        # client for them. Skip the MCP init entirely so we don't trigger
+        # OAuth flows or load profile auth that the user didn't ask for.
         mcp_client = None
+        skip_mcp_init = provider.value in ("assistant", "chatbot")
 
-        if inline_auth and effective_mcp_url:
+        if skip_mcp_init:
+            pass  # mcp_client stays None
+        elif inline_auth and effective_mcp_url:
             # Use inline auth flags — bypass profile system entirely
             from testmcpy.src.mcp_client import MCPClient
 

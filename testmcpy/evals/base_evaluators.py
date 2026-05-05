@@ -1599,8 +1599,6 @@ Respond in this exact JSON format:
 
     async def _call_llm(self, prompt: str) -> str:
         """Call LLM API for judging."""
-        import os
-
         import httpx
 
         # Get config
@@ -1612,13 +1610,12 @@ Respond in this exact JSON format:
             config = None
 
         if self.provider == "anthropic":
-            api_key = (
-                os.environ.get("ANTHROPIC_API_KEY")
-                or (config.get("ANTHROPIC_API_KEY") if config else None)
-                or ""
-            )
+            api_key = (config.get("ANTHROPIC_API_KEY") if config else None) or ""
             if not api_key:
-                raise ValueError("ANTHROPIC_API_KEY not set")
+                raise ValueError(
+                    "ANTHROPIC_API_KEY not set. Configure it in "
+                    ".llm_providers.yaml via ${ANTHROPIC_API_KEY} substitution."
+                )
 
             async with httpx.AsyncClient(timeout=60.0) as client:
                 response = await client.post(
@@ -1639,13 +1636,12 @@ Respond in this exact JSON format:
                 return result["content"][0]["text"]
 
         elif self.provider == "openai":
-            api_key = (
-                os.environ.get("OPENAI_API_KEY")
-                or (config.get("OPENAI_API_KEY") if config else None)
-                or ""
-            )
+            api_key = (config.get("OPENAI_API_KEY") if config else None) or ""
             if not api_key:
-                raise ValueError("OPENAI_API_KEY not set")
+                raise ValueError(
+                    "OPENAI_API_KEY not set. Configure it in "
+                    ".llm_providers.yaml via ${OPENAI_API_KEY} substitution."
+                )
 
             async with httpx.AsyncClient(timeout=60.0) as client:
                 response = await client.post(
@@ -1666,14 +1662,15 @@ Respond in this exact JSON format:
 
         elif self.provider in ("gemini", "google"):
             api_key = (
-                os.environ.get("GOOGLE_API_KEY")
-                or os.environ.get("GEMINI_API_KEY")
-                or (config.get("GOOGLE_API_KEY") if config else None)
+                (config.get("GOOGLE_API_KEY") if config else None)
                 or (config.get("GEMINI_API_KEY") if config else None)
                 or ""
             )
             if not api_key:
-                raise ValueError("GOOGLE_API_KEY or GEMINI_API_KEY not set")
+                raise ValueError(
+                    "GOOGLE_API_KEY / GEMINI_API_KEY not set. Configure it in "
+                    ".llm_providers.yaml via ${GOOGLE_API_KEY} substitution."
+                )
 
             async with httpx.AsyncClient(timeout=60.0) as client:
                 response = await client.post(

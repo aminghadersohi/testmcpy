@@ -7,6 +7,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-05-05
+
+### Added
+- Dedicated `--assistant-api-url` / `--assistant-api-token` /
+  `--assistant-api-secret` CLI flags so MCP and the assistant
+  endpoint can use different JWT credentials in the same command.
+  The MCP `--jwt-*` flags are still accepted as a fallback for
+  shared-cred setups.
+- `assistant` and `chatbot` are now valid values for `--provider`
+  (added to the `ModelProvider` enum so typer accepts them).
+- `OPENROUTER_API_KEY`, `XAI_API_KEY`, `GOOGLE_API_KEY`, and
+  `GEMINI_API_KEY` are now recognized in `~/.testmcpy` and `./.env`
+  (added to `Config.GENERIC_KEYS`).
+
+### Fixed
+- `AssistantProvider.initialize()` validation error messages now
+  point users at the new CLI flags / config files instead of the
+  removed `ASSISTANT_*` env vars.
+
+## [0.6.0] - 2026-05-05
+
+### Changed (BREAKING)
+- testmcpy code no longer reads environment variables directly. Credentials
+  and provider configuration must come from CLI flags, the YAML config
+  files (`.mcp_services.yaml` / `.llm_providers.yaml`, which support
+  `${VAR}` substitution at load time), or the env-format config files
+  (`~/.testmcpy` / `./.env`). Specifically:
+  - `AssistantProvider` no longer reads `ASSISTANT_WORKSPACE_HASH`,
+    `ASSISTANT_DOMAIN`, `ASSISTANT_ENVIRONMENT`, `ASSISTANT_API_TOKEN`,
+    `ASSISTANT_API_SECRET`, `ASSISTANT_API_URL` from the environment.
+    Pass them via CLI flags (`--workspace-hash`, `--domain`,
+    `--environment`, `--jwt-url`, `--jwt-token`, `--jwt-secret`) or
+    via `provider_config` on the Python API.
+  - `OpenRouterProvider` and `XAIProvider` no longer fall back to
+    `OPENROUTER_API_KEY` / `XAI_API_KEY` env vars. Configure via
+    `.llm_providers.yaml` `${VAR}` substitution.
+  - `AnthropicRunnerTool` no longer falls back to `ANTHROPIC_API_KEY`.
+  - `LLMAsJudgeEvaluator` no longer reads `ANTHROPIC_API_KEY`,
+    `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `GEMINI_API_KEY` directly.
+  - `Config._load_config` no longer reads `GENERIC_KEYS` /
+    `TESTMCPY_KEYS` from the environment. The `~/.testmcpy` and `./.env`
+    file paths are still loaded as before.
+  - The `envvar=` kwargs were removed from CLI flags `--auth-token`,
+    `--jwt-url`, `--jwt-token`, `--jwt-secret` so they no longer pick up
+    `MCP_AUTH_TOKEN` / `MCP_JWT_*` from the environment.
+
+### Added
+- CLI flags `--workspace-hash`, `--domain`, `--environment`,
+  `--assistant-api-url`, `--assistant-api-token`,
+  `--assistant-api-secret` on `testmcpy run` to configure the
+  assistant/chatbot provider without env vars. The MCP `--jwt-*`
+  flags are also accepted as a fallback when MCP and assistant share
+  the same JWT credentials.
+- `assistant` and `chatbot` are now valid values for `--provider`
+  (added to the `ModelProvider` enum).
+- `OPENROUTER_API_KEY`, `XAI_API_KEY`, `GOOGLE_API_KEY`, and
+  `GEMINI_API_KEY` are now recognized in the `~/.testmcpy` and
+  `./.env` env-format config files (added to `Config.GENERIC_KEYS`).
+- CLI flag values for `assistant` / `chatbot` providers are folded into
+  `provider_config` and reach `AssistantProvider.__init__` via
+  `create_llm_provider`'s kwarg filtering.
+
 ## [0.5.1] - 2026-05-04
 
 ### Changed

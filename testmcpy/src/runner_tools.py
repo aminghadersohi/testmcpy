@@ -399,13 +399,15 @@ class AnthropicDirectRunner(BaseRunnerTool):
             return
 
         try:
-            import os
-
             import anthropic
 
-            self.client = anthropic.AsyncAnthropic(
-                api_key=self.api_key or os.getenv("ANTHROPIC_API_KEY")
-            )
+            if not self.api_key:
+                raise RuntimeError(
+                    "Anthropic API key not provided. Configure it in "
+                    ".llm_providers.yaml via ${ANTHROPIC_API_KEY} substitution, "
+                    "or pass api_key directly."
+                )
+            self.client = anthropic.AsyncAnthropic(api_key=self.api_key)
             self._initialized = True
         except ImportError:
             raise RuntimeError("anthropic package not installed")

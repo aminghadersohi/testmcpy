@@ -1360,20 +1360,68 @@ class TestRunner:
 
         return results
 
+    # Safety margin added to each test's per-call timeout to compute the
+    # wall-clock budget. Covers auth + conversation create + tool execution
+    # + evaluator runtime. Class-level so tests can shorten it.
+    WALL_CLOCK_SLACK_SECONDS: float = 60.0
+
     async def _run_test_with_retry(
         self, test_case: TestCase, max_test_retries: int = 2
     ) -> TestResult:
-        """Run a test with retry logic for rate limit failures."""
-        for attempt in range(max_test_retries + 1):
-            # Dispatch to appropriate runner
+        """Run a test with retry logic for rate limit failures.
+
+        Each test is wrapped in a wall-clock timeout so it can never hang
+        the runner indefinitely. The wall-clock timeout is the test's
+        declared ``timeout`` plus :attr:`WALL_CLOCK_SLACK_SECONDS` to
+        absorb provider-side overhead (auth, conversation creation,
+        evaluators); for CLI providers we also bump it up like
+        :meth:`run_test` does for the inner LLM call.
+
+        Without this, providers that stream events (e.g. the assistant
+        chatbot endpoint) can keep the test alive forever — the per-event
+        httpx timeout resets on every received chunk, so a chatbot stuck
+        in an infinite tool-call retry loop keeps streaming until the
+        runner is killed externally.
+        """
+        # Compute the wall-clock budget once per test (used across retries).
+        cli_providers = ("claude-sdk", "claude-cli", "claude-code", "codex-cli", "codex")
+        per_call_timeout = test_case.timeout
+        if self.provider in cli_providers:
+            per_call_timeout = max(per_call_timeout, 120.0)
+        wall_clock_timeout = per_call_timeout + self.WALL_CLOCK_SLACK_SECONDS
+
+        async def _dispatch() -> TestResult:
             if test_case.is_auth_only:
-                result = await self.run_auth_only_test(test_case)
-            elif test_case.is_load_test:
-                result = await self.run_load_test(test_case)
-            elif test_case.is_multi_turn:
-                result = await self.run_multi_turn_test(test_case)
-            else:
-                result = await self.run_test(test_case)
+                return await self.run_auth_only_test(test_case)
+            if test_case.is_load_test:
+                return await self.run_load_test(test_case)
+            if test_case.is_multi_turn:
+                return await self.run_multi_turn_test(test_case)
+            return await self.run_test(test_case)
+
+        for attempt in range(max_test_retries + 1):
+            try:
+                result = await asyncio.wait_for(_dispatch(), timeout=wall_clock_timeout)
+            except asyncio.TimeoutError:
+                if self.verbose:
+                    self._log(
+                        f"  Test wall-clock timeout after {wall_clock_timeout:.1f}s — "
+                        "the provider was streaming or retrying without making progress"
+                    )
+                result = TestResult(
+                    test_name=test_case.name,
+                    passed=False,
+                    score=0.0,
+                    duration=wall_clock_timeout,
+                    response=(
+                        f"Error: test wall-clock timeout after {wall_clock_timeout:.1f}s. "
+                        "The provider did not return a final result in time. This is a "
+                        "hard cap independent of the per-call timeout, used to break out "
+                        "of provider-side retry loops or stuck SSE streams."
+                    ),
+                    reason="wall-clock timeout",
+                    error="wall-clock timeout",
+                )
 
             # Check if this was a rate limit failure
             is_rate_limit_failure = (

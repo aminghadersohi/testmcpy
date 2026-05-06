@@ -1356,6 +1356,30 @@ class BedrockProvider(LLMProvider):
 _claude_sdk_logger = logging.getLogger(__name__ + ".ClaudeSDKProvider")
 
 
+# Substrings that strongly indicate a tool-result is an error, even when
+# the SDK didn't flag is_error=True. Used by the retry-budget guard to
+# detect cases like MCP-side validation errors that come back as "successful"
+# tool results with error text in the body.
+_ERROR_PAYLOAD_MARKERS = (
+    "validation error",
+    "Unexpected keyword argument",
+    "Missing required argument",
+    "missing_argument",
+    "unexpected_keyword_argument",
+    '"error":',
+    "'error':",
+    "Error:",
+)
+
+
+def _looks_like_error_payload(content: Any) -> bool:
+    """Heuristic: does this tool-result content look like an error?"""
+    text = str(content) if content is not None else ""
+    if not text:
+        return False
+    return any(marker in text for marker in _ERROR_PAYLOAD_MARKERS)
+
+
 class ClaudeSDKProvider(LLMProvider):
     """Claude Agent SDK provider with native MCP integration.
 
@@ -1712,10 +1736,21 @@ class ClaudeSDKProvider(LLMProvider):
             cost = 0.0
             raw_events = []
 
+            # Retry budget: if the model keeps calling the SAME tool with the
+            # SAME arguments and getting the SAME error, abort the query
+            # rather than letting it spin until the wall-clock timeout fires.
+            # Counts how many times each (tool_name, args, error) signature
+            # has been seen; we abort when any signature crosses the
+            # threshold below.
+            error_signature_counts: dict[tuple[str, str, str], int] = {}
+            max_repeats_per_signature = 3
+            retry_budget_aborted = False
+
             log(f"[ClaudeSDK] Starting query (model={self.model}, timeout={timeout}s)...")
 
             async def execute_query():
                 nonlocal response_text, thinking_text, token_usage, cost
+                nonlocal retry_budget_aborted
                 message_count = 0
                 # Track all text blocks per AssistantMessage so we can
                 # identify the FINAL text response (after all tool calls)
@@ -1805,6 +1840,50 @@ class ClaudeSDKProvider(LLMProvider):
                                             f"[ClaudeSDK] Tool Result ({status}): {content_preview}"
                                         )
 
+                                        # Retry-budget enforcement: if the model
+                                        # keeps making the same call with the
+                                        # same args and getting the same error,
+                                        # abort to break out of the loop.
+                                        if is_error or _looks_like_error_payload(content):
+                                            matching_call = next(
+                                                (
+                                                    tc
+                                                    for tc in tool_calls
+                                                    if tc.get("id") == tool_use_id
+                                                ),
+                                                None,
+                                            )
+                                            if matching_call:
+                                                sig_args = json.dumps(
+                                                    matching_call.get("arguments", {}),
+                                                    sort_keys=True,
+                                                    default=str,
+                                                )[:200]
+                                                # Use a normalized prefix of the
+                                                # error text — exact byte match
+                                                # would be too brittle.
+                                                sig_err = str(content)[:120]
+                                                sig = (
+                                                    matching_call.get("name", ""),
+                                                    sig_args,
+                                                    sig_err,
+                                                )
+                                                error_signature_counts[sig] = (
+                                                    error_signature_counts.get(sig, 0) + 1
+                                                )
+                                                if (
+                                                    error_signature_counts[sig]
+                                                    >= max_repeats_per_signature
+                                                ):
+                                                    log(
+                                                        f"[ClaudeSDK] Retry budget exhausted: "
+                                                        f"same call+error repeated "
+                                                        f"{max_repeats_per_signature}× — aborting "
+                                                        f"(tool={sig[0]}, error={sig_err[:80]!r})"
+                                                    )
+                                                    retry_budget_aborted = True
+                                                    return
+
                         elif isinstance(message, ResultMessage):
                             if message.usage:
                                 usage = message.usage
@@ -1882,9 +1961,25 @@ class ClaudeSDKProvider(LLMProvider):
                     mcp_tool_results.append(mcp_result)
 
             duration = time.time() - start_time
+
+            # If we aborted via the retry budget, surface that in the
+            # response so evaluators see a clear, actionable error
+            # rather than an empty / partial response.
+            if retry_budget_aborted and not response_text:
+                response_text = (
+                    f"Error: aborted after the model repeated the same tool call "
+                    f"and got the same error {max_repeats_per_signature}× in a row. "
+                    f"This usually means the prompt is priming the model toward a "
+                    f"wrong parameter name, the tool's schema mismatches the model's "
+                    f"expectation, or the resource being queried doesn't exist. See "
+                    f"the log lines marked '[ClaudeSDK] Tool Result (Error)' for the "
+                    f"specific error pattern."
+                )
+
             log(
                 f"[ClaudeSDK] Done: {len(response_text)} chars, "
                 f"{len(tool_calls)} tool calls, {len(mcp_tool_results)} results"
+                + (" [retry budget aborted]" if retry_budget_aborted else "")
             )
 
             # Estimate cost from tokens if SDK didn't provide it (subscription billing)

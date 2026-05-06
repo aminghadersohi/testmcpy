@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-05-06
+
+### Added
+- **Per-test wall-clock timeout** in `TestRunner._run_test_with_retry`.
+  Each test is now wrapped in `asyncio.wait_for(...)` with a budget of
+  `test_case.timeout + WALL_CLOCK_SLACK_SECONDS` (60s default; CLI
+  providers also get the existing 120s floor on the per-call timeout).
+  Without this, providers that stream events — notably the
+  `AssistantProvider` chatbot endpoint — could keep a test alive
+  indefinitely because the per-event httpx timeout resets on every
+  received chunk. Observed in eval cycle c28 (SC-105726): the chatbot
+  hung 15+ minutes on `add_chart_to_existing_dashboard` against a
+  nonexistent chart, never closing the SSE stream. The wall-clock
+  guard breaks out of these.
+- **Per-tool-call retry budget** in `ClaudeSDKProvider`. Tracks each
+  `(tool_name, args, error_text_prefix)` signature; if the same call
+  produces the same error 3× in a row the query aborts with a clear
+  diagnostic in the response (and a `[retry budget aborted]` marker in
+  the logs). Observed in c28: the model kept calling `execute_sql` with
+  `query=...` instead of `sql=...`, hitting the same 3 validation
+  errors each turn until the runner was killed externally.
+- 3 new unit tests in `unit_tests/test_runner_wall_clock_timeout.py`:
+  hung-test abort, happy-path passthrough, CLI 120s floor.
+
+### Changed
+- `WALL_CLOCK_SLACK_SECONDS` is a class-level attribute on `TestRunner`
+  (default 60.0s) so it can be overridden in tests or via subclassing.
+
 ## [0.7.0] - 2026-05-05
 
 ### Changed

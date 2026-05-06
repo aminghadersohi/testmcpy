@@ -2111,6 +2111,13 @@ class AssistantProvider(LLMProvider):
     _DEFAULT_CONVERSATIONS_PATH = "/api/v1/copilot/conversations"
     _DEFAULT_COMPLETIONS_PATH = "/api/v1/copilot/completions"
 
+    # If the SSE stream emits no recognized event for this many seconds,
+    # abort the stream. Defends against a chatbot backend that keeps the
+    # connection open (preventing httpx's per-event read timeout from
+    # firing) but stops emitting real progress. Observed in c29
+    # (SC-105915). Class-level so subclasses / tests can override.
+    SSE_IDLE_ABORT_SECONDS: float = 90.0
+
     def __init__(
         self,
         model: str = "default",
@@ -2235,6 +2242,16 @@ class AssistantProvider(LLMProvider):
 
         log(f"[Assistant] POST {completions_url} (conversation={self._conversation_id})")
 
+        # Idle abort: if the SSE stream emits NO recognized event within
+        # this many seconds, give up. This catches a chatbot backend that
+        # keeps the connection open (so httpx's per-event read timeout
+        # never fires) but stops sending real progress — observed in
+        # eval cycle c29 (SC-105915) where C00_9, C01_9, C02_7 hung
+        # despite the per-test wall-clock added in v0.7.1.
+        sse_idle_abort_seconds = self.SSE_IDLE_ABORT_SECONDS
+        last_event_at = time.time()
+        idle_aborted = False
+
         state = _SSEStreamState()
         try:
             async with self._client.stream(
@@ -2248,7 +2265,35 @@ class AssistantProvider(LLMProvider):
                     )
 
                 current_event: str | None = None
-                async for raw_line in resp.aiter_lines():
+                # Drive the line iterator manually so we can wrap each
+                # await in asyncio.wait_for(...). httpx's aiter_lines()
+                # blocks inside __anext__ when no bytes arrive — a plain
+                # `async for` would be suspended forever. The wait_for
+                # catches the case where the SSE connection stays open
+                # but never sends another byte (real-world c29 hang).
+                line_iter = resp.aiter_lines().__aiter__()
+                while True:
+                    elapsed = time.time() - last_event_at
+                    remaining = sse_idle_abort_seconds - elapsed
+                    if remaining <= 0:
+                        log(
+                            f"[Assistant] SSE idle abort: no recognized event for "
+                            f"{sse_idle_abort_seconds:.0f}s — closing stream"
+                        )
+                        idle_aborted = True
+                        break
+                    try:
+                        raw_line = await asyncio.wait_for(line_iter.__anext__(), timeout=remaining)
+                    except StopAsyncIteration:
+                        break
+                    except asyncio.TimeoutError:
+                        log(
+                            f"[Assistant] SSE idle abort: no bytes received in "
+                            f"{sse_idle_abort_seconds:.0f}s — closing stream"
+                        )
+                        idle_aborted = True
+                        break
+
                     line = raw_line.strip()
                     if not line:
                         current_event = None
@@ -2273,6 +2318,8 @@ class AssistantProvider(LLMProvider):
                         continue
 
                     self._handle_sse_event(current_event, data, state, log)
+                    # A real event arrived — reset the idle timer.
+                    last_event_at = time.time()
 
         except httpx.TimeoutException:
             duration = time.time() - start_time
@@ -2296,13 +2343,22 @@ class AssistantProvider(LLMProvider):
         duration = time.time() - start_time
         if state.got_error and not state.response_text:
             state.response_text = f"Error: {state.error_message}"
+        elif idle_aborted and not state.response_text:
+            # Surface the idle abort cleanly so evaluators don't see an
+            # empty response with no explanation.
+            state.response_text = (
+                f"Error: SSE stream went idle for "
+                f"{sse_idle_abort_seconds:.0f}s without sending a final / error event. "
+                "The chatbot backend kept the connection open but stopped emitting "
+                "progress. Aborted to free the runner."
+            )
 
         log(
             f"[Assistant] Done: {len(state.response_text)} chars, "
             f"{len(state.tool_calls)} tool calls, {state.token_event_count} tokens, "
             f"final={'yes' if state.got_final else 'no'}, "
             f"error={'yes' if state.got_error else 'no'}, "
-            f"{duration:.2f}s"
+            f"{duration:.2f}s" + (" [SSE idle aborted]" if idle_aborted else "")
         )
 
         return LLMResult(

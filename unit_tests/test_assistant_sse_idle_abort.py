@@ -1,0 +1,119 @@
+"""
+Unit tests for AssistantProvider's SSE idle-abort defense.
+
+The chatbot endpoint's SSE stream can stop emitting events while keeping
+the underlying TCP connection open (observed in eval cycle c29 against
+the staging chatbot — C00_9, C01_9, C02_7 all hung). The per-test
+wall-clock timeout added in v0.7.1 catches these between tests, but a
+defense at the provider level lets us free the runner before the wall
+clock fires AND surface a clean error message.
+
+These tests drive the SSE loop with a fake stream that sends one event
+then goes silent, verifying that:
+  - the loop aborts after SSE_IDLE_ABORT_SECONDS rather than hanging,
+  - LLMResult.response carries an explanatory error string,
+  - a [SSE idle aborted] marker appears in the logs.
+"""
+
+import asyncio
+
+import pytest
+
+from testmcpy.src.llm_integration import AssistantProvider, LLMResult
+
+
+class _FakeStreamResponse:
+    """Mimics the subset of httpx.Response used by AssistantProvider."""
+
+    def __init__(self, lines: list[str], silent_after: float = 60.0):
+        self._lines = lines
+        self._silent_after = silent_after
+        self.status_code = 200
+
+    async def aiter_lines(self):
+        for line in self._lines:
+            yield line
+        # Simulate an open-but-silent SSE stream: never yield again.
+        # The provider's wait_for(__anext__) wrapper must abort us.
+        await asyncio.sleep(self._silent_after)
+
+    async def aread(self) -> bytes:
+        return b""
+
+
+class _FakeStreamCM:
+    def __init__(self, response: _FakeStreamResponse):
+        self._response = response
+
+    async def __aenter__(self) -> _FakeStreamResponse:
+        return self._response
+
+    async def __aexit__(self, exc_type, exc, tb) -> bool:
+        return False
+
+
+class _FakeAsyncClient:
+    def __init__(self, response: _FakeStreamResponse):
+        self._response = response
+
+    def stream(self, *args, **kwargs):
+        return _FakeStreamCM(self._response)
+
+    async def aclose(self):
+        pass
+
+
+def _make_provider(idle_seconds: float, lines: list[str]) -> AssistantProvider:
+    provider = AssistantProvider(workspace_hash="ws-test", domain="example.com")
+    provider.SSE_IDLE_ABORT_SECONDS = idle_seconds
+    provider._client = _FakeAsyncClient(_FakeStreamResponse(lines))  # type: ignore[assignment]
+    provider._session_token = "fake-jwt"
+    provider._conversation_id = "fake-conv"
+    return provider
+
+
+@pytest.mark.asyncio
+async def test_idle_abort_after_no_events():
+    """Stream opens, sends NO events, then stays silent → idle-abort."""
+    provider = _make_provider(idle_seconds=0.3, lines=[])
+
+    start = asyncio.get_event_loop().time()
+    result: LLMResult = await provider.generate_with_tools(prompt="hi", timeout=30.0)
+    elapsed = asyncio.get_event_loop().time() - start
+
+    # Should abort in well under a second, not hang for the full timeout.
+    assert elapsed < 2.0, f"Provider hung for {elapsed:.2f}s instead of aborting"
+    assert "SSE stream went idle" in result.response
+    assert any("SSE idle abort" in line for line in result.logs)
+
+
+@pytest.mark.asyncio
+async def test_idle_abort_after_partial_stream():
+    """Stream sends one event, then stalls → idle-abort still fires."""
+    lines = [
+        "event: token",
+        'data: {"token": "hello"}',
+        "",  # blank separator
+    ]
+    provider = _make_provider(idle_seconds=0.3, lines=lines)
+
+    start = asyncio.get_event_loop().time()
+    result: LLMResult = await provider.generate_with_tools(prompt="hi", timeout=30.0)
+    elapsed = asyncio.get_event_loop().time() - start
+
+    assert elapsed < 2.0, f"Provider hung for {elapsed:.2f}s instead of aborting"
+    # Partial response was captured before the stall.
+    assert "hello" in result.response or "SSE stream went idle" in result.response
+    assert any("SSE idle abort" in line for line in result.logs)
+    assert any("[SSE idle aborted]" in line for line in result.logs)
+
+
+@pytest.mark.asyncio
+async def test_class_attribute_override_changes_threshold():
+    """SSE_IDLE_ABORT_SECONDS is a class attribute and respects subclass / instance overrides."""
+    provider = _make_provider(idle_seconds=0.1, lines=[])
+    assert provider.SSE_IDLE_ABORT_SECONDS == 0.1
+    # Class default is unchanged for other instances.
+    other = AssistantProvider(workspace_hash="ws-other", domain="example.com")
+    assert other.SSE_IDLE_ABORT_SECONDS == AssistantProvider.SSE_IDLE_ABORT_SECONDS
+    assert AssistantProvider.SSE_IDLE_ABORT_SECONDS == 90.0

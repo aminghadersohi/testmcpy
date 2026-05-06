@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-05-06
+
+### Added
+- **SSE idle-abort defense** in `AssistantProvider.generate_with_tools()`.
+  If the chatbot SSE stream emits no recognized event for
+  `SSE_IDLE_ABORT_SECONDS` (default 90s) the provider closes the
+  connection and returns an explanatory error in `LLMResult.response`.
+  This complements the v0.7.1 per-test wall-clock timeout: the
+  wall-clock fires *between* tests, but a stalled SSE stream that
+  keeps the TCP connection open (httpx's per-event read timeout never
+  fires because no event has been received *yet*) could hang inside a
+  single test indefinitely. Observed in eval cycle c29 (SC-105915)
+  where C00_9, C01_9, and C02_7 hung against the chatbot backend
+  despite v0.7.1 being deployed. The threshold is a class attribute
+  so subclasses / tests can override it.
+- Unit test in `unit_tests/test_assistant_sse_idle_abort.py` exercising
+  the idle-abort path with a fake SSE stream that opens, sends one
+  event, then goes silent.
+
 ## [0.7.1] - 2026-05-06
 
 ### Added

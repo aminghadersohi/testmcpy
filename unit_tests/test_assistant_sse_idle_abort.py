@@ -16,10 +16,11 @@ then goes silent, verifying that:
 """
 
 import asyncio
+import time
 
 import pytest
 
-from testmcpy.src.llm_integration import AssistantProvider, LLMResult
+from testmcpy.src.llm_integration import AssistantProvider, LLMResult, _format_seconds
 
 
 class _FakeStreamResponse:
@@ -77,14 +78,26 @@ async def test_idle_abort_after_no_events():
     """Stream opens, sends NO events, then stays silent → idle-abort."""
     provider = _make_provider(idle_seconds=0.3, lines=[])
 
-    start = asyncio.get_event_loop().time()
+    start = time.monotonic()
     result: LLMResult = await provider.generate_with_tools(prompt="hi", timeout=30.0)
-    elapsed = asyncio.get_event_loop().time() - start
+    elapsed = time.monotonic() - start
 
     # Should abort in well under a second, not hang for the full timeout.
     assert elapsed < 2.0, f"Provider hung for {elapsed:.2f}s instead of aborting"
     assert "SSE stream went idle" in result.response
     assert any("SSE idle abort" in line for line in result.logs)
+    # Sub-second thresholds must NOT round to "0s" in the diagnostic.
+    assert "0s" not in result.response.split("for ")[1].split(" ")[0]
+
+
+def test_format_seconds_handles_sub_second_overrides():
+    """Sub-second budgets (used in tests) must not render as '0s'."""
+    assert _format_seconds(0.3) == "300ms"
+    assert _format_seconds(0.001) == "1ms"
+    assert _format_seconds(1.5) == "1.5s"
+    assert _format_seconds(9.9) == "9.9s"
+    assert _format_seconds(90.0) == "90s"
+    assert _format_seconds(120.5) == "120s"
 
 
 @pytest.mark.asyncio
@@ -97,9 +110,9 @@ async def test_idle_abort_after_partial_stream():
     ]
     provider = _make_provider(idle_seconds=0.3, lines=lines)
 
-    start = asyncio.get_event_loop().time()
+    start = time.monotonic()
     result: LLMResult = await provider.generate_with_tools(prompt="hi", timeout=30.0)
-    elapsed = asyncio.get_event_loop().time() - start
+    elapsed = time.monotonic() - start
 
     assert elapsed < 2.0, f"Provider hung for {elapsed:.2f}s instead of aborting"
     # Partial response was captured before the stall.

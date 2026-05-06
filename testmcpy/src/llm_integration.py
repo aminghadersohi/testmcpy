@@ -2050,6 +2050,21 @@ class ClaudeSDKProvider(LLMProvider):
 _assistant_logger = logging.getLogger(__name__ + ".AssistantProvider")
 
 
+def _format_seconds(seconds: float) -> str:
+    """Format a duration so sub-second values aren't rounded to ``0s``.
+
+    The SSE idle threshold is configurable down to fractions of a second
+    (the unit tests override it to 0.3s). Using ``f"{x:.0f}s"`` would
+    produce a misleading ``0s`` in those messages — switch to ms below
+    1s, decimals below 10s, and integer seconds otherwise.
+    """
+    if seconds < 1.0:
+        return f"{seconds * 1000:.0f}ms"
+    if seconds < 10.0:
+        return f"{seconds:.1f}s"
+    return f"{seconds:.0f}s"
+
+
 @dataclass
 class _SSEStreamState:
     """Mutable state accumulated as we parse a chatbot SSE response."""
@@ -2272,13 +2287,14 @@ class AssistantProvider(LLMProvider):
                 # catches the case where the SSE connection stays open
                 # but never sends another byte (real-world c29 hang).
                 line_iter = resp.aiter_lines().__aiter__()
+                budget_str = _format_seconds(sse_idle_abort_seconds)
                 while True:
                     elapsed = time.time() - last_event_at
                     remaining = sse_idle_abort_seconds - elapsed
                     if remaining <= 0:
                         log(
                             f"[Assistant] SSE idle abort: no recognized event for "
-                            f"{sse_idle_abort_seconds:.0f}s — closing stream"
+                            f"{budget_str} — closing stream"
                         )
                         idle_aborted = True
                         break
@@ -2287,9 +2303,13 @@ class AssistantProvider(LLMProvider):
                     except StopAsyncIteration:
                         break
                     except asyncio.TimeoutError:
+                        # Budget is measured since the last *recognized* event.
+                        # Unrecognized noise (keepalives, malformed events) does
+                        # NOT reset last_event_at, so this fires correctly even
+                        # if bytes are arriving without real progress.
                         log(
-                            f"[Assistant] SSE idle abort: no bytes received in "
-                            f"{sse_idle_abort_seconds:.0f}s — closing stream"
+                            f"[Assistant] SSE idle abort: no recognized event for "
+                            f"{budget_str} — closing stream"
                         )
                         idle_aborted = True
                         break
@@ -2348,9 +2368,9 @@ class AssistantProvider(LLMProvider):
             # empty response with no explanation.
             state.response_text = (
                 f"Error: SSE stream went idle for "
-                f"{sse_idle_abort_seconds:.0f}s without sending a final / error event. "
-                "The chatbot backend kept the connection open but stopped emitting "
-                "progress. Aborted to free the runner."
+                f"{_format_seconds(sse_idle_abort_seconds)} without sending a "
+                "final / error event. The chatbot backend kept the connection "
+                "open but stopped emitting progress. Aborted to free the runner."
             )
 
         log(

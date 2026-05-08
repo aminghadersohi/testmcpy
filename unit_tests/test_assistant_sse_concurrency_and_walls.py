@@ -179,6 +179,16 @@ async def test_concurrency_limit_unbounded_when_unset():
     )
 
 
+def test_configure_concurrency_limit_rejects_negative():
+    """Passing a negative max_streams should raise — it would otherwise
+    blow up later inside asyncio.Semaphore(-1) at acquire time."""
+    AssistantProvider.configure_concurrency_limit(None)  # reset
+    with pytest.raises(ValueError, match="non-negative"):
+        AssistantProvider.configure_concurrency_limit(-1)
+    # State unchanged after the rejected call.
+    assert AssistantProvider._max_concurrent_streams is None
+
+
 def test_configure_concurrency_limit_idempotent():
     """Reconfiguring updates the limit and clears any previously-bound
     semaphore (lazy re-creation in the next event loop)."""

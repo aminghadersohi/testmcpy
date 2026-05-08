@@ -2163,12 +2163,20 @@ class AssistantProvider(LLMProvider):
     def configure_concurrency_limit(cls, max_streams: int | None) -> None:
         """Set the process-wide cap on concurrent SSE streams.
 
-        ``None`` (or 0) → unbounded. Otherwise a class-level
-        ``asyncio.Semaphore(max_streams)`` is created lazily on first
-        use and shared across all AssistantProvider instances in the
-        process. Safe to call multiple times — the semaphore is
-        re-created lazily next time `_get_stream_semaphore` is called.
+        ``None`` (or 0) → unbounded. Positive int → cap. Negative
+        values raise ``ValueError`` (a Semaphore with a negative
+        capacity would crash at acquire time, so reject up front).
+        The class-level ``asyncio.Semaphore`` is created lazily on
+        first use and shared across all AssistantProvider instances
+        in the process. Safe to call multiple times — the semaphore
+        is re-created lazily next time ``_get_stream_semaphore`` is
+        called.
         """
+        if max_streams is not None and max_streams < 0:
+            raise ValueError(
+                f"max_streams must be a non-negative int or None, "
+                f"got {max_streams!r}. Use 0 or None for unbounded."
+            )
         if not max_streams:
             cls._max_concurrent_streams = None
         else:
@@ -2502,11 +2510,16 @@ class AssistantProvider(LLMProvider):
             state.response_text = f"Error: {state.error_message}"
         elif wall_clock_aborted and not state.response_text:
             # Surface the wall-clock abort with the same shape as the
-            # idle abort so evaluators see a clean error string.
+            # idle abort so evaluators see a clean error string. Uses
+            # stream_elapsed (NOT total duration) so the reported time
+            # matches the actual budget — total `duration` would
+            # include semaphore-wait time which by design isn't
+            # charged against the wall-clock budget.
+            stream_elapsed = time.time() - stream_start_time
             state.response_text = (
                 f"Error: SSE stream exceeded the per-call wall-clock budget of "
                 f"{_format_seconds(per_call_wall_clock_seconds)} "
-                f"({duration:.0f}s elapsed, {event_count} events). "
+                f"({stream_elapsed:.0f}s elapsed, {event_count} events). "
                 "The stream was making progress but too slowly. Aborted to "
                 "free the runner (SC-106138)."
             )

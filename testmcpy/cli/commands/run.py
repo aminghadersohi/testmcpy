@@ -486,15 +486,22 @@ def run(
             # AssistantProvider instance in this process shares the cap.
             # SC-106138: agor harness fan-out can stall the chatbot when
             # too many SSE streams open at once.
-            if max_concurrent_streams is not None:
-                from testmcpy.src.llm_integration import AssistantProvider
+            #
+            # Always call configure_concurrency_limit() (even with None)
+            # so the CLI flag is a true override/reset — otherwise a
+            # prior in-process configuration could leak when run() is
+            # invoked multiple times within the same Python process.
+            from testmcpy.src.llm_integration import AssistantProvider
 
-                AssistantProvider.configure_concurrency_limit(max_concurrent_streams)
-                if verbose:
+            AssistantProvider.configure_concurrency_limit(max_concurrent_streams)
+            if verbose:
+                if max_concurrent_streams:
                     console.print(
                         f"[cyan]Concurrency cap:[/cyan] "
                         f"max {max_concurrent_streams} concurrent SSE streams"
                     )
+                else:
+                    console.print("[cyan]Concurrency cap:[/cyan] unbounded")
 
         if suite_provider and verbose:
             console.print(f"[yellow]Suite-level provider override:[/yellow] {suite_provider}")

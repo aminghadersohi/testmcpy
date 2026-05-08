@@ -2133,6 +2133,72 @@ class AssistantProvider(LLMProvider):
     # (SC-105915). Class-level so subclasses / tests can override.
     SSE_IDLE_ABORT_SECONDS: float = 90.0
 
+    # Hard ceiling on the entire SSE consumption — kicks in even when
+    # bytes ARE flowing (just slowly) so the agor parallel-cycle harness
+    # never sees a child stay alive past this. Distinct from the idle
+    # abort: idle = "no progress at all"; per-call wall-clock = "any
+    # progress, but too slow overall". Observed in c28-c32 against the
+    # staging chatbot (SC-106138). Class-level so callers can override.
+    PER_CALL_WALL_CLOCK_SECONDS: float = 180.0
+
+    # Emit a structured heartbeat log line every N seconds while the SSE
+    # stream is open. Lets a parent harness distinguish "child is still
+    # streaming" from "child is wedged" without parsing every event.
+    HEARTBEAT_SECONDS: float = 10.0
+
+    # Optional process-wide cap on concurrent SSE streams. Set via
+    # ``--max-concurrent-streams`` on ``testmcpy run``. ``None`` =
+    # unbounded. Stored as a class attribute (not instance) so multiple
+    # AssistantProvider instances inside the same process share it.
+    #
+    # The Semaphore itself is lazily allocated inside the event loop on
+    # first use — `asyncio.Semaphore` binds to the running loop, so
+    # creating it at sync configuration time would either fail or bind
+    # to the wrong loop.
+    _max_concurrent_streams: int | None = None
+    _stream_semaphore: asyncio.Semaphore | None = None
+    _stream_semaphore_loop: object | None = None  # the loop the sem was bound to
+
+    @classmethod
+    def configure_concurrency_limit(cls, max_streams: int | None) -> None:
+        """Set the process-wide cap on concurrent SSE streams.
+
+        ``None`` (or 0) → unbounded. Positive int → cap. Negative
+        values raise ``ValueError`` (a Semaphore with a negative
+        capacity would crash at acquire time, so reject up front).
+        The class-level ``asyncio.Semaphore`` is created lazily on
+        first use and shared across all AssistantProvider instances
+        in the process. Safe to call multiple times — the semaphore
+        is re-created lazily next time ``_get_stream_semaphore`` is
+        called.
+        """
+        if max_streams is not None and max_streams < 0:
+            raise ValueError(
+                f"max_streams must be a non-negative int or None, "
+                f"got {max_streams!r}. Use 0 or None for unbounded."
+            )
+        if not max_streams:
+            cls._max_concurrent_streams = None
+        else:
+            cls._max_concurrent_streams = max_streams
+        # Drop any existing semaphore so the next acquire rebuilds with
+        # the new limit (and rebinds to the current event loop).
+        cls._stream_semaphore = None
+        cls._stream_semaphore_loop = None
+
+    @classmethod
+    def _get_stream_semaphore(cls) -> asyncio.Semaphore | None:
+        """Return the (lazily-created) class-level Semaphore, or None
+        if no concurrency limit is configured. Rebinds to the running
+        loop if the previously-bound loop is gone (test isolation)."""
+        if not cls._max_concurrent_streams:
+            return None
+        running_loop = asyncio.get_running_loop()
+        if cls._stream_semaphore is None or cls._stream_semaphore_loop is not running_loop:
+            cls._stream_semaphore = asyncio.Semaphore(cls._max_concurrent_streams)
+            cls._stream_semaphore_loop = running_loop
+        return cls._stream_semaphore
+
     def __init__(
         self,
         model: str = "default",
@@ -2257,17 +2323,58 @@ class AssistantProvider(LLMProvider):
 
         log(f"[Assistant] POST {completions_url} (conversation={self._conversation_id})")
 
-        # Idle abort: if the SSE stream emits NO recognized event within
-        # this many seconds, give up. This catches a chatbot backend that
-        # keeps the connection open (so httpx's per-event read timeout
-        # never fires) but stops sending real progress — observed in
-        # eval cycle c29 (SC-105915) where C00_9, C01_9, C02_7 hung
-        # despite the per-test wall-clock added in v0.7.1.
+        # Three layers of timeout protection on the SSE consumption:
+        #   1. SSE_IDLE_ABORT_SECONDS  — fires when no recognized event
+        #      arrives for N seconds (server still sending keepalives
+        #      but no real progress). c29 (SC-105915).
+        #   2. PER_CALL_WALL_CLOCK_SECONDS — fires when total time on
+        #      THIS call exceeds the budget, regardless of progress.
+        #      Catches the slow-but-not-stuck case the agor harness
+        #      hits in c28-c32 (SC-106138) where bytes keep flowing
+        #      but the call takes 5+ minutes.
+        #   3. HEARTBEAT_SECONDS — non-fatal: emits a "still streaming"
+        #      log line every N seconds so a parent harness can tell
+        #      a slow stream from a wedged one.
         sse_idle_abort_seconds = self.SSE_IDLE_ABORT_SECONDS
+        per_call_wall_clock_seconds = self.PER_CALL_WALL_CLOCK_SECONDS
+        heartbeat_seconds = self.HEARTBEAT_SECONDS
         last_event_at = time.time()
+        last_heartbeat_at = time.time()
         idle_aborted = False
+        wall_clock_aborted = False
+        event_count = 0
 
         state = _SSEStreamState()
+        # Optional process-wide concurrency cap. When unset the semaphore
+        # is None and acquisition is a no-op. Held for the entire SSE
+        # consumption so the cap really does limit parallel streams.
+        sem = type(self)._get_stream_semaphore()
+        sem_held = False
+        if sem is not None:
+            sem_wait_start = time.time()
+            await sem.acquire()
+            sem_held = True
+            sem_wait = time.time() - sem_wait_start
+            if sem_wait > 0.5:
+                log(
+                    f"[Assistant] Waited {sem_wait:.1f}s for concurrency-limit "
+                    f"semaphore (max={type(self)._max_concurrent_streams})"
+                )
+            # Reset the per-call wall-clock baseline AFTER we actually
+            # got a slot: time spent waiting for the semaphore should
+            # not consume the SSE budget. start_time stays as-is for
+            # the overall LLMResult.duration; the SSE loop uses
+            # `stream_start_time` from here on.
+            stream_start_time = time.time()
+        else:
+            stream_start_time = start_time
+
+        def _release_sem():
+            nonlocal sem_held
+            if sem is not None and sem_held:
+                sem.release()
+                sem_held = False
+
         try:
             async with self._client.stream(
                 "POST", completions_url, headers=headers, json=payload, timeout=timeout
@@ -2287,32 +2394,62 @@ class AssistantProvider(LLMProvider):
                 # catches the case where the SSE connection stays open
                 # but never sends another byte (real-world c29 hang).
                 line_iter = resp.aiter_lines().__aiter__()
-                budget_str = _format_seconds(sse_idle_abort_seconds)
+                idle_budget_str = _format_seconds(sse_idle_abort_seconds)
+                wall_clock_budget_str = _format_seconds(per_call_wall_clock_seconds)
                 while True:
-                    elapsed = time.time() - last_event_at
-                    remaining = sse_idle_abort_seconds - elapsed
-                    if remaining <= 0:
+                    now = time.time()
+                    # Per-call wall-clock check: total time spent on the
+                    # SSE stream itself (NOT counting time waiting for
+                    # the concurrency-limit semaphore) exceeded budget.
+                    total_elapsed = now - stream_start_time
+                    if total_elapsed >= per_call_wall_clock_seconds:
+                        log(
+                            f"[Assistant] SSE wall-clock abort: per-call budget "
+                            f"{wall_clock_budget_str} exceeded "
+                            f"({total_elapsed:.0f}s, {event_count} events) — "
+                            "closing stream"
+                        )
+                        wall_clock_aborted = True
+                        break
+                    # Idle check: no recognized event for too long.
+                    elapsed_since_event = now - last_event_at
+                    idle_remaining = sse_idle_abort_seconds - elapsed_since_event
+                    if idle_remaining <= 0:
                         log(
                             f"[Assistant] SSE idle abort: no recognized event for "
-                            f"{budget_str} — closing stream"
+                            f"{idle_budget_str} — closing stream"
                         )
                         idle_aborted = True
                         break
+                    # Heartbeat: non-fatal "still alive" log.
+                    if now - last_heartbeat_at >= heartbeat_seconds:
+                        log(
+                            f"[Assistant] still streaming … "
+                            f"{total_elapsed:.0f}s elapsed, "
+                            f"{event_count} events, "
+                            f"{elapsed_since_event:.0f}s since last event"
+                        )
+                        last_heartbeat_at = now
+                    # Per-line read budget = min(idle_remaining, time-to-next-heartbeat,
+                    # wall-clock-remaining). Smaller waits let the heartbeat /
+                    # wall-clock checks fire on schedule even when no bytes arrive.
+                    wall_clock_remaining = per_call_wall_clock_seconds - total_elapsed
+                    next_heartbeat_in = heartbeat_seconds - (now - last_heartbeat_at)
+                    read_timeout = max(
+                        0.05,
+                        min(idle_remaining, wall_clock_remaining, next_heartbeat_in),
+                    )
                     try:
-                        raw_line = await asyncio.wait_for(line_iter.__anext__(), timeout=remaining)
+                        raw_line = await asyncio.wait_for(
+                            line_iter.__anext__(), timeout=read_timeout
+                        )
                     except StopAsyncIteration:
                         break
                     except asyncio.TimeoutError:
-                        # Budget is measured since the last *recognized* event.
-                        # Unrecognized noise (keepalives, malformed events) does
-                        # NOT reset last_event_at, so this fires correctly even
-                        # if bytes are arriving without real progress.
-                        log(
-                            f"[Assistant] SSE idle abort: no recognized event for "
-                            f"{budget_str} — closing stream"
-                        )
-                        idle_aborted = True
-                        break
+                        # Read deadline expired — loop top will re-check
+                        # idle / wall-clock / heartbeat. Most likely the
+                        # heartbeat tick.
+                        continue
 
                     line = raw_line.strip()
                     if not line:
@@ -2340,10 +2477,12 @@ class AssistantProvider(LLMProvider):
                     self._handle_sse_event(current_event, data, state, log)
                     # A real event arrived — reset the idle timer.
                     last_event_at = time.time()
+                    event_count += 1
 
         except httpx.TimeoutException:
             duration = time.time() - start_time
             log(f"[Assistant] TIMEOUT after {duration:.1f}s")
+            _release_sem()
             return LLMResult(
                 response=f"Error: Assistant request timed out after {timeout}s",
                 tool_calls=state.tool_calls,
@@ -2353,16 +2492,37 @@ class AssistantProvider(LLMProvider):
         except (httpx.HTTPStatusError, httpx.ConnectError, RuntimeError) as e:
             duration = time.time() - start_time
             log(f"[Assistant] Request failed: {e}")
+            _release_sem()
             return LLMResult(
                 response=f"Error: {e}",
                 tool_calls=state.tool_calls,
                 duration=duration,
                 logs=logs,
             )
+        finally:
+            # Always release on the success path. ``_release_sem`` is
+            # idempotent (sem_held flag) so it's safe to also call on
+            # the except branches above.
+            _release_sem()
 
         duration = time.time() - start_time
         if state.got_error and not state.response_text:
             state.response_text = f"Error: {state.error_message}"
+        elif wall_clock_aborted and not state.response_text:
+            # Surface the wall-clock abort with the same shape as the
+            # idle abort so evaluators see a clean error string. Uses
+            # stream_elapsed (NOT total duration) so the reported time
+            # matches the actual budget — total `duration` would
+            # include semaphore-wait time which by design isn't
+            # charged against the wall-clock budget.
+            stream_elapsed = time.time() - stream_start_time
+            state.response_text = (
+                f"Error: SSE stream exceeded the per-call wall-clock budget of "
+                f"{_format_seconds(per_call_wall_clock_seconds)} "
+                f"({stream_elapsed:.0f}s elapsed, {event_count} events). "
+                "The stream was making progress but too slowly. Aborted to "
+                "free the runner (SC-106138)."
+            )
         elif idle_aborted and not state.response_text:
             # Surface the idle abort cleanly so evaluators don't see an
             # empty response with no explanation.
@@ -2373,12 +2533,17 @@ class AssistantProvider(LLMProvider):
                 "open but stopped emitting progress. Aborted to free the runner."
             )
 
+        abort_marker = ""
+        if idle_aborted:
+            abort_marker = " [SSE idle aborted]"
+        elif wall_clock_aborted:
+            abort_marker = " [SSE wall-clock aborted]"
         log(
             f"[Assistant] Done: {len(state.response_text)} chars, "
             f"{len(state.tool_calls)} tool calls, {state.token_event_count} tokens, "
             f"final={'yes' if state.got_final else 'no'}, "
             f"error={'yes' if state.got_error else 'no'}, "
-            f"{duration:.2f}s" + (" [SSE idle aborted]" if idle_aborted else "")
+            f"{duration:.2f}s" + abort_marker
         )
 
         return LLMResult(

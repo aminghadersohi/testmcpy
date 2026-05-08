@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.3] - 2026-05-08
+
+### Added
+- **Per-call wall-clock guard** in `AssistantProvider.generate_with_tools()`.
+  `PER_CALL_WALL_CLOCK_SECONDS` (default 180s) is a hard ceiling on
+  the SSE consumption — it fires even when bytes ARE flowing, just
+  slowly. Distinct from the existing idle-abort: idle = "no progress
+  at all", wall-clock = "any progress, but too slow overall". Time
+  spent waiting for the concurrency-limit semaphore (see below) is
+  NOT counted against this budget. The agor parallel-cycle harness
+  was hitting this case across c28-c32 (SC-106138) where bytes kept
+  flowing but the call took 5+ minutes. Wall-clock-aborted calls
+  surface a clean error string in `LLMResult.response` and tag the
+  Done log with `[SSE wall-clock aborted]`.
+- **SSE heartbeat log lines** every `HEARTBEAT_SECONDS` (default 10s)
+  while the stream is open: `[Assistant] still streaming … 30s
+  elapsed, 12 events, 5s since last event`. Lets a parent harness
+  distinguish a slow-but-progressing child from a wedged one without
+  parsing every SSE event.
+- **`--max-concurrent-streams` CLI flag** on `testmcpy run` for the
+  assistant/chatbot provider. Class-level `asyncio.Semaphore` capped
+  at the configured limit; held for the entire SSE consumption so
+  the cap really does limit parallel streams. Lazy-allocated inside
+  the running event loop on first use (so the semaphore binds
+  correctly under pytest-asyncio and other multi-loop setups). Use
+  this when a parent harness fans out many testmcpy children at
+  once and the chatbot endpoint stalls under load.
+- Unit tests in `unit_tests/test_assistant_sse_concurrency_and_walls.py`:
+  per-call wall-clock fires against a chatty stream, heartbeats appear,
+  semaphore serialises concurrent streams, semaphore is unbounded
+  when unset, configure idempotency.
+
+### Changed
+- `AssistantProvider.generate_with_tools()` now distinguishes
+  "request start" (`start_time`, used for `LLMResult.duration`) from
+  "stream consumption start" (`stream_start_time`, used for the
+  per-call wall-clock budget). When a semaphore wait happens, only
+  the request start moves earlier — the stream budget is preserved.
+
 ## [0.7.2] - 2026-05-06
 
 ### Added

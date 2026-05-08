@@ -296,6 +296,18 @@ def run(
             "provider (default: provider class's _DEFAULT_COMPLETIONS_PATH)"
         ),
     ),
+    max_concurrent_streams: Optional[int] = typer.Option(
+        None,
+        "--max-concurrent-streams",
+        help=(
+            "Process-wide cap on concurrent SSE streams for the "
+            "assistant/chatbot provider. Useful when a parent harness "
+            "spawns many testmcpy children at once and the chatbot "
+            "endpoint stalls under load. None / 0 = unbounded (default). "
+            "Limit applies across all AssistantProvider instances in the "
+            "process. (SC-106138)"
+        ),
+    ),
 ):
     """
     Run test cases against MCP service.
@@ -469,6 +481,20 @@ def run(
             for key, value in cli_assistant_kwargs.items():
                 if value is not None:
                     effective_provider_config[key] = value
+
+            # Apply the concurrency limit at the class level so every
+            # AssistantProvider instance in this process shares the cap.
+            # SC-106138: agor harness fan-out can stall the chatbot when
+            # too many SSE streams open at once.
+            if max_concurrent_streams is not None:
+                from testmcpy.src.llm_integration import AssistantProvider
+
+                AssistantProvider.configure_concurrency_limit(max_concurrent_streams)
+                if verbose:
+                    console.print(
+                        f"[cyan]Concurrency cap:[/cyan] "
+                        f"max {max_concurrent_streams} concurrent SSE streams"
+                    )
 
         if suite_provider and verbose:
             console.print(f"[yellow]Suite-level provider override:[/yellow] {suite_provider}")

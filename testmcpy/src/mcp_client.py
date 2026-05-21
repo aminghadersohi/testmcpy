@@ -874,6 +874,14 @@ class MCPClient:
         except Exception as e:
             raise MCPError(f"Failed to list tools: {e}")
 
+    # Hard cap on total bytes collected from search_tools responses during
+    # gateway discovery. Some MCP servers return very large tool catalogs
+    # (full schemas inline) and accumulating every broad-query response can
+    # blow out memory or downstream context budgets. ~200k chars is enough
+    # to discover a few hundred tools while staying well under any sane
+    # context limit. (SC-107284 / c33 issue 4)
+    _GATEWAY_DISCOVERY_MAX_CHARS = 200_000
+
     async def _expand_gateway_tools(self, timeout: float = 30.0) -> list["MCPTool"]:
         """Expand tools via the search_tools gateway (FastMCP 3.x pattern).
 
@@ -896,9 +904,12 @@ class MCPClient:
             "list_charts generate_dashboard get_chart_data",
             "list_databases get_database_info generate_chart",
         ]
-        all_content = []
+        all_content: list[str] = []
+        total_chars = 0
 
         for q in broad_queries:
+            if total_chars >= self._GATEWAY_DISCOVERY_MAX_CHARS:
+                break
             try:
                 result = await asyncio.wait_for(
                     self.client.call_tool("search_tools", {"query": q}),
@@ -913,7 +924,14 @@ class MCPClient:
                     elif isinstance(result.content, str):
                         content = result.content
                 if content:
+                    # Truncate this individual response if needed so we stay
+                    # under the global cap even if a single search returns a
+                    # huge blob.
+                    remaining = self._GATEWAY_DISCOVERY_MAX_CHARS - total_chars
+                    if len(content) > remaining:
+                        content = content[:remaining]
                     all_content.append(content)
+                    total_chars += len(content)
             except (asyncio.TimeoutError, TypeError, ValueError):
                 continue
 
@@ -955,6 +973,8 @@ class MCPClient:
                 second_pass_queries.append(batch)
 
             for q in second_pass_queries[:5]:  # Limit to 5 extra queries
+                if total_chars >= self._GATEWAY_DISCOVERY_MAX_CHARS:
+                    break
                 try:
                     result = await asyncio.wait_for(
                         self.client.call_tool("search_tools", {"query": q}),
@@ -966,6 +986,10 @@ class MCPClient:
                             if hasattr(item, "text"):
                                 content += item.text
                     if content:
+                        remaining = self._GATEWAY_DISCOVERY_MAX_CHARS - total_chars
+                        if len(content) > remaining:
+                            content = content[:remaining]
+                        total_chars += len(content)
                         import json as _json2
 
                         try:

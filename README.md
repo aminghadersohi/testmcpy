@@ -16,7 +16,7 @@
   <a href="https://pypi.org/project/testmcpy/"><img src="https://img.shields.io/badge/pypi-testmcpy-blue" alt="PyPI"></a>
 </p>
 
-![MCP Explorer](https://raw.githubusercontent.com/preset-io/testmcpy/main/context/images/web-ui-explorer.png)
+![MCP Explorer — tools, resources, and prompts from a connected MCP service](https://raw.githubusercontent.com/preset-io/testmcpy/main/docs/screenshots/mcp-explorer.png)
 
 ---
 
@@ -61,7 +61,7 @@ Test with **Claude**, **GPT-4**, **Llama**, and other models. Works with both pa
 | Ollama | Llama, Mistral, etc. (local) | Free, local execution, no API costs |
 | Claude SDK | claude-cli, claude-code | Subprocess-based, full MCP support |
 
-![LLM Profiles](https://raw.githubusercontent.com/preset-io/testmcpy/main/context/images/model-selector.png)
+![LLM Profiles — manage Anthropic, OpenAI, Ollama and Claude SDK provider configurations](https://raw.githubusercontent.com/preset-io/testmcpy/main/docs/screenshots/llm-profiles.png)
 
 ### Built-in Evaluators
 
@@ -84,7 +84,7 @@ Comprehensive validation out of the box. Each evaluator returns a score from 0.0
 
 **Extensible:** Extend `BaseEvaluator` and implement `evaluate(context) -> EvalResult` to create custom evaluators for your domain.
 
-![Test Results](https://raw.githubusercontent.com/preset-io/testmcpy/main/context/images/test-results.png)
+![Reports — combined view of every test run, evaluator scores, and cost analysis](https://raw.githubusercontent.com/preset-io/testmcpy/main/docs/screenshots/reports.png)
 
 ### YAML Test Definitions
 
@@ -130,32 +130,13 @@ tests:
       duration: 60
 ```
 
-### Interactive TUI Dashboard
-
-Beautiful terminal interface for MCP testing — no browser required:
-
-```bash
-testmcpy dash                    # Launch interactive dashboard
-testmcpy dash --auto-refresh     # Live connection monitoring
-testmcpy dash --profile prod     # Use specific MCP profile
-```
-
-**TUI Features:**
-- Real-time MCP connection status
-- Interactive tool exploration
-- Live test execution with progress
-- Configuration editor
-- Global search across tools, tests, and settings
-- Help system with keyboard shortcuts (press `?`)
-- Multiple themes (default, light, high contrast)
-
 ### CLI & Web UI
 
 - **Rich terminal UI**: Progress bars, colored output, formatted tables
 - **Optional web interface**: Visual tool explorer, interactive chat, analytics dashboards
 - **Real-time feedback**: Watch tests execute with live updates via WebSocket
 
-![Chat Interface](https://raw.githubusercontent.com/preset-io/testmcpy/main/context/images/cli-interface.png)
+![Chat Interface — interactive chat against your MCP service from the browser](https://raw.githubusercontent.com/preset-io/testmcpy/main/docs/screenshots/chat.png)
 
 ## Architecture
 
@@ -324,13 +305,20 @@ testmcpy run tests/ --model claude-haiku-4-5
 | `testmcpy chat` | Interactive chat with MCP tools |
 | `testmcpy compare` | Multi-model comparison |
 | **Advanced** | |
-| `testmcpy baseline` | Save and compare against baselines |
+| `testmcpy baseline-save` | Save current test results as a named baseline |
+| `testmcpy baseline-compare` | Compare a run against a saved baseline |
+| `testmcpy baseline-list` | List saved baselines |
 | `testmcpy mutate` | Prompt mutation testing |
 | `testmcpy metamorphic` | Metamorphic testing |
+| `testmcpy generate` | AI-assisted test generation |
+| `testmcpy smoke-test` | Quick smoke test against an MCP service |
+| `testmcpy coverage` | Tool coverage report for a test suite |
+| `testmcpy multi-env` | Run the same suite against multiple MCP profiles |
+| `testmcpy export-db` | Export the SQLite results database |
 | **UI** | |
-| `testmcpy serve` | Start web UI server (port 8000) |
-| `testmcpy dash` | Launch terminal UI dashboard |
+| `testmcpy serve` | Start web UI server (default port 8000) |
 | `testmcpy config-cmd` | View current configuration |
+| `testmcpy config-mcp` | Print MCP client snippets for Claude Desktop / Code |
 
 **Common options:** `--profile`, `--llm-profile`, `--model`, `--provider`, `--timeout`, `--verbose`, `--output`
 
@@ -363,9 +351,9 @@ Environment variables are also supported: `MCP_AUTH_TOKEN`, `MCP_JWT_URL`, `MCP_
 
 ## Web Interface
 
-Optional React-based UI with 15+ pages for visual testing and analytics:
+Optional React-based UI with 14 pages for visual testing and analytics:
 
-![Test Manager](https://raw.githubusercontent.com/preset-io/testmcpy/main/context/images/web-ui-dashboard.png)
+![Test Manager — browse YAML suites, kick off runs, watch results stream in](https://raw.githubusercontent.com/preset-io/testmcpy/main/docs/screenshots/test-manager.png)
 
 ```bash
 # Install with UI support
@@ -392,7 +380,20 @@ testmcpy serve
 | `/mcp-profiles` | MCP Profiles | MCP server configuration |
 | `/llm-profiles` | LLM Profiles | LLM provider configuration |
 
-Access at `http://localhost:8000`
+Access at `http://localhost:8000`.
+
+#### More screenshots
+
+<table>
+  <tr>
+    <td align="center"><img src="https://raw.githubusercontent.com/preset-io/testmcpy/main/docs/screenshots/generation-history.png" alt="Generation History page"><br><sub>Generation History — AI-assisted test generation runs</sub></td>
+    <td align="center"><img src="https://raw.githubusercontent.com/preset-io/testmcpy/main/docs/screenshots/auth-debugger.png" alt="Auth Debugger page"><br><sub>Auth Debugger — step through OAuth / JWT / Bearer flows</sub></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="https://raw.githubusercontent.com/preset-io/testmcpy/main/docs/screenshots/mcp-profiles.png" alt="MCP Profiles page"><br><sub>MCP Profiles — manage MCP service connections</sub></td>
+    <td align="center"><img src="https://raw.githubusercontent.com/preset-io/testmcpy/main/docs/screenshots/config.png" alt="Configuration page"><br><sub>Configuration — current settings and client snippets</sub></td>
+  </tr>
+</table>
 
 ## LLM Providers
 

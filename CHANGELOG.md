@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.4] - 2026-05-21
+
+### Added
+- **Progressive checkpoint saves** in `testmcpy run`. After every
+  test completes, partial results are written to
+  `tests/.results/.checkpoints/<session_id>.json` (atomic
+  write-then-replace). If the run is killed mid-stream (OOM, ctrl-C,
+  parent harness timeout), the harness can still recover what
+  finished without rerunning the suite. Surfaced in eval cycle c33
+  (SC-107284) where long suites died mid-run with no recoverable
+  state.
+- **`.done` sentinel file** written immediately after the run summary
+  prints, before optional post-processing (DB save, report
+  generation). The sentinel lets a parent harness treat the run as
+  finished even if a later step hangs or fails. Sentinel path:
+  `tests/.results/.checkpoints/<session_id>.done`.
+
+### Changed
+- `MCPClient._expand_gateway_tools()` now caps total chars collected
+  across all `search_tools` discovery queries at 200k. Prevents
+  memory / context blowup against MCP servers that inline very large
+  tool schemas in their gateway responses. Truncation is
+  per-response and the loop short-circuits once the cap is reached.
+
 ## [0.7.3] - 2026-05-08
 
 ### Added

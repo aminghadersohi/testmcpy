@@ -540,6 +540,47 @@ def run(
 
         # Run tests with progress output
         results = []
+
+        # Progressive checkpoint: dump partial results to a JSON file under
+        # tests/.results/.checkpoints/ after every test completes, so an
+        # outer harness (or this process after a crash) can recover what
+        # finished even if the run is killed mid-stream. The matching
+        # <session_id>.done sentinel is written immediately after the run
+        # summary prints, before optional post-processing (DB save, report
+        # generation) — so harnesses see "done" as soon as the test loop
+        # itself finishes, even if a later non-test step hangs or fails.
+        # (SC-107284 / c33 issues 3 & 6)
+        checkpoint_dir = Path("tests/.results/.checkpoints")
+        checkpoint_path: Optional[Path] = None
+        done_path: Optional[Path] = None
+        try:
+            checkpoint_dir.mkdir(parents=True, exist_ok=True)
+            checkpoint_path = checkpoint_dir / f"{session_id}.json"
+            done_path = checkpoint_dir / f"{session_id}.done"
+        except OSError as e:
+            console.print(f"[dim]Note: Could not create checkpoint dir: {e}[/dim]")
+
+        def _write_checkpoint(completed: list, total: int) -> None:
+            """Atomically write current results to the checkpoint file."""
+            if checkpoint_path is None:
+                return
+            payload = {
+                "session_id": session_id,
+                "test_file": str(test_path),
+                "provider": effective_provider,
+                "model": effective_model,
+                "mcp_profile": profile or "default",
+                "completed": len(completed),
+                "total": total,
+                "results": [r.to_dict() for r in completed],
+            }
+            try:
+                tmp = checkpoint_path.with_suffix(".json.tmp")
+                tmp.write_text(json.dumps(payload, indent=2, default=str))
+                tmp.replace(checkpoint_path)
+            except OSError as e:
+                console.print(f"[dim]Note: Could not write checkpoint: {e}[/dim]")
+
         # Only initialize LLM provider if there are non-auth-only tests
         has_non_auth_only = any(not tc.is_auth_only for tc in test_cases)
         if has_non_auth_only:
@@ -589,6 +630,7 @@ def run(
                     _status.stop()
 
             results.append(result)
+            _write_checkpoint(results, len(test_cases))
 
             # Show immediate result
             if result.passed:
@@ -663,6 +705,24 @@ def run(
             summary_parts.append(f"${total_cost:.4f}")
 
         console.print(f"\n[bold]Summary:[/bold] {' | '.join(summary_parts)}")
+
+        # Drop a .done sentinel immediately after the summary, before any
+        # optional post-processing (DB save, report gen) so outer harnesses
+        # can treat the run as finished even if a later step fails or hangs.
+        if done_path is not None:
+            try:
+                done_path.write_text(
+                    json.dumps(
+                        {
+                            "session_id": session_id,
+                            "total": len(results),
+                            "passed": total_passed,
+                            "failed": len(results) - total_passed,
+                        }
+                    )
+                )
+            except OSError as e:
+                console.print(f"[dim]Note: Could not write .done marker: {e}[/dim]")
 
         # Always auto-save results to tests/.results/ so the UI can see them
         try:

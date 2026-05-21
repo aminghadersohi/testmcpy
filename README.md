@@ -16,7 +16,7 @@
   <a href="https://pypi.org/project/testmcpy/"><img src="https://img.shields.io/badge/pypi-testmcpy-blue" alt="PyPI"></a>
 </p>
 
-![MCP Explorer — tools, resources, and prompts from a connected MCP service](docs/screenshots/mcp-explorer.png)
+![MCP Explorer — tools, resources, and prompts from a connected MCP service](https://raw.githubusercontent.com/preset-io/testmcpy/main/docs/screenshots/mcp-explorer.png)
 
 ---
 
@@ -61,7 +61,7 @@ Test with **Claude**, **GPT-4**, **Llama**, and other models. Works with both pa
 | Ollama | Llama, Mistral, etc. (local) | Free, local execution, no API costs |
 | Claude SDK | claude-cli, claude-code | Subprocess-based, full MCP support |
 
-![LLM Profiles — manage Anthropic, OpenAI, Ollama and Claude SDK provider configurations](docs/screenshots/llm-profiles.png)
+![LLM Profiles — manage Anthropic, OpenAI, Ollama and Claude SDK provider configurations](https://raw.githubusercontent.com/preset-io/testmcpy/main/docs/screenshots/llm-profiles.png)
 
 ### Built-in Evaluators
 
@@ -84,7 +84,7 @@ Comprehensive validation out of the box. Each evaluator returns a score from 0.0
 
 **Extensible:** Extend `BaseEvaluator` and implement `evaluate(context) -> EvalResult` to create custom evaluators for your domain.
 
-![Reports — combined view of every test run, evaluator scores, and cost analysis](docs/screenshots/reports.png)
+![Reports — combined view of every test run, evaluator scores, and cost analysis](https://raw.githubusercontent.com/preset-io/testmcpy/main/docs/screenshots/reports.png)
 
 ### YAML Test Definitions
 
@@ -136,7 +136,7 @@ tests:
 - **Optional web interface**: Visual tool explorer, interactive chat, analytics dashboards
 - **Real-time feedback**: Watch tests execute with live updates via WebSocket
 
-![Chat Interface — interactive chat against your MCP service from the browser](docs/screenshots/chat.png)
+![Chat Interface — interactive chat against your MCP service from the browser](https://raw.githubusercontent.com/preset-io/testmcpy/main/docs/screenshots/chat.png)
 
 ## Architecture
 
@@ -353,7 +353,7 @@ Environment variables are also supported: `MCP_AUTH_TOKEN`, `MCP_JWT_URL`, `MCP_
 
 Optional React-based UI with 14 pages for visual testing and analytics:
 
-![Test Manager — browse YAML suites, kick off runs, watch results stream in](docs/screenshots/test-manager.png)
+![Test Manager — browse YAML suites, kick off runs, watch results stream in](https://raw.githubusercontent.com/preset-io/testmcpy/main/docs/screenshots/test-manager.png)
 
 ```bash
 # Install with UI support
@@ -386,12 +386,12 @@ Access at `http://localhost:8000`.
 
 <table>
   <tr>
-    <td align="center"><img src="docs/screenshots/generation-history.png" alt="Generation History page"><br><sub>Generation History — AI-assisted test generation runs</sub></td>
-    <td align="center"><img src="docs/screenshots/auth-debugger.png" alt="Auth Debugger page"><br><sub>Auth Debugger — step through OAuth / JWT / Bearer flows</sub></td>
+    <td align="center"><img src="https://raw.githubusercontent.com/preset-io/testmcpy/main/docs/screenshots/generation-history.png" alt="Generation History page"><br><sub>Generation History — AI-assisted test generation runs</sub></td>
+    <td align="center"><img src="https://raw.githubusercontent.com/preset-io/testmcpy/main/docs/screenshots/auth-debugger.png" alt="Auth Debugger page"><br><sub>Auth Debugger — step through OAuth / JWT / Bearer flows</sub></td>
   </tr>
   <tr>
-    <td align="center"><img src="docs/screenshots/mcp-profiles.png" alt="MCP Profiles page"><br><sub>MCP Profiles — manage MCP service connections</sub></td>
-    <td align="center"><img src="docs/screenshots/config.png" alt="Configuration page"><br><sub>Configuration — current settings and client snippets</sub></td>
+    <td align="center"><img src="https://raw.githubusercontent.com/preset-io/testmcpy/main/docs/screenshots/mcp-profiles.png" alt="MCP Profiles page"><br><sub>MCP Profiles — manage MCP service connections</sub></td>
+    <td align="center"><img src="https://raw.githubusercontent.com/preset-io/testmcpy/main/docs/screenshots/config.png" alt="Configuration page"><br><sub>Configuration — current settings and client snippets</sub></td>
   </tr>
 </table>
 

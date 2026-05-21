@@ -874,12 +874,14 @@ class MCPClient:
         except Exception as e:
             raise MCPError(f"Failed to list tools: {e}")
 
-    # Hard cap on total bytes collected from search_tools responses during
-    # gateway discovery. Some MCP servers return very large tool catalogs
-    # (full schemas inline) and accumulating every broad-query response can
-    # blow out memory or downstream context budgets. ~200k chars is enough
-    # to discover a few hundred tools while staying well under any sane
-    # context limit. (SC-107284 / c33 issue 4)
+    # Hard cap on total characters collected from search_tools responses
+    # during gateway discovery. Some MCP servers return very large tool
+    # catalogs (full schemas inline) and accumulating every broad-query
+    # response can blow out memory or downstream context budgets. 200k
+    # chars is enough to discover a few hundred tools while staying well
+    # under any sane context limit. The cap is measured in chars (Python
+    # str length) — not bytes — to match how the JSON response is held in
+    # memory before parsing. (SC-107284 / c33 issue 4)
     _GATEWAY_DISCOVERY_MAX_CHARS = 200_000
 
     async def _expand_gateway_tools(self, timeout: float = 30.0) -> list["MCPTool"]:
@@ -924,12 +926,15 @@ class MCPClient:
                     elif isinstance(result.content, str):
                         content = result.content
                 if content:
-                    # Truncate this individual response if needed so we stay
-                    # under the global cap even if a single search returns a
-                    # huge blob.
-                    remaining = self._GATEWAY_DISCOVERY_MAX_CHARS - total_chars
-                    if len(content) > remaining:
-                        content = content[:remaining]
+                    # Don't truncate mid-string — search_tools returns JSON
+                    # and a mid-character slice would corrupt it, causing the
+                    # downstream json.loads() to fail and discarding the
+                    # whole response (including any tools we could have
+                    # discovered from it). Skip oversize responses entirely
+                    # instead; the per-query early-exit above bounds the
+                    # worst case to roughly one response past the cap.
+                    if total_chars + len(content) > self._GATEWAY_DISCOVERY_MAX_CHARS:
+                        continue
                     all_content.append(content)
                     total_chars += len(content)
             except (asyncio.TimeoutError, TypeError, ValueError):
@@ -986,9 +991,10 @@ class MCPClient:
                             if hasattr(item, "text"):
                                 content += item.text
                     if content:
-                        remaining = self._GATEWAY_DISCOVERY_MAX_CHARS - total_chars
-                        if len(content) > remaining:
-                            content = content[:remaining]
+                        # Same reasoning as the first pass: skip oversize
+                        # responses rather than truncating mid-JSON.
+                        if total_chars + len(content) > self._GATEWAY_DISCOVERY_MAX_CHARS:
+                            continue
                         total_chars += len(content)
                         import json as _json2
 

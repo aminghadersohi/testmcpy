@@ -545,7 +545,10 @@ def run(
         # tests/.results/.checkpoints/ after every test completes, so an
         # outer harness (or this process after a crash) can recover what
         # finished even if the run is killed mid-stream. The matching
-        # <session_id>.done sentinel is written at the very end of the run.
+        # <session_id>.done sentinel is written immediately after the run
+        # summary prints, before optional post-processing (DB save, report
+        # generation) — so harnesses see "done" as soon as the test loop
+        # itself finishes, even if a later non-test step hangs or fails.
         # (SC-107284 / c33 issues 3 & 6)
         checkpoint_dir = Path("tests/.results/.checkpoints")
         checkpoint_path: Optional[Path] = None

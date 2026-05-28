@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.5] - 2026-05-28
+
+### Fixed
+- **`ClaudeSDKProvider` system prompt**: removed "search/discover tools if
+  needed" guidance that caused `claude-sonnet-4-6` to call `search_tools`
+  before every tool execution. On PROD the gateway returns a 107k-char
+  response that exhausts the session context. System prompt now explicitly
+  bans `search_tools` and any `authenticate` tool call. Fixes the chronic
+  file-14 NOT COMPLETED, ghost-authenticate on file-07 (sc-106500), and
+  widespread `was_tool_called` failures seen in eval cycles c39/c40.
+- **Default model** updated from retired `claude-sonnet-4-20250514` to
+  `claude-sonnet-4-6` in `MCPClientRunner`, `AnthropicDirectRunner`, and
+  `LLMJudge`. The old model ID is retained in the registry but marked
+  `is_deprecated=True`.
+
 ## [0.7.4] - 2026-05-21
 
 ### Added

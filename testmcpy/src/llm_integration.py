@@ -1697,15 +1697,17 @@ class ClaudeSDKProvider(LLMProvider):
                 "You are a test executor. Your ONLY job is to call the MCP tools provided "
                 "to fulfill the user's request, then report the results.\n\n"
                 "IMPORTANT RULES:\n"
-                "1. Use ONLY the MCP server tools (call_tool, search_tools, health_check, "
+                "1. Use ONLY the MCP server tools (call_tool, health_check, "
                 "get_instance_info). Do NOT use any Claude Code built-in tools.\n"
                 "2. The MCP server uses a gateway pattern: real tools like list_dashboards, "
                 "get_chart_info, etc. are accessed via call_tool(name='tool_name', arguments={...}).\n"
                 "3. For simple tools like health_check and get_instance_info, call them directly.\n"
-                "4. Complete the FULL agentic loop: search/discover tools if needed, call the tool, "
-                "then summarize the results in your final response.\n"
-                "5. Always include the actual data from tool results in your response.\n"
-                "6. Be concise and factual — include key data points from the tool output."
+                "4. Do NOT call search_tools — the tool name is always specified in the request. "
+                "Use call_tool(name='tool_name', arguments={...}) directly without any prior discovery.\n"
+                "5. Do NOT call any authentication, login, or credential tool (e.g. 'authenticate'). "
+                "Skip it and proceed directly to the requested tool.\n"
+                "6. Always include the actual data from tool results in your response.\n"
+                "7. Be concise and factual — include key data points from the tool output."
             )
 
             options = ClaudeAgentOptions(

@@ -1771,8 +1771,11 @@ class ClaudeSDKProvider(LLMProvider):
                             continue
 
                         raw_events.append({"type": msg_type})
-                        # Only log the header for types that have no content block logged below.
-                        if isinstance(message, (RateLimitEvent, ResultMessage)):
+                        # Suppress the generic header for known content-bearing types that
+                        # already log their own descriptive lines (Text:, Tool Call:, etc.).
+                        # Keep it as a fallback for any unknown/future SDK message types so
+                        # they remain visible in verbose output rather than silently dropping.
+                        if not isinstance(message, (AssistantMessage, UserMessage)):
                             log(f"[ClaudeSDK] Message #{message_count}: {msg_type}")
 
                         if isinstance(message, RateLimitEvent):
@@ -1794,9 +1797,11 @@ class ClaudeSDKProvider(LLMProvider):
                                     log(f"[ClaudeSDK] Text: {preview}...")
                                 elif isinstance(block, ThinkingBlock):
                                     thinking_text += block.thinking
-                                    thinking_preview = block.thinking[:100].replace("\n", " ")
+                                    truncated = len(block.thinking) > 100
+                                    preview = repr(block.thinking[:100])
+                                    suffix = "..." if truncated else ""
                                     log(
-                                        f'[ClaudeSDK] Thinking: "{thinking_preview}..."'
+                                        f"[ClaudeSDK] Thinking: {preview}{suffix}"
                                         f" ({len(block.thinking)} chars)"
                                     )
                                 elif isinstance(block, ToolUseBlock):

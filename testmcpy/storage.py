@@ -81,13 +81,17 @@ def _real_tool_name(tool_use: dict) -> str:
     """Extract the logical tool name from a tool_use dict.
 
     Handles the gateway pattern where all calls go through call_tool and the
-    actual name lives in arguments.name, as well as direct MCP calls where the
-    name is the suffix after the last '__'.
+    actual name lives in arguments.name (or arguments.tool_name for alternate
+    payloads), as well as direct MCP calls where the name is the suffix after
+    the last '__'.  Also falls back to the top-level tool_name key used by
+    some older/alternate payload shapes.
     """
-    if tool_use.get("name", "").endswith("call_tool"):
-        return tool_use.get("arguments", {}).get("name", "call_tool")
-    name = tool_use.get("name", "")
-    return name.split("__")[-1] if "__" in name else name
+    outer = tool_use.get("name") or tool_use.get("tool_name", "")
+    if outer.endswith("call_tool"):
+        args = tool_use.get("arguments", {})
+        inner = args.get("name") or args.get("tool_name", "call_tool")
+        return inner
+    return outer.split("__")[-1] if "__" in outer else outer
 
 
 class TestStorage:
@@ -757,7 +761,7 @@ class TestStorage:
                 passed=passed,
                 error=error,
                 cost_usd=cost_usd,
-                tool_call_counts=tool_call_counts or None,
+                tool_call_counts=tool_call_counts,
                 false_positive_rate=false_positive_rate,
                 created_at=datetime.now(timezone.utc),
             )

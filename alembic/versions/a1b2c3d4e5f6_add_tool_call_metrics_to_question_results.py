@@ -22,7 +22,12 @@ def upgrade() -> None:
     op.add_column("question_results", sa.Column("tool_call_counts", sa.JSON(), nullable=True))
     op.add_column(
         "question_results",
-        sa.Column("false_positive_rate", sa.Float(), nullable=True, server_default="0.0"),
+        sa.Column(
+            "false_positive_rate",
+            sa.Float(),
+            nullable=False,
+            server_default=sa.text("0.0"),
+        ),
     )
 
 

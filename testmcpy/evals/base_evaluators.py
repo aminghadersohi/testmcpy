@@ -182,7 +182,12 @@ class WasMCPToolCalled(BaseEvaluator):
                 passed=False,
                 score=0.0,
                 reason=f"Tool '{self.tool_name}' was not called",
-                details={"tools_called": [c.get("name") for c in tool_calls]},
+                details={
+                    "tools_called": [c.get("name") for c in tool_calls],
+                    "expected_name": self.tool_name,
+                    "actual_name": None,
+                    "match_type": "none",
+                },
             )
 
         # Any tool call is acceptable

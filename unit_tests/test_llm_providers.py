@@ -42,7 +42,12 @@ class TestProviderFactory:
 
     def test_create_assistant_provider(self):
         provider = create_llm_provider(
-            "assistant", "default", workspace_hash="test", domain="test.com"
+            "assistant",
+            "default",
+            workspace_hash="test",
+            domain="test.com",
+            conversations_path="/api/v1/copilot/conversations",
+            completions_path="/api/v1/copilot/completions",
         )
         assert isinstance(provider, AssistantProvider)
 

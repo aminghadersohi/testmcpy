@@ -121,6 +121,32 @@ function TestResultPanel({ result, initialExpanded = false }) {
             </div>
           )}
 
+          {/* Tool Call Summary */}
+          {result.tool_call_counts && (Object.keys(result.tool_call_counts).length > 1 || (result.false_positive_rate ?? 0) > 0) && (() => {
+            const fpr = result.false_positive_rate ?? 0
+            const totalCalls = Object.values(result.tool_call_counts).reduce((a, b) => a + b, 0)
+            const nonPrimary = Math.min(totalCalls, Math.max(0, Math.round(fpr * totalCalls)))
+            return (
+              <div>
+                <h4 className="text-xs font-semibold text-text-secondary mb-1.5">Tool Call Summary</h4>
+                <div className="p-2 bg-surface rounded-lg border border-border text-xs text-text-secondary space-y-1">
+                  <div>
+                    {Object.entries(result.tool_call_counts)
+                      .sort((a, b) => b[1] - a[1])
+                      .map(([name, count]) => `${name} ×${count}`)
+                      .join(', ')}
+                  </div>
+                  {fpr > 0 && (
+                    <div className="text-warning">
+                      False positive rate: {Math.round(fpr * 100)}%
+                      {' '}({nonPrimary} of {totalCalls} calls were not the primary tool)
+                    </div>
+                  )}
+                </div>
+              </div>
+            )
+          })()}
+
           {/* Evaluator Details */}
           {result.evaluations && result.evaluations.length > 0 && (
             <div>

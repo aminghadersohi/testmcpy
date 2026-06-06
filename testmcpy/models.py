@@ -179,6 +179,8 @@ class QuestionResultModel(Base):
     passed: Mapped[bool] = mapped_column(Boolean, nullable=False)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     cost_usd: Mapped[float] = mapped_column(Float, default=0.0)  # Per-eval cost in USD
+    tool_call_counts: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    false_positive_rate: Mapped[float] = mapped_column(Float, default=0.0)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, default=lambda: datetime.now(timezone.utc)
     )

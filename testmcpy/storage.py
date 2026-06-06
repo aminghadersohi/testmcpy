@@ -675,6 +675,7 @@ class TestStorage:
                 run.total_tokens = sum(
                     (r.tokens_input or 0) + (r.tokens_output or 0) for r in results
                 )
+                run.total_cost = sum(r.cost_usd or 0 for r in results)
                 session.commit()
 
     def save_question_result(

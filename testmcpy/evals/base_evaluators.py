@@ -128,11 +128,17 @@ class WasMCPToolCalled(BaseEvaluator):
             for call in tool_calls:
                 actual_name = call.get("name", "")
                 if _match_tool_name(actual_name, self.tool_name):
+                    match_type = "exact" if actual_name == self.tool_name else "direct_prefixed"
                     return EvalResult(
                         passed=True,
                         score=1.0,
                         reason=f"Tool '{self.tool_name}' was called (actual: '{actual_name}')",
-                        details={"tool_call": call},
+                        details={
+                            "tool_call": call,
+                            "expected_name": self.tool_name,
+                            "actual_name": actual_name,
+                            "match_type": match_type,
+                        },
                     )
 
                 # Check if call_tool/search_tools gateway pattern was used
@@ -148,7 +154,13 @@ class WasMCPToolCalled(BaseEvaluator):
                             passed=True,
                             score=1.0,
                             reason=f"Tool '{self.tool_name}' called via gateway '{actual_name}'",
-                            details={"tool_call": call, "gateway": actual_name},
+                            details={
+                                "tool_call": call,
+                                "gateway": actual_name,
+                                "expected_name": self.tool_name,
+                                "actual_name": inner_name,
+                                "match_type": "gateway",
+                            },
                         )
                     # search_tools passes query that may contain tool name
                     query = args.get("query", "")
@@ -157,7 +169,13 @@ class WasMCPToolCalled(BaseEvaluator):
                             passed=True,
                             score=0.8,
                             reason=f"Tool '{self.tool_name}' searched via '{actual_name}'",
-                            details={"tool_call": call, "gateway": actual_name},
+                            details={
+                                "tool_call": call,
+                                "gateway": actual_name,
+                                "expected_name": self.tool_name,
+                                "actual_name": actual_name,
+                                "match_type": "search",
+                            },
                         )
 
             return EvalResult(

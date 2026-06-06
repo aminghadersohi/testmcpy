@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.13] - 2026-06-06
+
+### Fixed
+- **False positive rate inflated for direct-prefixed MCP calls**: `_real_tool_name()`
+  now normalizes `mcp__ns__health_check` → `health_check` by splitting on `__`,
+  and recurses when the gateway inner name is itself prefixed. The primary tool
+  extracted from `was_tool_called:X` evaluator names is also run through
+  `_real_tool_name` before the false-positive comparison.
+- **`WasMCPToolCalled` eval details**: `EvalResult.details` now always includes
+  `expected_name`, `actual_name`, and `match_type` (`"exact"`, `"direct_prefixed"`,
+  `"gateway"`, or `"search"`) so downstream tooling can distinguish how the match
+  was made.
+- **UI evaluator annotation**: `TestResultPanel` shows a compact annotation below
+  the evaluator reason when `match_type` is `"direct_prefixed"` or `"gateway"`,
+  e.g. `called as: mcp__mcp-service__health_check  [direct prefixed]`.
+
 ## [0.7.12] - 2026-06-06
 
 ### Fixed

@@ -2672,20 +2672,33 @@ class AssistantProvider(LLMProvider):
             state.token_event_count += 1
         elif event == "tool_call":
             # Different chatbot backends use different field names — try all known variants.
+            fn_dict = data.get("function") if isinstance(data.get("function"), dict) else {}
             tool_name = (
                 data.get("tool_name")
                 or data.get("name")
                 or data.get("function_name")
-                or (data.get("function") or {}).get("name")
+                # Nested dict: {"function": {"name": ...}}
+                or fn_dict.get("name")
+                # Flattened dotted key: {"function.name": ...}
+                or data.get("function.name")
                 or ""
             )
-            tool_args = (
+            raw_args = (
                 data.get("input")
                 or data.get("arguments")
                 or data.get("parameters")
-                or (data.get("function") or {}).get("arguments")
+                or fn_dict.get("arguments")
+                # Flattened dotted key
+                or data.get("function.arguments")
                 or {}
             )
+            # Some backends serialise arguments as a JSON string rather than a dict.
+            if isinstance(raw_args, str):
+                try:
+                    raw_args = json.loads(raw_args)
+                except (json.JSONDecodeError, ValueError):
+                    raw_args = {}
+            tool_args: dict = raw_args if isinstance(raw_args, dict) else {}
             tool_id = data.get("tool_call_id") or data.get("id", "")
             tc = {"id": tool_id, "name": tool_name, "arguments": tool_args}
             state.tool_calls.append(tc)

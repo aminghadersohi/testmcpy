@@ -243,6 +243,7 @@ class TestRunner:
         hide_tool_output: bool = False,
         log_callback=None,
         provider_config: dict[str, Any] | None = None,
+        quiet_test_announcement: bool = False,
     ):
         self.model = model
         self.provider = provider
@@ -258,6 +259,10 @@ class TestRunner:
         self.log_callback = log_callback
         # Additional provider-specific config (e.g., from suite-level override)
         self.provider_config = provider_config or {}
+        # Callers that already announce test start themselves (the websocket
+        # streams its own "🧪 Running test 1/N: name" + "📝 Prompt:" + "⏱️ Timeout:"
+        # block) set this True to avoid duplicate header/prompt/provider lines.
+        self.quiet_test_announcement = quiet_test_announcement
 
     def _log(self, message: str, force: bool = False):
         """Log a message to console and optionally via callback."""
@@ -521,24 +526,28 @@ class TestRunner:
                     for tool in mcp_tools
                 ]
 
-            # Always notify callback of test start (for spinner updates)
-            self._log(f"Running test: {test_case.name}")
-            if self.verbose:
-                self._log(f"Prompt: {test_case.prompt}")
-                self._log(f"Provider: {self.provider}, Model: {self.model}")
-                if self.provider in ("assistant", "chatbot"):
-                    # AssistantProvider uses a chatbot completions endpoint;
-                    # tool discovery happens server-side so local counts are meaningless.
-                    endpoint = getattr(self.llm_provider, "completions_url", None) or (
-                        getattr(self.llm_provider, "base_url", "")
-                        + getattr(self.llm_provider, "completions_path", "")
-                    )
-                    if endpoint:
-                        self._log(f"Chatbot API: {endpoint}")
-                    self._log("(Tools provided server-side by chatbot backend)")
-                else:
-                    self._log(f"Available tools: {len(formatted_tools)}")
-                    self._log(f"MCP URL: {self.mcp_url}")
+            # Always notify callback of test start (for spinner updates) —
+            # callers like the streaming websocket set quiet_test_announcement
+            # to suppress this duplicate header (they emit their own richer
+            # "🧪 Running test 1/N: name" + Prompt + Timeout block).
+            if not self.quiet_test_announcement:
+                self._log(f"Running test: {test_case.name}")
+                if self.verbose:
+                    self._log(f"Prompt: {test_case.prompt}")
+                    self._log(f"Provider: {self.provider}, Model: {self.model}")
+                    if self.provider in ("assistant", "chatbot"):
+                        # AssistantProvider uses a chatbot completions endpoint;
+                        # tool discovery happens server-side so local counts are meaningless.
+                        endpoint = getattr(self.llm_provider, "completions_url", None) or (
+                            getattr(self.llm_provider, "base_url", "")
+                            + getattr(self.llm_provider, "completions_path", "")
+                        )
+                        if endpoint:
+                            self._log(f"Chatbot API: {endpoint}")
+                        self._log("(Tools provided server-side by chatbot backend)")
+                    else:
+                        self._log(f"Available tools: {len(formatted_tools)}")
+                        self._log(f"MCP URL: {self.mcp_url}")
 
             # Determine timeout - CLI providers need more time
             # Use at least 120s for claude-cli and codex-cli

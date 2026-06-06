@@ -286,6 +286,10 @@ async def _run_test_command(websocket: WebSocket, data: dict, config, send_log):
             hide_tool_output=False,
             log_callback=send_log,
             provider_config=suite_provider_config,
+            # We emit our own per-test "🧪 Running test … / 📝 Prompt / ⏱️ Timeout"
+            # block below, so the runner must not also emit its own (would create
+            # two collapsible test groups in the UI for every test).
+            quiet_test_announcement=True,
         )
 
         await send_log("⚙️ Initializing test runner...")
@@ -307,7 +311,7 @@ async def _run_test_command(websocket: WebSocket, data: dict, config, send_log):
 
             await send_log(f"\n{'=' * 50}")
             await send_log(f"🧪 Running test {i + 1}/{len(test_cases)}: {tc.name}")
-            await send_log(f"📝 Prompt: {tc.prompt[:100]}...")
+            await send_log(f"📝 Prompt: {tc.prompt}")
             await send_log(f"⏱️ Timeout: {tc.timeout}s")
 
             start_time = time.time()

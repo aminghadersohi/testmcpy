@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.16] - 2026-06-06
+
+### Fixed
+- **Test runner logs panel rendered each test as two collapsible groups**: both
+  the websocket (`🧪 Running test 1/N: name` + `📝 Prompt: …` + `⏱️ Timeout: …s`)
+  AND `TestRunner.run_test` (`Running test: name` + full `Prompt: …` +
+  `Provider: …, Model: …` + `Available tools: N` + `MCP URL: …`) emitted
+  test-start headers. The `StreamingLogViewer` parser greedily grouped on
+  every `Running test:` line, producing two cards per test — first a
+  near-empty card with the truncated prompt, then the real card with all
+  the actual entries. Added a `quiet_test_announcement` flag to `TestRunner`
+  that the websocket sets, suppressing the duplicate header / prompt /
+  provider / MCP-URL / chatbot-API lines inside the runner.
+- **Truncated prompt in streamed logs**: websocket no longer trims
+  `tc.prompt` to 100 chars — it sends the full prompt as the in-group
+  `📝 Prompt: …` entry.
+- **Sticky group header looked doubled / ghosted when multiple tests were
+  expanded**: replaced the translucent `bg-*/20 backdrop-blur-sm` sticky
+  header with a solid `bg-surface-elevated` + colored left-border accent.
+  Sticky headers no longer bleed through one another at the top of the
+  scroll container.
+
 ## [0.7.15] - 2026-06-06
 
 ### Changed

@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.7] - 2026-06-06
+
+### Fixed
+- **OAuth generator lock crash** (`RuntimeError: The current task is not holding
+  this lock`): `MCPClient.list_tools()` now uses `asyncio.timeout` on Python
+  3.11+ instead of `asyncio.wait_for`. The new form runs the coroutine in the
+  current task so `CancelledError` unwinds the FastMCP auth generator's
+  `async with lock:` block in the correct task context, preventing the anyio
+  lock from being released by a GC finaliser task that doesn't own it. A custom
+  event-loop exception handler suppresses the residual noise on Python 3.10.
+- **Broken cached client not evicted**: `list_mcp_tools()` now evicts the cached
+  `MCPClient` on *any* error, not only connection errors. Previously a failed
+  `list_tools()` call left the broken client in the in-memory cache, causing
+  every subsequent request to the same profile to 500.
+- **`is_connection_error` too narrow**: extended to match
+  `"failed to connect"`, `"failed to initialize"`, and `"timed out"` substrings
+  so MCPConnectionError and MCPTimeoutError messages correctly surface as 503.
+- **Cost always `$0.00` in UI**: `storage.complete_run()` now sums
+  `question_results.cost_usd` into `test_runs.total_cost` alongside the
+  existing `total_tokens` rollup. Per-question costs were already stored
+  correctly; they just were never aggregated to the run level.
+
 ## [0.7.6] - 2026-06-06
 
 ### Added

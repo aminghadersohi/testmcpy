@@ -271,13 +271,39 @@ def is_connection_error(error_msg: str) -> bool:
         or "reset by peer" in error_lower
         or "name or service not known" in error_lower
         or "no route to host" in error_lower
+        or "failed to connect" in error_lower
+        or "failed to initialize" in error_lower
+        or "timed out" in error_lower
     )
+
+
+def _mcp_exception_handler(loop, context):
+    """Suppress the RuntimeError from MCP OAuth auth-flow generator cleanup.
+
+    When asyncio.wait_for cancels a child task that holds a FastMCP
+    async_auth_flow generator, Python's GC schedules aclose() on the
+    abandoned generator in a new event-loop task.  That cleanup task tries
+    to release an anyio Lock that was acquired by the original (now-gone)
+    child task, which throws RuntimeError("The current task is not holding
+    this lock").  This is a known limitation of the upstream MCP library and
+    only affects Python 3.10 (on 3.11+ list_tools uses asyncio.timeout which
+    keeps everything in the current task and avoids the problem).
+    """
+    exc = context.get("exception")
+    if isinstance(exc, RuntimeError) and "not holding this lock" in str(exc):
+        return  # Suppress — already handled at the endpoint level
+    loop.default_exception_handler(context)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan event handler for startup and shutdown."""
     global mcp_client, mcp_clients
+
+    import asyncio as _asyncio
+
+    _asyncio.get_event_loop().set_exception_handler(_mcp_exception_handler)
+
     # Startup
     try:
         mcp_url = config.get_mcp_url()
@@ -580,10 +606,12 @@ async def list_mcp_tools(profiles: list[str] = Query(default=None)):
         raise
     except Exception as e:
         error_msg = str(e)
+        # Always evict cached clients on any error — a failed list_tools() call
+        # leaves the cached client in a broken state that will repeat the error
+        # on every subsequent request until evicted.
+        for cache_key in accessed_servers:
+            await clear_cached_client(cache_key)
         if is_connection_error(error_msg):
-            # Clear stale cached clients so retry can get fresh connection
-            for cache_key in accessed_servers:
-                await clear_cached_client(cache_key)
             raise HTTPException(
                 status_code=503,
                 detail=f"Service unavailable: Unable to connect to MCP server. {error_msg}",

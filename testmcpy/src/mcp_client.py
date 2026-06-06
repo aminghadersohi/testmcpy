@@ -821,8 +821,20 @@ class MCPClient:
             raise MCPError("MCP client not initialized. Call initialize() first.")
 
         try:
-            # Wrap in timeout
-            tools_response = await asyncio.wait_for(self.client.list_tools(), timeout=timeout)
+            # Use asyncio.timeout (Python 3.11+) rather than asyncio.wait_for so the
+            # coroutine runs in the *current* task.  When the timeout fires, CancelledError
+            # unwinds through the FastMCP auth generator's `async with lock:` block in the
+            # same task context, releasing the anyio lock before cleanup.  asyncio.wait_for
+            # wraps the coroutine in a *child* task; if that child task is cancelled, the
+            # generator is orphaned and its GC finaliser runs in a new task that doesn't own
+            # the lock — causing RuntimeError("The current task is not holding this lock").
+            import sys as _sys
+
+            if _sys.version_info >= (3, 11):
+                async with asyncio.timeout(timeout):
+                    tools_response = await self.client.list_tools()
+            else:
+                tools_response = await asyncio.wait_for(self.client.list_tools(), timeout=timeout)
             tools = []
 
             # Handle different response formats
@@ -867,7 +879,7 @@ class MCPClient:
             self._tools_cache = tools
             return tools
 
-        except asyncio.TimeoutError:
+        except (TimeoutError, asyncio.TimeoutError):
             raise MCPTimeoutError(f"Failed to list tools: operation timed out after {timeout}s")
         except MCPError:
             raise  # Re-raise our errors

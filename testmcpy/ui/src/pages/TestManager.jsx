@@ -1134,7 +1134,7 @@ tests:
   }
 
   const runAllInDirectory = async (folderName, files) => {
-    if (running || !files || files.length === 0) return
+    if (running || directoryRunProgress || !files || files.length === 0) return
     const llmConfig = getLlmConfig()
     setDirectoryRunProgress({ folder: folderName, current: 0, total: files.length, results: [] })
     const results = []
@@ -1404,9 +1404,9 @@ tests:
                       e.stopPropagation()
                       runAllInDirectory(folderName, files)
                     }}
-                    className="p-1 hover:bg-primary/20 rounded transition-all duration-200 opacity-0 group-hover/folder:opacity-100 text-primary"
-                    title={`Run all tests in ${folderName}`}
-                    disabled={running}
+                    className="p-1 hover:bg-primary/20 rounded transition-all duration-200 opacity-0 group-hover/folder:opacity-100 text-primary disabled:opacity-30 disabled:cursor-not-allowed"
+                    title={directoryRunProgress ? 'A directory run is already in progress' : `Run all tests in ${folderName}`}
+                    disabled={running || !!directoryRunProgress}
                   >
                     <Play size={12} />
                   </button>
@@ -1870,14 +1870,28 @@ tests:
                       {historySelectMode && selectedRunIds.size > 0 && (
                         <button
                           onClick={async () => {
+                            if (!confirm(`Delete ${selectedRunIds.size} run${selectedRunIds.size > 1 ? 's' : ''}?`)) return
                             const ids = Array.from(selectedRunIds)
                             try {
-                              await fetch('/api/results/runs/bulk-delete', {
+                              const res = await fetch('/api/results/runs/bulk-delete', {
                                 method: 'POST',
                                 headers: { 'Content-Type': 'application/json' },
                                 body: JSON.stringify({ run_ids: ids }),
                               })
-                              setResultsHistory(prev => prev.filter(r => !selectedRunIds.has(r.run_id)))
+                              if (!res.ok) {
+                                const err = await res.json().catch(() => ({}))
+                                alert(`Delete failed: ${err.detail || res.statusText}`)
+                                return
+                              }
+                              const { run_ids: deletedIds } = await res.json()
+                              const deletedSet = new Set(deletedIds)
+                              setResultsHistory(prev => prev.filter(r => !deletedSet.has(r.run_id)))
+                              if (selectedHistoryRun && deletedSet.has(selectedHistoryRun.run_id)) {
+                                setSelectedHistoryRun(null)
+                              }
+                              if (pinnedHistoryRun?.metadata?.run_id && deletedSet.has(pinnedHistoryRun.metadata.run_id)) {
+                                setPinnedHistoryRun(null)
+                              }
                               setSelectedRunIds(new Set())
                               setHistorySelectMode(false)
                             } catch (error) {

@@ -750,7 +750,34 @@ def run(
                 },
             }
             save_result = save_test_run_to_file(save_data)
-            console.print(f"[dim]Results saved: {save_result.get('run_id', '?')}[/dim]")
+            run_id = save_result.get("run_id", session_id)
+            console.print(f"[dim]Results saved: {run_id}[/dim]")
+
+            # Write sidecar JSON to tests/.results/<run_id>.json
+            results_dir = Path("tests/.results")
+            try:
+                results_dir.mkdir(parents=True, exist_ok=True)
+                total = len(results)
+                sidecar = {
+                    "run_id": run_id,
+                    "test_file": test_file_rel,
+                    "provider": effective_provider,
+                    "model": effective_model,
+                    "mcp_profile": profile or "default",
+                    "summary": {
+                        "total": total,
+                        "passed": total_passed,
+                        "failed": total - total_passed,
+                        "score": total_passed / total if total > 0 else 0.0,
+                    },
+                    "results": [r.to_dict() for r in results],
+                }
+                sidecar_path = results_dir / f"{run_id}.json"
+                tmp_path = sidecar_path.with_suffix(".json.tmp")
+                tmp_path.write_text(json.dumps(sidecar, indent=2, default=str))
+                tmp_path.replace(sidecar_path)
+            except OSError as e:
+                console.print(f"[dim]Note: Could not write sidecar JSON: {e}[/dim]")
         except (ImportError, OSError) as e:
             console.print(f"[dim]Note: Could not auto-save results for UI: {e}[/dim]")
 

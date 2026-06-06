@@ -416,6 +416,34 @@ async def delete_test_run(run_id: str) -> dict[str, Any]:
     return {"deleted": True, "run_id": run_id}
 
 
+class BulkDeleteRequest(BaseModel):
+    run_ids: list[str]
+
+
+@router.post("/runs/bulk-delete")
+async def bulk_delete_test_runs(request: BulkDeleteRequest) -> dict[str, Any]:
+    """Delete multiple test runs in a single request."""
+    if not request.run_ids:
+        return {"deleted": 0, "run_ids": []}
+
+    from testmcpy.models import QuestionResultModel, TestRunModel
+
+    storage = get_storage()
+    session = storage._session()
+    deleted = []
+    try:
+        for run_id in request.run_ids:
+            session.query(QuestionResultModel).filter_by(run_id=run_id).delete()
+            rows = session.query(TestRunModel).filter_by(run_id=run_id).delete()
+            if rows:
+                deleted.append(run_id)
+        session.commit()
+    finally:
+        session.close()
+
+    return {"deleted": len(deleted), "run_ids": deleted}
+
+
 @router.get("/export/{run_id}")
 async def export_test_run_json(run_id: str) -> dict[str, Any]:
     """Export a test run as JSON (replacement for direct file access)."""

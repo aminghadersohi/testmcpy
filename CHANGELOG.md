@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.11] - 2026-06-06
+
+### Added
+- **Mass delete for test results**: the `/reports` left panel now has a
+  "Select" button that enters multi-select mode. Each run gets a checkbox;
+  a sticky toolbar shows a "Select all" checkbox, the count of selected items,
+  and a red "Delete N" button. Confirming sends a single
+  `POST /api/results/runs/bulk-delete` request. Cancelling exits select mode
+  without touching data. The single per-row trash icon is hidden while in
+  select mode to avoid accidental single deletes.
+
 ## [0.7.10] - 2026-06-06
 
 ### Added

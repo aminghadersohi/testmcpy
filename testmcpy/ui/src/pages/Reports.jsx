@@ -25,6 +25,7 @@ import {
   ClipboardCheck,
   Link2,
   Download,
+  CheckSquare,
 } from 'lucide-react'
 
 const AUTO_REFRESH_INTERVAL = 10000
@@ -614,6 +615,9 @@ function Reports() {
   const [filterProvider, setFilterProvider] = useState('')
   const [filterTestFile, setFilterTestFile] = useState('')
   const [filterOptions, setFilterOptions] = useState({ models: [], providers: [], test_files: [] })
+  // Bulk selection
+  const [selectMode, setSelectMode] = useState(false)
+  const [selectedRuns, setSelectedRuns] = useState(new Set())
   // Comparison
   const [compareMode, setCompareMode] = useState(false)
   const [selectedForCompare, setSelectedForCompare] = useState(new Set())
@@ -832,6 +836,48 @@ function Reports() {
     }
   }
 
+  const toggleSelectMode = () => {
+    setSelectMode(prev => !prev)
+    setSelectedRuns(new Set())
+  }
+
+  const toggleSelectRun = (runId) => {
+    setSelectedRuns(prev => {
+      const next = new Set(prev)
+      next.has(runId) ? next.delete(runId) : next.add(runId)
+      return next
+    })
+  }
+
+  const toggleSelectAll = () => {
+    if (selectedRuns.size === filteredTestRuns.length) {
+      setSelectedRuns(new Set())
+    } else {
+      setSelectedRuns(new Set(filteredTestRuns.map(r => r.run_id)))
+    }
+  }
+
+  const deleteSelected = async () => {
+    if (selectedRuns.size === 0) return
+    if (!confirm(`Delete ${selectedRuns.size} run${selectedRuns.size > 1 ? 's' : ''}?`)) return
+    try {
+      await fetch('/api/results/runs/bulk-delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ run_ids: [...selectedRuns] }),
+      })
+      setTestRuns(prev => prev.filter(r => !selectedRuns.has(r.run_id)))
+      if (selectedRuns.has(selectedRun?.id)) {
+        setSelectedRun(null)
+        setRunDetails(null)
+      }
+      setSelectedRuns(new Set())
+      setSelectMode(false)
+    } catch (error) {
+      console.error('Bulk delete failed:', error)
+    }
+  }
+
   // Filtered test runs
   const filteredTestRuns = testRuns.filter(run => {
     if (filterStatus === 'pass' && run.failed > 0) return false
@@ -851,18 +897,30 @@ function Reports() {
   const renderRunListItem = (run) => {
     const rate = getPassRate(run.passed, run.total_tests)
     const rateBg = getPassRateBgColor(rate)
+    const isSelected = selectedRuns.has(run.run_id)
     return (
       <div
         key={run.run_id}
         className={`p-4 cursor-pointer transition-colors group ${
-          selectedRun?.id === run.run_id
+          selectMode && isSelected
+            ? 'bg-primary/10 border-l-2 border-l-primary'
+            : selectedRun?.id === run.run_id
             ? 'bg-primary/10 border-l-2 border-l-primary'
             : 'hover:bg-surface border-l-2 border-l-transparent'
         }`}
-        onClick={() => compareMode ? toggleCompareSelection(run.run_id) : selectRun(run.run_id, 'tests')}
+        onClick={() => selectMode ? toggleSelectRun(run.run_id) : compareMode ? toggleCompareSelection(run.run_id) : selectRun(run.run_id, 'tests')}
       >
         <div className="flex items-start justify-between gap-2">
-          {compareMode && (
+          {selectMode && (
+            <input
+              type="checkbox"
+              checked={isSelected}
+              onChange={() => toggleSelectRun(run.run_id)}
+              onClick={(e) => e.stopPropagation()}
+              className="mt-1 flex-shrink-0 accent-primary"
+            />
+          )}
+          {!selectMode && compareMode && (
             <input
               type="checkbox"
               checked={selectedForCompare.has(run.run_id)}
@@ -915,15 +973,17 @@ function Reports() {
               {formatDate(run.timestamp)}
             </div>
           </div>
-          <button
-            onClick={(e) => {
-              e.stopPropagation()
-              deleteRun(run.run_id, 'tests')
-            }}
-            className="p-1 hover:bg-error/20 rounded opacity-0 group-hover:opacity-100 transition-opacity"
-          >
-            <Trash2 size={14} className="text-error" />
-          </button>
+          {!selectMode && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation()
+                deleteRun(run.run_id, 'tests')
+              }}
+              className="p-1 hover:bg-error/20 rounded opacity-0 group-hover:opacity-100 transition-opacity"
+            >
+              <Trash2 size={14} className="text-error" />
+            </button>
+          )}
         </div>
       </div>
     )
@@ -1273,8 +1333,54 @@ function Reports() {
                 <p className="text-text-disabled text-sm mt-1">Run some tests to see results here</p>
               </div>
             ) : (
-              <div className="divide-y divide-border">
-                {filteredTestRuns.map(renderRunListItem)}
+              <div>
+                {/* Bulk-select toolbar */}
+                {selectMode ? (
+                  <div className="flex items-center justify-between px-3 py-2 border-b border-border bg-surface sticky top-0 z-10">
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="checkbox"
+                        checked={selectedRuns.size === filteredTestRuns.length && filteredTestRuns.length > 0}
+                        ref={el => { if (el) el.indeterminate = selectedRuns.size > 0 && selectedRuns.size < filteredTestRuns.length }}
+                        onChange={toggleSelectAll}
+                        className="accent-primary"
+                      />
+                      <span className="text-xs text-text-secondary">
+                        {selectedRuns.size > 0 ? `${selectedRuns.size} selected` : 'Select all'}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      {selectedRuns.size > 0 && (
+                        <button
+                          onClick={deleteSelected}
+                          className="flex items-center gap-1 px-2 py-1 text-xs bg-error text-white rounded hover:bg-error/90 transition-colors"
+                        >
+                          <Trash2 size={12} />
+                          Delete {selectedRuns.size}
+                        </button>
+                      )}
+                      <button
+                        onClick={toggleSelectMode}
+                        className="text-xs text-text-secondary hover:text-text-primary px-2 py-1 rounded hover:bg-surface-hover transition-colors"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="flex justify-end px-3 py-1.5 border-b border-border">
+                    <button
+                      onClick={toggleSelectMode}
+                      className="text-xs text-text-secondary hover:text-text-primary flex items-center gap-1 px-2 py-1 rounded hover:bg-surface-hover transition-colors"
+                    >
+                      <CheckSquare size={12} />
+                      Select
+                    </button>
+                  </div>
+                )}
+                <div className="divide-y divide-border">
+                  {filteredTestRuns.map(renderRunListItem)}
+                </div>
               </div>
             )
           ) : (

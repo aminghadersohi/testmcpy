@@ -445,6 +445,7 @@ function TestManager({ selectedProfiles = [], selectedLlmProfile = null, llmProf
   const [selectedTestProfile, setSelectedTestProfile] = useState(null)
   const [runAllLlmsMode, setRunAllLlmsMode] = useState(false)
   const [allLlmsResults, setAllLlmsResults] = useState(null) // results from running all LLMs
+  const [directoryRunProgress, setDirectoryRunProgress] = useState(null) // { folder, current, total, results: [] }
   const [resultsHistory, setResultsHistory] = useState([])
   const [showHistory, setShowHistory] = useState(false)
   const [selectedHistoryRun, setSelectedHistoryRun] = useState(null)
@@ -452,6 +453,8 @@ function TestManager({ selectedProfiles = [], selectedLlmProfile = null, llmProf
   const [historyProviderFilter, setHistoryProviderFilter] = useState(null) // null = all
   const [historyFailedOnly, setHistoryFailedOnly] = useState(false)
   const [historySort, setHistorySort] = useState({ key: 'timestamp', dir: 'desc' })
+  const [selectedRunIds, setSelectedRunIds] = useState(new Set())
+  const [historySelectMode, setHistorySelectMode] = useState(false)
   const [bottomPanelTab, setBottomPanelTab] = useState('logs') // 'logs' or 'results'
   const [showFileTree, setShowFileTree] = useState(false)
   const [showTestWizard, setShowTestWizard] = useState(false)
@@ -495,7 +498,7 @@ function TestManager({ selectedProfiles = [], selectedLlmProfile = null, llmProf
       rafRef.current = requestAnimationFrame(() => {
         if (!containerRef.current) return
         const rect = containerRef.current.getBoundingClientRect()
-        const h = Math.min(Math.max(rect.bottom - e.clientY, 120), rect.height * 0.8)
+        const h = Math.min(Math.max(rect.bottom - e.clientY, 80), rect.height * 0.8)
         currentHeight = h
         if (panelEl) panelEl.style.height = `${h}px`
       })
@@ -1130,6 +1133,42 @@ tests:
     setBottomPanelTab('logs') // Show logs while running
   }
 
+  const runAllInDirectory = async (folderName, files) => {
+    if (running || directoryRunProgress || !files || files.length === 0) return
+    const llmConfig = getLlmConfig()
+    setDirectoryRunProgress({ folder: folderName, current: 0, total: files.length, results: [] })
+    const results = []
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i]
+      setDirectoryRunProgress({ folder: folderName, current: i + 1, total: files.length, results })
+      try {
+        const res = await fetch('/api/tests/run', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            test_path: file.path,
+            model: llmConfig.model,
+            provider: llmConfig.provider,
+            profile: selectedMcpProfile,
+          }),
+        })
+        if (res.ok) {
+          const data = await res.json()
+          results.push({ file: file.filename, success: true, summary: data.summary })
+        } else {
+          const errData = await res.json().catch(() => ({ detail: 'Unknown error' }))
+          results.push({ file: file.filename, success: false, error: errData.detail || `HTTP ${res.status}` })
+        }
+      } catch (error) {
+        results.push({ file: file.filename, success: false, error: error.message })
+      }
+    }
+    const passed = results.filter(r => r.success && (r.summary?.failed ?? 0) === 0).length
+    const failed = results.length - passed
+    setDirectoryRunProgress(null)
+    alert(`Directory run complete: ${passed} file(s) passed, ${failed} file(s) had failures.`)
+  }
+
   // Switch to results tab when tests complete
   useEffect(() => {
     if (runningTests.status === 'completed' && testResults) {
@@ -1343,7 +1382,7 @@ tests:
             <div key={folderName} className="border-b border-border">
               {/* Folder Header */}
               <div
-                className="p-4 cursor-pointer hover:bg-surface-hover transition-all duration-200 flex items-center gap-2"
+                className="p-4 cursor-pointer hover:bg-surface-hover transition-all duration-200 flex items-center gap-2 group/folder"
                 onClick={() => toggleFolder(folderName)}
               >
                 {expandedFolders.has(folderName) ? (
@@ -1354,6 +1393,24 @@ tests:
                 <Folder size={18} className="text-primary" />
                 <span className="font-medium text-text-primary">{folderName}</span>
                 <span className="text-xs text-text-tertiary ml-auto">{files.length} file{files.length !== 1 ? 's' : ''}</span>
+                {directoryRunProgress?.folder === folderName ? (
+                  <span className="flex items-center gap-1 px-1.5 py-0.5 rounded bg-warning/20 text-warning text-[10px] font-medium">
+                    <Loader2 size={10} className="animate-spin" />
+                    {directoryRunProgress.current}/{directoryRunProgress.total}
+                  </span>
+                ) : (
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      runAllInDirectory(folderName, files)
+                    }}
+                    className="p-1 hover:bg-primary/20 rounded transition-all duration-200 opacity-0 group-hover/folder:opacity-100 text-primary disabled:opacity-30 disabled:cursor-not-allowed"
+                    title={directoryRunProgress ? 'A directory run is already in progress' : `Run all tests in ${folderName}`}
+                    disabled={running || !!directoryRunProgress}
+                  >
+                    <Play size={12} />
+                  </button>
+                )}
               </div>
 
               {/* Folder Files */}
@@ -1623,7 +1680,7 @@ tests:
                 </div>
                 <div data-bottom-panel className="flex-shrink-0 flex flex-col bg-surface" style={{ height: bottomPanelHeight }}>
                   {/* Tab Bar */}
-                  <div className="flex items-center border-b border-border bg-surface-elevated px-2">
+                  <div className="flex items-center border-b border-border bg-surface-elevated px-2 sticky top-0 z-10">
                     {/* Logs Tab */}
                     <button
                       className={`px-3 py-2 text-xs font-medium flex items-center gap-2 border-b-2 transition-colors ${
@@ -1809,12 +1866,60 @@ tests:
                         {resultsHistory.length} run{resultsHistory.length !== 1 ? 's' : ''}
                       </span>
                     </div>
-                    <button
-                      onClick={() => setShowHistory(false)}
-                      className="p-1.5 hover:bg-surface-hover rounded text-text-tertiary hover:text-text-primary transition-colors"
-                    >
-                      <X size={14} />
-                    </button>
+                    <div className="flex items-center gap-2">
+                      {historySelectMode && selectedRunIds.size > 0 && (
+                        <button
+                          onClick={async () => {
+                            if (!confirm(`Delete ${selectedRunIds.size} run${selectedRunIds.size > 1 ? 's' : ''}?`)) return
+                            const ids = Array.from(selectedRunIds)
+                            try {
+                              const res = await fetch('/api/results/runs/bulk-delete', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ run_ids: ids }),
+                              })
+                              if (!res.ok) {
+                                const err = await res.json().catch(() => ({}))
+                                alert(`Delete failed: ${err.detail || res.statusText}`)
+                                return
+                              }
+                              const { run_ids: deletedIds } = await res.json()
+                              const deletedSet = new Set(deletedIds)
+                              setResultsHistory(prev => prev.filter(r => !deletedSet.has(r.run_id)))
+                              if (selectedHistoryRun && deletedSet.has(selectedHistoryRun.run_id)) {
+                                setSelectedHistoryRun(null)
+                              }
+                              if (pinnedHistoryRun?.metadata?.run_id && deletedSet.has(pinnedHistoryRun.metadata.run_id)) {
+                                setPinnedHistoryRun(null)
+                              }
+                              setSelectedRunIds(new Set())
+                              setHistorySelectMode(false)
+                            } catch (error) {
+                              console.error('Bulk delete failed:', error)
+                              alert('Failed to delete selected runs')
+                            }
+                          }}
+                          className="px-2 py-1 text-xs rounded bg-error/20 text-error hover:bg-error/30 transition-colors"
+                        >
+                          Delete {selectedRunIds.size}
+                        </button>
+                      )}
+                      <button
+                        onClick={() => {
+                          setHistorySelectMode(prev => !prev)
+                          setSelectedRunIds(new Set())
+                        }}
+                        className={`px-2 py-1 text-xs rounded transition-colors ${historySelectMode ? 'bg-primary/20 text-primary' : 'bg-surface text-text-tertiary hover:text-text-primary hover:bg-surface-hover'}`}
+                      >
+                        {historySelectMode ? 'Cancel' : 'Select'}
+                      </button>
+                      <button
+                        onClick={() => setShowHistory(false)}
+                        className="p-1.5 hover:bg-surface-hover rounded text-text-tertiary hover:text-text-primary transition-colors"
+                      >
+                        <X size={14} />
+                      </button>
+                    </div>
                   </div>
 
                   {/* Filter row */}
@@ -1906,6 +2011,22 @@ tests:
                       <table className="w-full text-xs">
                         <thead className="sticky top-0 bg-surface-elevated">
                           <tr className="border-b border-border">
+                            {historySelectMode && (
+                              <th className="py-2 px-3">
+                                <input
+                                  type="checkbox"
+                                  className="accent-primary"
+                                  checked={filteredHistory.length > 0 && filteredHistory.every(r => selectedRunIds.has(r.run_id))}
+                                  onChange={(e) => {
+                                    if (e.target.checked) {
+                                      setSelectedRunIds(new Set(filteredHistory.map(r => r.run_id)))
+                                    } else {
+                                      setSelectedRunIds(new Set())
+                                    }
+                                  }}
+                                />
+                              </th>
+                            )}
                             <SortableTH sortKey="timestamp" align="left" sort={historySort} onSort={toggleHistorySort}>Date</SortableTH>
                             <th className="text-left py-2 px-3 text-text-tertiary font-medium">Provider</th>
                             <th className="text-left py-2 px-3 text-text-tertiary font-medium">Model</th>
@@ -1917,21 +2038,56 @@ tests:
                         <tbody>
                           {filteredHistory.map((run, idx) => {
                             const isPinned = pinnedHistoryRun?.metadata?.run_id === run.run_id
+                            const isSelected = selectedRunIds.has(run.run_id)
                             return (
                             <tr
                               key={run.run_id || idx}
                               className={`border-b border-border/30 cursor-pointer transition-colors ${
-                                isPinned
+                                isSelected
+                                  ? 'bg-primary/10'
+                                  : isPinned
                                   ? 'bg-primary/15'
                                   : selectedHistoryRun?.run_id === run.run_id
                                   ? 'bg-primary/10'
                                   : 'hover:bg-surface-hover'
                               }`}
                               onClick={() => {
-                                setSelectedHistoryRun(run)
-                                pinHistoryRun(run.run_id)
+                                if (historySelectMode) {
+                                  setSelectedRunIds(prev => {
+                                    const next = new Set(prev)
+                                    if (next.has(run.run_id)) {
+                                      next.delete(run.run_id)
+                                    } else {
+                                      next.add(run.run_id)
+                                    }
+                                    return next
+                                  })
+                                } else {
+                                  setSelectedHistoryRun(run)
+                                  pinHistoryRun(run.run_id)
+                                }
                               }}
                             >
+                              {historySelectMode && (
+                                <td className="py-2 px-3" onClick={e => e.stopPropagation()}>
+                                  <input
+                                    type="checkbox"
+                                    className="accent-primary"
+                                    checked={isSelected}
+                                    onChange={() => {
+                                      setSelectedRunIds(prev => {
+                                        const next = new Set(prev)
+                                        if (next.has(run.run_id)) {
+                                          next.delete(run.run_id)
+                                        } else {
+                                          next.add(run.run_id)
+                                        }
+                                        return next
+                                      })
+                                    }}
+                                  />
+                                </td>
+                              )}
                               <td className="py-2 px-3 text-text-secondary">
                                 {new Date(run.timestamp).toLocaleDateString()} {new Date(run.timestamp).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
                               </td>

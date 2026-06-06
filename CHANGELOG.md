@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.9] - 2026-06-06
+
+### Fixed
+- **`/reports` page shows `$0.00` for all runs**: `GET /api/results/run/{run_id}`
+  in `results.py` had two hardcoded `0.0` literals — one for `metadata.total_cost`
+  and one for each per-result `cost`. Both now read from the DB values:
+  `run["summary"]["total_cost_usd"]` and `qr["cost_usd"]` respectively.
+
 ## [0.7.8] - 2026-06-06
 
 ### Added

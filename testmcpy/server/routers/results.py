@@ -259,7 +259,7 @@ async def get_test_run(run_id: str) -> dict[str, Any]:
         "total_tests": run["summary"]["total"],
         "passed": run["summary"]["passed"],
         "failed": run["summary"]["failed"],
-        "total_cost": 0.0,
+        "total_cost": run["summary"].get("total_cost_usd", 0.0),
         "total_tokens": run["summary"]["total_tokens"],
         "total_duration": run["summary"]["total_duration_ms"] / 1000.0,
     }
@@ -273,7 +273,7 @@ async def get_test_run(run_id: str) -> dict[str, Any]:
                 "passed": qr["passed"],
                 "score": qr["score"],
                 "duration": qr["duration_ms"] / 1000.0,
-                "cost": 0.0,
+                "cost": qr.get("cost_usd", 0.0),
                 "response": qr["answer"],
                 "tool_calls": qr["tool_uses"],
                 "tool_results": qr["tool_results"],

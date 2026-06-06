@@ -277,7 +277,7 @@ class TestClaudeSDKVerboseLogs:
         assert "[ClaudeSDK] Thinking:" in log_text
         assert "chars)" in log_text
         # The preview should use repr() — so quotes are present
-        thinking_lines = [l for l in result.logs if "Thinking:" in l]
+        thinking_lines = [line for line in result.logs if "Thinking:" in line]
         assert len(thinking_lines) == 1
         assert "..." in thinking_lines[0]  # ellipsis because text > 100 chars
 

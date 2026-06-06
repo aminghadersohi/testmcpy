@@ -1771,7 +1771,9 @@ class ClaudeSDKProvider(LLMProvider):
                             continue
 
                         raw_events.append({"type": msg_type})
-                        log(f"[ClaudeSDK] Message #{message_count}: {msg_type}")
+                        # Only log the header for types that have no content block logged below.
+                        if isinstance(message, (RateLimitEvent, ResultMessage)):
+                            log(f"[ClaudeSDK] Message #{message_count}: {msg_type}")
 
                         if isinstance(message, RateLimitEvent):
                             # Rate limit info from subscription — log but continue
@@ -1792,7 +1794,11 @@ class ClaudeSDKProvider(LLMProvider):
                                     log(f"[ClaudeSDK] Text: {preview}...")
                                 elif isinstance(block, ThinkingBlock):
                                     thinking_text += block.thinking
-                                    log(f"[ClaudeSDK] Thinking ({len(block.thinking)} chars)")
+                                    thinking_preview = block.thinking[:100].replace("\n", " ")
+                                    log(
+                                        f'[ClaudeSDK] Thinking: "{thinking_preview}..."'
+                                        f" ({len(block.thinking)} chars)"
+                                    )
                                 elif isinstance(block, ToolUseBlock):
                                     tool_call = {
                                         "id": block.id,

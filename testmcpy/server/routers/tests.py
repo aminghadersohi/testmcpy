@@ -140,11 +140,14 @@ async def list_tests():
 @router.post("/tests/run-single")
 async def run_single_test(request: SingleTestRunRequest):
     """Run a single ad-hoc test case from the Prompt Playground."""
-    model = request.model or config.default_model
-    provider = request.provider or config.default_provider
+    # Don't fall back to config defaults yet — the LLM profile may supply
+    # model/provider, and the or-check below must see request.model/provider
+    # as None to honour the profile selection.
+    model: str | None = request.model
+    provider: str | None = request.provider
     provider_config: dict[str, Any] = dict(request.provider_config or {})
 
-    # Resolve API key from LLM profile if provided
+    # Resolve model/provider/config from LLM profile if provided
     if request.llm_profile:
         from testmcpy.llm_profiles import load_llm_profile
 
@@ -156,8 +159,11 @@ async def run_single_test(request: SingleTestRunRequest):
                 provider = provider or default_prov.provider
                 # For assistant/chatbot providers, fold profile fields into
                 # provider_config so AssistantProvider.__init__ receives them.
+                # Treat existing None or empty-string values as absent so the
+                # profile's value is applied even when the client serialised
+                # the field as null/"" rather than omitting it entirely.
                 if provider in ("assistant", "chatbot"):
-                    for field in (
+                    for fname in (
                         "workspace_hash",
                         "domain",
                         "api_token",
@@ -166,9 +172,13 @@ async def run_single_test(request: SingleTestRunRequest):
                         "conversations_path",
                         "completions_path",
                     ):
-                        val = getattr(default_prov, field, None)
-                        if val and field not in provider_config:
-                            provider_config[field] = val
+                        val = getattr(default_prov, fname, None)
+                        if val and not provider_config.get(fname):
+                            provider_config[fname] = val
+
+    # Fall back to global config defaults only if still unset after profile resolution
+    model = model or config.default_model
+    provider = provider or config.default_provider
 
     # Build evaluators list
     evaluator_configs = request.evaluators

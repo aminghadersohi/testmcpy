@@ -3,8 +3,8 @@ class Testmcpy < Formula
 
   desc "MCP Testing Framework - Test LLM tool calling with MCP services"
   homepage "https://github.com/preset-io/testmcpy"
-  url "https://files.pythonhosted.org/packages/source/t/testmcpy/testmcpy-0.7.3.tar.gz"
-  sha256 "a54258ed5003ff0db501332f52eb9118bf32f39c93a6340dc06a549208f9ac48"
+  url "https://files.pythonhosted.org/packages/source/t/testmcpy/testmcpy-0.7.6.tar.gz"
+  sha256 "ecc0415ad919fcb659bad8e1c888fec7e1cbf31513cbbbcdf30839f6711515ea"
   license "Apache-2.0"
 
   depends_on "python@3.11"

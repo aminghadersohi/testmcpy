@@ -28,6 +28,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   header with a solid `bg-surface-elevated` + colored left-border accent.
   Sticky headers no longer bleed through one another at the top of the
   scroll container.
+- **CLI banner + MCP init ignored suite-level `provider:` declaration**:
+  `testmcpy run` printed `Provider: <CLI default>` in the startup banner
+  and always tried to initialize the local MCP client even when the YAML
+  declared `provider: assistant` at the top level (which means tools are
+  resolved server-side and no local MCP is needed). We now peek the file
+  for a top-level `provider:` / `model:` before printing the banner and
+  before computing `skip_mcp_init`, so chatbot YAML files no longer trigger
+  spurious OAuth flows or banner mismatches.
+- **UI "Using:" badge ignored suite-level overrides**: when a YAML test
+  file declared `provider:` / `model:` at the top level, the Tests-page
+  badge still showed whatever the LLM-profile default was. Added a
+  `parseSuiteOverride()` helper that scans the open file's leading
+  top-level keys; the badge now displays the effective model/provider
+  with a "suite override" pill, and `getLlmConfig()` (used for both
+  single-test and run-all flows) sends the override-aware values to the
+  websocket.
 
 ## [0.7.15] - 2026-06-06
 

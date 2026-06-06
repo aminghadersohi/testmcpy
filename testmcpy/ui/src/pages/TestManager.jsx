@@ -36,6 +36,35 @@ import StreamingLogViewer from '../components/StreamingLogViewer'
 import EditorStatusBar from '../components/EditorStatusBar'
 import EditorTabStrip from '../components/EditorTabStrip'
 
+// Parse top-level `provider:` and `model:` declarations from a YAML test
+// suite. These are the suite-level overrides that run.py / websocket.py
+// already honor server-side — the UI just needs to *show* them so the
+// "Using:" badge and the provider dropdown reflect what will actually run.
+//
+// We scan only the leading lines (before `tests:` or any deeper block),
+// matching `key: value` with no indentation. Quoted values are stripped.
+// Returns { provider: string|null, model: string|null }.
+function parseSuiteOverride(content) {
+  if (!content) return { provider: null, model: null }
+  const out = { provider: null, model: null }
+  const lines = content.split('\n')
+  for (const line of lines) {
+    // Stop scanning once we hit a nested block — top-level keys are flush left.
+    if (line.startsWith('  ') || line.startsWith('\t') || line.startsWith('-')) continue
+    const m = line.match(/^([A-Za-z_][\w]*)\s*:\s*(.*?)\s*(?:#.*)?$/)
+    if (!m) continue
+    const key = m[1]
+    let val = m[2]
+    if (val.startsWith('"') && val.endsWith('"')) val = val.slice(1, -1)
+    else if (val.startsWith("'") && val.endsWith("'")) val = val.slice(1, -1)
+    if (key === 'provider' && val) out.provider = val
+    else if (key === 'model' && val) out.model = val
+    // Bail out once we hit `tests:` — anything after is per-test config.
+    if (key === 'tests') break
+  }
+  return out
+}
+
 // Parse YAML content to find test locations (line numbers)
 function parseTestLocations(content) {
   const lines = content.split('\n')
@@ -774,19 +803,27 @@ function TestManager({ selectedProfiles = [], selectedLlmProfile = null, llmProf
     return providers
   }
 
-  // Get model and provider from selected LLM provider
+  // Get model and provider from selected LLM provider — with suite-level
+  // override applied. If the open YAML file declares `provider:` / `model:`
+  // at the top level, those win over the LLM profile default. The server
+  // already honors suite-level overrides; this keeps the UI honest about
+  // what will actually run (e.g. chatbot YAML → `assistant` provider, not
+  // whatever the LLM profile defaults to).
   const getLlmConfig = () => {
-    if (!selectedLlmProfile || llmProfiles.length === 0) {
-      return { model: 'claude-sonnet-4-20250514', provider: 'claude-sdk' }
+    const suite = parseSuiteOverride(fileContent)
+    let model = 'claude-sonnet-4-20250514'
+    let provider = 'claude-sdk'
+    if (selectedLlmProfile && llmProfiles.length > 0) {
+      const profile = llmProfiles.find(p => p.profile_id === selectedLlmProfile)
+      if (profile && profile.providers && profile.providers.length > 0) {
+        const defaultProvider = profile.providers.find(p => p.default) || profile.providers[0]
+        model = defaultProvider.model || model
+        provider = defaultProvider.provider || provider
+      }
     }
-    const profile = llmProfiles.find(p => p.profile_id === selectedLlmProfile)
-    if (!profile || !profile.providers || profile.providers.length === 0) {
-      return { model: 'claude-sonnet-4-20250514', provider: 'claude-sdk' }
-    }
-    const defaultProvider = profile.providers.find(p => p.default) || profile.providers[0]
     return {
-      model: defaultProvider.model || 'claude-sonnet-4-20250514',
-      provider: defaultProvider.provider || 'claude-sdk'
+      model: suite.model || model,
+      provider: suite.provider || provider,
     }
   }
 
@@ -1597,17 +1634,34 @@ tests:
                 {selectedLlmProfile && llmProfiles.length > 0 && (() => {
                   const profile = llmProfiles.find(p => p.profile_id === selectedLlmProfile)
                   const defaultProv = profile?.providers?.find(p => p.default) || profile?.providers?.[0]
-                  return defaultProv ? (
+                  if (!defaultProv) return null
+                  // Suite-level override (declared at the top of the YAML) wins
+                  // over the LLM profile default — show that so the user isn't
+                  // surprised when a chatbot YAML actually runs against the
+                  // assistant provider regardless of which LLM profile is active.
+                  const suite = parseSuiteOverride(fileContent)
+                  const effectiveModel = suite.model || defaultProv.model
+                  const effectiveProvider = suite.provider || defaultProv.provider
+                  const overridden = !!(suite.provider || suite.model)
+                  return (
                     <div className="flex items-center gap-2 text-xs">
                       <span className="text-text-tertiary">Using:</span>
                       <span className="px-2 py-1 rounded bg-surface-elevated border border-border text-text-secondary font-mono">
-                        {defaultProv.model}
+                        {effectiveModel}
                       </span>
                       <span className="px-1.5 py-0.5 rounded text-[10px] font-medium uppercase tracking-wide bg-blue-500/20 text-blue-400">
-                        {defaultProv.provider}
+                        {effectiveProvider}
                       </span>
+                      {overridden && (
+                        <span
+                          title="This test file declares provider/model at the top level — that override is being used instead of the LLM profile default."
+                          className="px-1.5 py-0.5 rounded text-[10px] font-medium uppercase tracking-wide bg-yellow-500/20 text-yellow-400 border border-yellow-500/30"
+                        >
+                          suite override
+                        </span>
+                      )}
                     </div>
-                  ) : null
+                  )
                 })()}
               </div>
             </div>

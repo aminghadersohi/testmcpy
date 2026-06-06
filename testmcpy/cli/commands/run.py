@@ -345,10 +345,37 @@ def run(
     else:
         effective_mcp_url = mcp_url or DEFAULT_MCP_URL
 
+    # Peek the YAML/JSON for a suite-level `provider:` / `model:` declaration
+    # so the Panel banner and the MCP-init skip decision both reflect what
+    # actually will run, not what the CLI default was. Without this, a
+    # chatbot YAML (provider: assistant at the top) would still:
+    #   - banner "Provider: claude-sdk" (or whatever the CLI default is), and
+    #   - trigger a local MCP OAuth flow that the assistant provider never needs.
+    suite_peek_provider: str | None = None
+    suite_peek_model: str | None = None
+    if test_path.is_file():
+        try:
+            with open(test_path) as _f:
+                if test_path.suffix == ".json":
+                    _peek_data = json.load(_f)
+                else:
+                    _peek_data = yaml.safe_load(_f)
+            if isinstance(_peek_data, dict):
+                suite_peek_provider = _peek_data.get("provider")
+                suite_peek_model = _peek_data.get("model")
+        except (OSError, json.JSONDecodeError, yaml.YAMLError):
+            # Best-effort — fall back to CLI defaults if the file is
+            # malformed; the real YAML load below will surface the error.
+            suite_peek_provider = None
+            suite_peek_model = None
+
+    banner_provider = suite_peek_provider or provider.value
+    banner_model = suite_peek_model or model
+
     console.print(
         Panel.fit(
             "[bold cyan]MCP Testing Framework - Run Tests[/bold cyan]\n"
-            f"Model: {model} | Provider: {provider.value}",
+            f"Model: {banner_model} | Provider: {banner_provider}",
             border_style="cyan",
         )
     )
@@ -365,8 +392,11 @@ def run(
         # internally calls MCP server-side — we don't need a local MCP
         # client for them. Skip the MCP init entirely so we don't trigger
         # OAuth flows or load profile auth that the user didn't ask for.
+        # Use the peeked suite-level provider when present so a YAML
+        # declaring `provider: assistant` skips MCP init even if the CLI
+        # default is claude-sdk.
         mcp_client = None
-        skip_mcp_init = provider.value in ("assistant", "chatbot")
+        skip_mcp_init = banner_provider in ("assistant", "chatbot")
 
         if skip_mcp_init:
             pass  # mcp_client stays None

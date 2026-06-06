@@ -9,19 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.7.13] - 2026-06-06
 
+### Added
+- **Run All directory button** in the Tests tab sidebar: each folder header now
+  shows a hover-reveal play button that sequentially runs every test file in
+  that folder using the same LLM/MCP profile as the single-file run. A
+  spinner badge shows `N/M` progress while running; a summary alert reports
+  pass/fail when complete.
+- **Multi-select delete for history runs** in the Tests tab history panel:
+  a "Select" toggle enters multi-select mode with per-row checkboxes, a
+  "Select All" header checkbox, and a "Delete N" button that calls
+  `POST /api/results/runs/bulk-delete` and removes the deleted entries from
+  the history list.
+
 ### Fixed
-- **False positive rate inflated for direct-prefixed MCP calls**: `_real_tool_name()`
-  now normalizes `mcp__ns__health_check` → `health_check` by splitting on `__`,
-  and recurses when the gateway inner name is itself prefixed. The primary tool
-  extracted from `was_tool_called:X` evaluator names is also run through
-  `_real_tool_name` before the false-positive comparison.
-- **`WasMCPToolCalled` eval details**: `EvalResult.details` now always includes
-  `expected_name`, `actual_name`, and `match_type` (`"exact"`, `"direct_prefixed"`,
-  `"gateway"`, or `"search"`) so downstream tooling can distinguish how the match
-  was made.
-- **UI evaluator annotation**: `TestResultPanel` shows a compact annotation below
-  the evaluator reason when `match_type` is `"direct_prefixed"` or `"gateway"`,
-  e.g. `called as: mcp__mcp-service__health_check  [direct prefixed]`.
+- **Bottom panel tab bar coverage**: the Logs/Results tab bar is now
+  `sticky top-0 z-10` so it cannot be scrolled out of view when the panel
+  is small.
+- **Minimum panel height** reduced from 120px to 80px so the tab bar is
+  always fully visible with content below it.
 
 ## [0.7.12] - 2026-06-06
 

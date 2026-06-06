@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.12] - 2026-06-06
+
+### Fixed
+- **`OperationalError: table question_results has no column named tool_call_counts`**:
+  `TestStorage.__init__()` now calls `_apply_column_migrations()` after
+  `create_all()`. This method inspects `PRAGMA table_info` for each table and
+  issues `ALTER TABLE … ADD COLUMN` for any column that is missing, making the
+  migration automatic and idempotent. Covers `tool_call_counts`, `false_positive_rate`
+  (added in v0.7.10), and `total_cost` (added in v0.7.7) for existing DB files
+  that predate those releases.
+
 ## [0.7.11] - 2026-06-06
 
 ### Added

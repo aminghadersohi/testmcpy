@@ -187,8 +187,9 @@ class TestClaudeSDKVerboseLogs:
             "SystemMessage",
             (),
             {
-                "__init__": lambda s: (setattr(s, "subtype", "info"), setattr(s, "data", {}))
-                and None
+                "__init__": lambda s: (
+                    (setattr(s, "subtype", "info"), setattr(s, "data", {})) and None
+                )
             },
         )
 
@@ -203,12 +204,14 @@ class TestClaudeSDKVerboseLogs:
             (),
             {
                 "__init__": lambda s: (
-                    setattr(s, "usage", {}),
-                    setattr(s, "total_cost_usd", 0.001),
-                    setattr(s, "duration_ms", 100),
-                    setattr(s, "num_turns", 1),
+                    (
+                        setattr(s, "usage", {}),
+                        setattr(s, "total_cost_usd", 0.001),
+                        setattr(s, "duration_ms", 100),
+                        setattr(s, "num_turns", 1),
+                    )
+                    and None
                 )
-                and None
             },
         )
         ToolResultBlock = type("ToolResultBlock", (), {})

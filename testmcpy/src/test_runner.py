@@ -525,9 +525,20 @@ class TestRunner:
             self._log(f"Running test: {test_case.name}")
             if self.verbose:
                 self._log(f"Prompt: {test_case.prompt}")
-                self._log(f"Available tools: {len(formatted_tools)}")
                 self._log(f"Provider: {self.provider}, Model: {self.model}")
-                self._log(f"MCP URL: {self.mcp_url}")
+                if self.provider in ("assistant", "chatbot"):
+                    # AssistantProvider uses a chatbot completions endpoint;
+                    # tool discovery happens server-side so local counts are meaningless.
+                    endpoint = getattr(self.llm_provider, "completions_url", None) or (
+                        getattr(self.llm_provider, "base_url", "")
+                        + getattr(self.llm_provider, "completions_path", "")
+                    )
+                    if endpoint:
+                        self._log(f"Chatbot API: {endpoint}")
+                    self._log("(Tools provided server-side by chatbot backend)")
+                else:
+                    self._log(f"Available tools: {len(formatted_tools)}")
+                    self._log(f"MCP URL: {self.mcp_url}")
 
             # Determine timeout - CLI providers need more time
             # Use at least 120s for claude-cli and codex-cli

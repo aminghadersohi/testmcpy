@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.14] - 2026-06-06
+
+### Fixed
+- **Blank tool name in AssistantProvider verbose output**: `_handle_sse_event`
+  now tries multiple field name conventions for the `tool_call` event
+  (`tool_name`, `name`, `function_name`, `function.name`) and for `tool_result`
+  (`tool_name`, `name`, `function_name`), then falls back to matching the
+  stored `tool_calls` by `id`. Same multi-field fallback applied to
+  `arguments`/`input`/`parameters` and `tool_call_id`/`id`.
+- **Misleading "Available tools: 0" and "MCP URL: ..." for assistant provider**:
+  the runner verbose block now skips those lines for `assistant`/`chatbot`
+  providers and instead shows the chatbot completions endpoint URL and a note
+  that tools are managed server-side. `AssistantProvider` gains a
+  `completions_url` property for this purpose.
+
 ## [0.7.13] - 2026-06-06
 
 ### Fixed

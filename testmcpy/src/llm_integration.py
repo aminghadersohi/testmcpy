@@ -2265,6 +2265,11 @@ class AssistantProvider(LLMProvider):
 
     # --- Public API -------------------------------------------------
 
+    @property
+    def completions_url(self) -> str:
+        """Full URL of the chatbot completions endpoint, for display in verbose output."""
+        return f"{self.base_url}{self.completions_path}"
+
     async def initialize(self):
         """Validate config, create an HTTP client, authenticate, open conv."""
         cls_name = type(self).__name__
@@ -2666,13 +2671,39 @@ class AssistantProvider(LLMProvider):
             state.response_text += chunk
             state.token_event_count += 1
         elif event == "tool_call":
-            tc = {
-                "id": data.get("tool_call_id", ""),
-                "name": data.get("tool_name", ""),
-                "arguments": data.get("input", {}),
-            }
+            # Different chatbot backends use different field names — try all known variants.
+            fn_dict = data.get("function") if isinstance(data.get("function"), dict) else {}
+            tool_name = (
+                data.get("tool_name")
+                or data.get("name")
+                or data.get("function_name")
+                # Nested dict: {"function": {"name": ...}}
+                or fn_dict.get("name")
+                # Flattened dotted key: {"function.name": ...}
+                or data.get("function.name")
+                or ""
+            )
+            raw_args = (
+                data.get("input")
+                or data.get("arguments")
+                or data.get("parameters")
+                or fn_dict.get("arguments")
+                # Flattened dotted key
+                or data.get("function.arguments")
+                or {}
+            )
+            # Some backends serialise arguments as a JSON string rather than a dict.
+            if isinstance(raw_args, str):
+                try:
+                    raw_args = json.loads(raw_args)
+                except (json.JSONDecodeError, ValueError):
+                    raw_args = {}
+            tool_args: dict = raw_args if isinstance(raw_args, dict) else {}
+            tool_id = data.get("tool_call_id") or data.get("id", "")
+            tc = {"id": tool_id, "name": tool_name, "arguments": tool_args}
             state.tool_calls.append(tc)
-            log(f"[Assistant] Tool call: {tc['name']} (id={tc['id']})")
+            args_preview = json.dumps(tool_args)[:100] if tool_args else "{}"
+            log(f"[Assistant] Tool call: {tool_name}({args_preview}) id={tool_id}")
         elif event == "tool_result":
             result_payload = data.get("result")
             is_error = bool(data.get("is_error", False))
@@ -2680,10 +2711,15 @@ class AssistantProvider(LLMProvider):
                 if result_payload.get("isError") or result_payload.get("is_error"):
                     is_error = True
 
-            tool_call_id = data.get("tool_call_id", "")
-            tool_name = data.get("tool_name") or next(
-                (tc.get("name") for tc in state.tool_calls if tc.get("id") == tool_call_id),
-                None,
+            tool_call_id = data.get("tool_call_id") or data.get("id", "")
+            tool_name = (
+                data.get("tool_name")
+                or data.get("name")
+                or data.get("function_name")
+                or next(
+                    (tc.get("name") for tc in state.tool_calls if tc.get("id") == tool_call_id),
+                    None,
+                )
             )
 
             tr = MCPToolResult(

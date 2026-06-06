@@ -22,6 +22,7 @@ from testmcpy.src.llm_integration import (
     LLMResult,
     OpenAIProvider,
     OpenRouterProvider,
+    _SSEStreamState,
     create_llm_provider,
 )
 
@@ -283,6 +284,103 @@ class TestClaudeSDKVerboseLogs:
         thinking_lines = [line for line in result.logs if "Thinking:" in line]
         assert len(thinking_lines) == 1
         assert "..." in thinking_lines[0]  # ellipsis because text > 100 chars
+
+
+# ---------------------------------------------------------------------------
+# AssistantProvider SSE tool_call parsing tests
+# ---------------------------------------------------------------------------
+
+
+class TestAssistantSSEToolCallParsing:
+    """_handle_sse_event must extract tool name/args across backend field variants."""
+
+    def _make_provider(self):
+        p = AssistantProvider.__new__(AssistantProvider)
+        p.model = "default"
+        p.workspace_hash = "testhash"
+        p.domain = "example.com"
+        p.base_url = "https://testhash.example.com"
+        p.completions_path = "/api/v1/copilot/completions"
+        return p
+
+    def _run(self, data: dict) -> tuple[str, dict, str]:
+        provider = self._make_provider()
+        state = _SSEStreamState()
+        logs: list[str] = []
+        provider._handle_sse_event("tool_call", data, state, logs.append)
+        assert len(state.tool_calls) == 1
+        tc = state.tool_calls[0]
+        return tc["name"], tc["arguments"], tc["id"]
+
+    def test_canonical_fields(self):
+        name, args, tid = self._run(
+            {"tool_call_id": "id1", "tool_name": "get_info", "input": {"k": "v"}}
+        )
+        assert name == "get_info"
+        assert args == {"k": "v"}
+        assert tid == "id1"
+
+    def test_name_field_fallback(self):
+        name, args, _ = self._run({"name": "list_dashboards", "arguments": {"page": 1}})
+        assert name == "list_dashboards"
+        assert args == {"page": 1}
+
+    def test_function_name_field(self):
+        name, args, _ = self._run(
+            {"function_name": "create_chart", "parameters": {"title": "Sales"}}
+        )
+        assert name == "create_chart"
+        assert args == {"title": "Sales"}
+
+    def test_nested_function_dict(self):
+        name, args, _ = self._run(
+            {"function": {"name": "health_check", "arguments": {"verbose": True}}}
+        )
+        assert name == "health_check"
+        assert args == {"verbose": True}
+
+    def test_dotted_function_keys(self):
+        name, args, _ = self._run(
+            {"function.name": "get_schema", "function.arguments": {"model_type": "chart"}}
+        )
+        assert name == "get_schema"
+        assert args == {"model_type": "chart"}
+
+    def test_json_string_arguments_parsed(self):
+        """arguments delivered as a JSON string must be parsed into a dict."""
+        import json
+
+        name, args, _ = self._run(
+            {"name": "run_query", "arguments": json.dumps({"sql": "SELECT 1"})}
+        )
+        assert name == "run_query"
+        assert args == {"sql": "SELECT 1"}
+
+    def test_json_string_function_arguments_parsed(self):
+        """function.arguments as JSON string must also be parsed."""
+        import json
+
+        name, args, _ = self._run({"function": {"name": "foo", "arguments": json.dumps({"x": 1})}})
+        assert name == "foo"
+        assert args == {"x": 1}
+
+    def test_non_dict_function_value_ignored(self):
+        """If function is not a dict, fall back to other fields."""
+        name, args, _ = self._run({"function": "not_a_dict", "name": "fallback_tool"})
+        assert name == "fallback_tool"
+
+    def test_id_field_fallback(self):
+        name, _, tid = self._run({"id": "alt-id", "tool_name": "my_tool"})
+        assert tid == "alt-id"
+
+    def test_verbose_log_contains_name(self):
+        provider = self._make_provider()
+        state = _SSEStreamState()
+        logs: list[str] = []
+        provider._handle_sse_event(
+            "tool_call", {"tool_name": "list_charts", "input": {}}, state, logs.append
+        )
+        assert any("list_charts" in line for line in logs)
 
 
 # ---------------------------------------------------------------------------

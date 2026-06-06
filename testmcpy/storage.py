@@ -78,20 +78,31 @@ class TestResult:
 
 
 def _real_tool_name(tool_use: dict) -> str:
-    """Extract the logical tool name from a tool_use dict.
+    """Extract the canonical tool name from a tool_use dict.
 
-    Handles the gateway pattern where all calls go through call_tool and the
-    actual name lives in arguments.name (or arguments.tool_name for alternate
-    payloads), as well as direct MCP calls where the name is the suffix after
-    the last '__'.  Also falls back to the top-level tool_name key used by
-    some older/alternate payload shapes.
+    Handles three patterns:
+    - Gateway: mcp__ns__call_tool + arguments.name="list_dashboards" → "list_dashboards"
+    - Direct prefixed: mcp__ns__health_check → "health_check"
+    - Plain: "health_check" → "health_check"
+
+    Recurses so a gateway inner name that is itself prefixed is also normalized.
+    Falls back to tool_use["tool_name"] for alternate payload shapes.
     """
-    outer = tool_use.get("name") or tool_use.get("tool_name", "")
-    if outer.endswith("call_tool"):
-        args = tool_use.get("arguments", {})
-        inner = args.get("name") or args.get("tool_name", "call_tool")
-        return inner
-    return outer.split("__")[-1] if "__" in outer else outer
+    name = tool_use.get("name") or tool_use.get("tool_name", "")
+    args = tool_use.get("arguments", {})
+
+    # Gateway call: *__call_tool or bare "call_tool" — real name is in arguments
+    if name.endswith("__call_tool") or name == "call_tool":
+        inner = args.get("name") or args.get("tool_name") or ""
+        if inner:
+            return _real_tool_name({"name": inner, "arguments": {}})
+        return "call_tool"
+
+    # Direct prefixed call: mcp__namespace__tool_name → tool_name
+    if "__" in name:
+        return name.split("__")[-1]
+
+    return name
 
 
 class TestStorage:
@@ -752,7 +763,9 @@ class TestStorage:
                 if ev_name.startswith("was_tool_called:") or ev_name.startswith(
                     "was_mcp_tool_called:"
                 ):
-                    primary_tool = ev_name.split(":", 1)[1]
+                    raw = ev_name.split(":", 1)[1]
+                    # Normalize in case the evaluator name itself contains a prefix
+                    primary_tool = _real_tool_name({"name": raw})
                     break
 
             total_calls = sum(tool_call_counts.values())

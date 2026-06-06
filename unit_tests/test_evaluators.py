@@ -34,6 +34,7 @@ from testmcpy.evals.base_evaluators import (
     _match_tool_name,
     create_evaluator,
 )
+from testmcpy.storage import _real_tool_name
 
 
 # Mock ToolResult class for testing
@@ -138,6 +139,104 @@ class TestWasMCPToolCalled:
 
         evaluator_specific = WasMCPToolCalled(tool_name="my_tool")
         assert evaluator_specific.name == "was_tool_called:my_tool"
+
+    def test_match_type_exact(self):
+        evaluator = WasMCPToolCalled(tool_name="health_check")
+        context = {"tool_calls": [{"name": "health_check", "arguments": {}}]}
+        result = evaluator.evaluate(context)
+        assert result.passed is True
+        assert result.details["match_type"] == "exact"
+        assert result.details["expected_name"] == "health_check"
+        assert result.details["actual_name"] == "health_check"
+
+    def test_match_type_direct_prefixed(self):
+        evaluator = WasMCPToolCalled(tool_name="health_check")
+        context = {"tool_calls": [{"name": "mcp__mcp-service__health_check", "arguments": {}}]}
+        result = evaluator.evaluate(context)
+        assert result.passed is True
+        assert result.details["match_type"] == "direct_prefixed"
+        assert result.details["expected_name"] == "health_check"
+        assert result.details["actual_name"] == "mcp__mcp-service__health_check"
+
+    def test_match_type_gateway(self):
+        evaluator = WasMCPToolCalled(tool_name="list_dashboards")
+        context = {
+            "tool_calls": [
+                {
+                    "name": "mcp__mcp-service__call_tool",
+                    "arguments": {"name": "list_dashboards", "arguments": {}},
+                }
+            ]
+        }
+        result = evaluator.evaluate(context)
+        assert result.passed is True
+        assert result.details["match_type"] == "gateway"
+        assert result.details["expected_name"] == "list_dashboards"
+        assert result.details["actual_name"] == "list_dashboards"
+        assert "call_tool" in result.details["gateway"]
+
+    def test_match_type_none_on_failure(self):
+        evaluator = WasMCPToolCalled(tool_name="missing_tool")
+        context = {"tool_calls": [{"name": "other_tool", "arguments": {}}]}
+        result = evaluator.evaluate(context)
+        assert result.passed is False
+        assert result.details["match_type"] == "none"
+        assert result.details["expected_name"] == "missing_tool"
+        assert result.details["actual_name"] is None
+
+
+class TestRealToolName:
+    """Tests for the _real_tool_name helper used in false-positive rate computation."""
+
+    def test_plain_name(self):
+        assert _real_tool_name({"name": "health_check"}) == "health_check"
+
+    def test_direct_prefixed(self):
+        assert _real_tool_name({"name": "mcp__mcp-service__health_check"}) == "health_check"
+
+    def test_gateway_call_tool(self):
+        assert (
+            _real_tool_name(
+                {
+                    "name": "mcp__mcp-service__call_tool",
+                    "arguments": {"name": "list_dashboards"},
+                }
+            )
+            == "list_dashboards"
+        )
+
+    def test_gateway_inner_is_prefixed(self):
+        # Inner name itself contains a prefix — should recurse and strip it
+        assert (
+            _real_tool_name(
+                {
+                    "name": "mcp__mcp-service__call_tool",
+                    "arguments": {"name": "mcp__mcp-service__get_dashboard_info"},
+                }
+            )
+            == "get_dashboard_info"
+        )
+
+    def test_gateway_tool_name_key(self):
+        # Alternate payload shape: arguments.tool_name instead of arguments.name
+        assert (
+            _real_tool_name(
+                {
+                    "name": "call_tool",
+                    "arguments": {"tool_name": "create_chart"},
+                }
+            )
+            == "create_chart"
+        )
+
+    def test_outer_tool_name_key(self):
+        # Alternate payload shape: top-level tool_name key
+        assert _real_tool_name({"tool_name": "search_tools"}) == "search_tools"
+
+    def test_primary_tool_normalization(self):
+        # Simulates was_tool_called:mcp__ns__foo → should normalize to foo
+        raw = "mcp__mcp-service__get_dashboard_info"
+        assert _real_tool_name({"name": raw}) == "get_dashboard_info"
 
 
 class TestExecutionSuccessful:

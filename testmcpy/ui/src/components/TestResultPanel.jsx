@@ -191,6 +191,15 @@ function TestResultPanel({ result, initialExpanded = false }) {
                               {evaluation.reason}
                             </p>
                           )}
+                          {evaluation.details?.match_type && ['direct_prefixed', 'gateway', 'search'].includes(evaluation.details.match_type) && (
+                            <p className="text-xs text-text-disabled mt-0.5 font-mono">
+                              {evaluation.details.match_type === 'gateway'
+                                ? `called via: ${evaluation.details.gateway} → ${evaluation.details.actual_name}  [gateway]`
+                                : evaluation.details.match_type === 'search'
+                                ? `searched via: ${evaluation.details.actual_name}  [search]`
+                                : `called as: ${evaluation.details.actual_name}  [direct prefixed]`}
+                            </p>
+                          )}
                         </div>
                       </div>
                     </div>

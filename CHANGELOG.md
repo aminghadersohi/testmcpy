@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.10] - 2026-06-06
+
+### Added
+- **Tool call breakdown + false positive rate** per question result: `tool_call_counts`
+  (`{tool_name: count}`) and `false_positive_rate` (0–1) are now computed in
+  `save_question_result()`, stored in two new `question_results` columns
+  (Alembic migration included), returned by the API, and displayed in the
+  `TestResultPanel` UI after the tool-calls list.
+- **Score penalty** for unnecessary extra calls: score is multiplied by
+  `max(0.5, 1 - false_positive_rate)` unless the `unnecessary_tool_calls`
+  evaluator already penalised the result.
+
+### Fixed
+- **`MarkupError` crash** when LLM response contains URL-like brackets (e.g.
+  `/superset/dashboard/preset-prod/`): `run.py` now imports `escape` from
+  `rich.markup` and wraps `result.reason`, `result.error`, and
+  `result.error_message` before passing them to `console.print` /
+  `table.add_row`.
+
 ## [0.7.9] - 2026-06-06
 
 ### Fixed

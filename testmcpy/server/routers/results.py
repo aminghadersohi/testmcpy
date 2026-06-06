@@ -274,6 +274,8 @@ async def get_test_run(run_id: str) -> dict[str, Any]:
                 "score": qr["score"],
                 "duration": qr["duration_ms"] / 1000.0,
                 "cost": qr.get("cost_usd", 0.0),
+                "tool_call_counts": qr.get("tool_call_counts") or {},
+                "false_positive_rate": qr.get("false_positive_rate") or 0.0,
                 "response": qr["answer"],
                 "tool_calls": qr["tool_uses"],
                 "tool_results": qr["tool_results"],

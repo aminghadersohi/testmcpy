@@ -8,6 +8,7 @@ from typing import Optional
 
 import typer
 import yaml
+from rich.markup import escape
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.syntax import Syntax
@@ -133,7 +134,7 @@ def research(
                 table.add_row("Response Time", f"{result.response_time:.2f}s")
 
                 if result.error:
-                    table.add_row("Error", f"[red]{result.error}[/red]")
+                    table.add_row("Error", f"[red]{escape(result.error)}[/red]")
 
                 console.print(table)
 
@@ -642,7 +643,7 @@ def run(
                     f"  [red]FAILED[/red] (score: {result.score:.2f}, time: {result.duration:.2f}s)"
                 )
                 if result.reason:
-                    console.print(f"  [dim]Reason: {result.reason}[/dim]")
+                    console.print(f"  [dim]Reason: {escape(result.reason)}[/dim]")
 
             # Show tool calls if verbose
             if verbose and result.tool_calls:
@@ -692,7 +693,7 @@ def run(
                 status,
                 f"{result.score:.2f}",
                 f"{result.duration:.2f}s",
-                result.reason or "-",
+                escape(result.reason) if result.reason else "-",
             )
 
         console.print(table)
@@ -1348,7 +1349,7 @@ def _print_smoke_test_summary(report):
             if not result.success:
                 console.print(f"  • {result.test_name}")
                 if result.error_message:
-                    console.print(f"    [dim]{result.error_message}[/dim]")
+                    console.print(f"    [dim]{escape(result.error_message)}[/dim]")
 
 
 def _print_smoke_test_table(report):

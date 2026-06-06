@@ -77,6 +77,19 @@ class TestResult:
         return d
 
 
+def _real_tool_name(tool_use: dict) -> str:
+    """Extract the logical tool name from a tool_use dict.
+
+    Handles the gateway pattern where all calls go through call_tool and the
+    actual name lives in arguments.name, as well as direct MCP calls where the
+    name is the suffix after the last '__'.
+    """
+    if tool_use.get("name", "").endswith("call_tool"):
+        return tool_use.get("arguments", {}).get("name", "call_tool")
+    name = tool_use.get("name", "")
+    return name.split("__")[-1] if "__" in name else name
+
+
 class TestStorage:
     """SQLAlchemy-based storage for test versioning, results, and metrics."""
 
@@ -695,6 +708,39 @@ class TestStorage:
         error: str | None = None,
         cost_usd: float = 0.0,
     ) -> None:
+        # Compute tool call breakdown and false positive rate from tool_uses.
+        tool_call_counts: dict[str, int] = {}
+        false_positive_rate = 0.0
+
+        if tool_uses:
+            for tu in tool_uses:
+                tname = _real_tool_name(tu)
+                tool_call_counts[tname] = tool_call_counts.get(tname, 0) + 1
+
+            primary_tool: str | None = None
+            for ev in evaluations or []:
+                ev_name = ev.get("evaluator", "")
+                if ev_name.startswith("was_tool_called:") or ev_name.startswith(
+                    "was_mcp_tool_called:"
+                ):
+                    primary_tool = ev_name.split(":", 1)[1]
+                    break
+
+            total_calls = sum(tool_call_counts.values())
+            primary_calls = tool_call_counts.get(primary_tool, 0) if primary_tool else total_calls
+            if total_calls > 0:
+                false_positive_rate = (total_calls - primary_calls) / total_calls
+
+        # Apply score penalty for unnecessary extra calls, capped at 50% of original.
+        # Skip if the unnecessary_tool_calls evaluator already penalised this result.
+        already_penalized = any(
+            ev.get("evaluator", "").startswith("unnecessary_tool_calls")
+            and not ev.get("passed", True)
+            for ev in (evaluations or [])
+        )
+        if not already_penalized and false_positive_rate > 0:
+            score = score * max(0.5, 1.0 - false_positive_rate)
+
         with self._session() as session:
             result = QuestionResultModel(
                 run_id=run_id,
@@ -711,6 +757,8 @@ class TestStorage:
                 passed=passed,
                 error=error,
                 cost_usd=cost_usd,
+                tool_call_counts=tool_call_counts or None,
+                false_positive_rate=false_positive_rate,
                 created_at=datetime.now(timezone.utc),
             )
             session.add(result)
@@ -744,6 +792,8 @@ class TestStorage:
                     "passed": bool(q.passed),
                     "error": q.error,
                     "cost_usd": getattr(q, "cost_usd", 0.0) or 0.0,
+                    "tool_call_counts": getattr(q, "tool_call_counts", None) or {},
+                    "false_positive_rate": getattr(q, "false_positive_rate", 0.0) or 0.0,
                 }
                 for q in questions
             ]

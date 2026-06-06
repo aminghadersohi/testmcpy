@@ -70,6 +70,7 @@ class SingleTestRunRequest(BaseModel):
     provider: str | None = None
     profile: str | None = None
     llm_profile: str | None = None
+    provider_config: dict[str, Any] | None = None
 
 
 class GenerateTestsRequest(BaseModel):
@@ -141,6 +142,7 @@ async def run_single_test(request: SingleTestRunRequest):
     """Run a single ad-hoc test case from the Prompt Playground."""
     model = request.model or config.default_model
     provider = request.provider or config.default_provider
+    provider_config: dict[str, Any] = dict(request.provider_config or {})
 
     # Resolve API key from LLM profile if provided
     if request.llm_profile:
@@ -152,6 +154,21 @@ async def run_single_test(request: SingleTestRunRequest):
             if default_prov:
                 model = model or default_prov.model
                 provider = provider or default_prov.provider
+                # For assistant/chatbot providers, fold profile fields into
+                # provider_config so AssistantProvider.__init__ receives them.
+                if provider in ("assistant", "chatbot"):
+                    for field in (
+                        "workspace_hash",
+                        "domain",
+                        "api_token",
+                        "api_secret",
+                        "api_url",
+                        "conversations_path",
+                        "completions_path",
+                    ):
+                        val = getattr(default_prov, field, None)
+                        if val and field not in provider_config:
+                            provider_config[field] = val
 
     # Build evaluators list
     evaluator_configs = request.evaluators
@@ -186,6 +203,7 @@ async def run_single_test(request: SingleTestRunRequest):
             mcp_client=mcp_client,
             verbose=True,
             hide_tool_output=False,
+            provider_config=provider_config or {},
         )
 
         results = await runner.run_tests([test_case])

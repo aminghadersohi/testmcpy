@@ -45,13 +45,22 @@ class LLMProviderConfig:
     """Configuration for a single LLM provider."""
 
     name: str
-    provider: str  # anthropic, openai, ollama, local, claude-sdk, claude-cli
+    provider: str  # anthropic, openai, ollama, local, claude-sdk, assistant, ...
     model: str
     api_key: str | None = None  # Direct API key (stored in config)
     api_key_env: str | None = None  # Environment variable name for API key
     base_url: str | None = None  # For OpenAI-compatible APIs or Ollama
     timeout: int = 60
     default: bool = False  # Mark this as default provider in the profile
+
+    # AssistantProvider-specific fields
+    workspace_hash: str | None = None
+    domain: str | None = None
+    api_token: str | None = None  # JWT api_token for assistant auth
+    api_secret: str | None = None  # JWT api_secret for assistant auth
+    api_url: str | None = None  # JWT endpoint for assistant auth
+    conversations_path: str | None = None
+    completions_path: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary."""
@@ -63,12 +72,21 @@ class LLMProviderConfig:
             "default": self.default,
         }
         # Only include non-None optional fields
-        if self.api_key:
-            result["api_key"] = self.api_key
-        if self.api_key_env:
-            result["api_key_env"] = self.api_key_env
-        if self.base_url:
-            result["base_url"] = self.base_url
+        for fname in (
+            "api_key",
+            "api_key_env",
+            "base_url",
+            "workspace_hash",
+            "domain",
+            "api_token",
+            "api_secret",
+            "api_url",
+            "conversations_path",
+            "completions_path",
+        ):
+            val = getattr(self, fname)
+            if val is not None:
+                result[fname] = val
         return result
 
 
@@ -138,6 +156,8 @@ class LLMProfileConfig:
             for profile_id, profile_data in profiles_data.items():
                 providers = []
                 for provider_data in profile_data.get("providers", []):
+                    # Pull auth block if present (assistant provider pattern)
+                    auth_data = provider_data.get("auth", {}) or {}
                     provider = LLMProviderConfig(
                         name=provider_data.get("name", ""),
                         provider=provider_data.get("provider", "anthropic"),
@@ -147,6 +167,14 @@ class LLMProfileConfig:
                         base_url=provider_data.get("base_url"),
                         timeout=provider_data.get("timeout", 60),
                         default=provider_data.get("default", False),
+                        # AssistantProvider fields
+                        workspace_hash=provider_data.get("workspace_hash"),
+                        domain=provider_data.get("domain"),
+                        api_token=provider_data.get("api_token") or auth_data.get("api_token"),
+                        api_secret=provider_data.get("api_secret") or auth_data.get("api_secret"),
+                        api_url=provider_data.get("api_url") or auth_data.get("api_url"),
+                        conversations_path=provider_data.get("conversations_path"),
+                        completions_path=provider_data.get("completions_path"),
                     )
                     providers.append(provider)
 

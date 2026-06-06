@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.15] - 2026-06-06
+
+### Changed
+- **`AssistantProvider` endpoints are now configurable — no hardcodes**:
+  `_DEFAULT_CONVERSATIONS_PATH` and `_DEFAULT_COMPLETIONS_PATH` class constants
+  are removed. Both paths must now be supplied via `.llm_providers.yaml` or the
+  `--assistant-conversations-path` / `--assistant-completions-path` CLI flags;
+  `AssistantProvider.__init__` raises `ValueError` with a clear message if
+  either is missing.
+- **Auth no longer falls back to MCP config**: `api_token`, `api_secret`, and
+  `api_url` are no longer read from the default MCP server config. Values must
+  come from `.llm_providers.yaml` or the `--jwt-*` / `--assistant-api-*` CLI
+  flags. This removes the cross-concern coupling between MCP and chatbot auth.
+- **`.llm_providers.yaml` now accepts assistant fields**: `LLMProviderConfig`
+  gains `workspace_hash`, `domain`, `api_token`, `api_secret`, `api_url`,
+  `conversations_path`, `completions_path`. The YAML loader reads these from
+  either the top-level provider block or a nested `auth:` sub-block.
+- **Server `run-single` endpoint** passes `provider_config` to `TestRunner`
+  and folds LLM-profile assistant fields into it when an `llm_profile` is
+  provided.
+
 ## [0.7.14] - 2026-06-06
 
 ### Fixed

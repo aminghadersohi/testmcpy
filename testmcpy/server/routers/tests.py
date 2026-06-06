@@ -70,6 +70,7 @@ class SingleTestRunRequest(BaseModel):
     provider: str | None = None
     profile: str | None = None
     llm_profile: str | None = None
+    provider_config: dict[str, Any] | None = None
 
 
 class GenerateTestsRequest(BaseModel):
@@ -139,10 +140,14 @@ async def list_tests():
 @router.post("/tests/run-single")
 async def run_single_test(request: SingleTestRunRequest):
     """Run a single ad-hoc test case from the Prompt Playground."""
-    model = request.model or config.default_model
-    provider = request.provider or config.default_provider
+    # Don't fall back to config defaults yet — the LLM profile may supply
+    # model/provider, and the or-check below must see request.model/provider
+    # as None to honour the profile selection.
+    model: str | None = request.model
+    provider: str | None = request.provider
+    provider_config: dict[str, Any] = dict(request.provider_config or {})
 
-    # Resolve API key from LLM profile if provided
+    # Resolve model/provider/config from LLM profile if provided
     if request.llm_profile:
         from testmcpy.llm_profiles import load_llm_profile
 
@@ -152,6 +157,28 @@ async def run_single_test(request: SingleTestRunRequest):
             if default_prov:
                 model = model or default_prov.model
                 provider = provider or default_prov.provider
+                # For assistant/chatbot providers, fold profile fields into
+                # provider_config so AssistantProvider.__init__ receives them.
+                # Treat existing None or empty-string values as absent so the
+                # profile's value is applied even when the client serialised
+                # the field as null/"" rather than omitting it entirely.
+                if provider in ("assistant", "chatbot"):
+                    for fname in (
+                        "workspace_hash",
+                        "domain",
+                        "api_token",
+                        "api_secret",
+                        "api_url",
+                        "conversations_path",
+                        "completions_path",
+                    ):
+                        val = getattr(default_prov, fname, None)
+                        if val and not provider_config.get(fname):
+                            provider_config[fname] = val
+
+    # Fall back to global config defaults only if still unset after profile resolution
+    model = model or config.default_model
+    provider = provider or config.default_provider
 
     # Build evaluators list
     evaluator_configs = request.evaluators
@@ -186,6 +213,7 @@ async def run_single_test(request: SingleTestRunRequest):
             mcp_client=mcp_client,
             verbose=True,
             hide_tool_output=False,
+            provider_config=provider_config or {},
         )
 
         results = await runner.run_tests([test_case])

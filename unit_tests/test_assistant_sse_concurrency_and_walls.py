@@ -73,7 +73,12 @@ def _provider(
     heartbeat: float,
     response,
 ) -> AssistantProvider:
-    p = AssistantProvider(workspace_hash="ws-t", domain="example.com")
+    p = AssistantProvider(
+        workspace_hash="ws-t",
+        domain="example.com",
+        conversations_path="/api/v1/copilot/conversations",
+        completions_path="/api/v1/copilot/completions",
+    )
     p.PER_CALL_WALL_CLOCK_SECONDS = wall_clock
     p.SSE_IDLE_ABORT_SECONDS = idle
     p.HEARTBEAT_SECONDS = heartbeat

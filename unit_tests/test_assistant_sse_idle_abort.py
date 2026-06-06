@@ -65,7 +65,12 @@ class _FakeAsyncClient:
 
 
 def _make_provider(idle_seconds: float, lines: list[str]) -> AssistantProvider:
-    provider = AssistantProvider(workspace_hash="ws-test", domain="example.com")
+    provider = AssistantProvider(
+        workspace_hash="ws-test",
+        domain="example.com",
+        conversations_path="/api/v1/copilot/conversations",
+        completions_path="/api/v1/copilot/completions",
+    )
     provider.SSE_IDLE_ABORT_SECONDS = idle_seconds
     provider._client = _FakeAsyncClient(_FakeStreamResponse(lines))  # type: ignore[assignment]
     provider._session_token = "fake-jwt"
@@ -127,6 +132,11 @@ async def test_class_attribute_override_changes_threshold():
     provider = _make_provider(idle_seconds=0.1, lines=[])
     assert provider.SSE_IDLE_ABORT_SECONDS == 0.1
     # Class default is unchanged for other instances.
-    other = AssistantProvider(workspace_hash="ws-other", domain="example.com")
+    other = AssistantProvider(
+        workspace_hash="ws-other",
+        domain="example.com",
+        conversations_path="/api/v1/copilot/conversations",
+        completions_path="/api/v1/copilot/completions",
+    )
     assert other.SSE_IDLE_ABORT_SECONDS == AssistantProvider.SSE_IDLE_ABORT_SECONDS
     assert AssistantProvider.SSE_IDLE_ABORT_SECONDS == 90.0

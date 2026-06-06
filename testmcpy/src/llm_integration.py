@@ -2134,10 +2134,11 @@ class AssistantProvider(LLMProvider):
     ``_handle_sse_event``).
     """
 
-    # Default endpoint paths. Override via ``conversations_path`` /
-    # ``completions_path`` kwargs (or the matching CLI flags).
-    _DEFAULT_CONVERSATIONS_PATH = "/api/v1/copilot/conversations"
-    _DEFAULT_COMPLETIONS_PATH = "/api/v1/copilot/completions"
+    # No hardcoded default paths — every deployment may differ.
+    # Paths MUST be provided via .llm_providers.yaml or the
+    # --assistant-conversations-path / --assistant-completions-path CLI flags.
+    _DEFAULT_CONVERSATIONS_PATH: str | None = None
+    _DEFAULT_COMPLETIONS_PATH: str | None = None
 
     # If the SSE stream emits no recognized event for this many seconds,
     # abort the stream. Defends against a chatbot backend that keeps the
@@ -2231,23 +2232,27 @@ class AssistantProvider(LLMProvider):
         self.conversations_path = conversations_path or self._DEFAULT_CONVERSATIONS_PATH
         self.completions_path = completions_path or self._DEFAULT_COMPLETIONS_PATH
 
-        # Resolution: explicit kwargs > MCP profile auth (.mcp_services.yaml).
-        # Environment variables are NOT consulted in code paths — they're
-        # only resolved by ${VAR} substitution inside the YAML config files
-        # at load time. CLI users pass these via --workspace-hash / --domain
-        # / --environment / --assistant-api-* (or --jwt-* fallback).
-        config = get_config()
-        default_mcp = config.get_default_mcp_server()
-        auth_cfg: dict[str, Any] = {}
-        if default_mcp and default_mcp.auth:
-            auth_cfg = default_mcp.auth.to_dict()
+        if not self.conversations_path:
+            raise ValueError(
+                "AssistantProvider: conversations_path is required. "
+                "Set it in .llm_providers.yaml (conversations_path key under the provider) "
+                "or pass --assistant-conversations-path on the CLI."
+            )
+        if not self.completions_path:
+            raise ValueError(
+                "AssistantProvider: completions_path is required. "
+                "Set it in .llm_providers.yaml (completions_path key under the provider) "
+                "or pass --assistant-completions-path on the CLI."
+            )
 
+        # Auth must come from .llm_providers.yaml or explicit CLI flags.
+        # No fallback to MCP config — assistant and MCP are separate concerns.
         self.workspace_hash = workspace_hash or ""
         self.domain = domain or ""
         self.environment = environment or "staging"
-        self.api_token = api_token or auth_cfg.get("api_token", "")
-        self.api_secret = api_secret or auth_cfg.get("api_secret", "")
-        self.api_url = api_url or auth_cfg.get("api_url", "")
+        self.api_token = api_token or ""
+        self.api_secret = api_secret or ""
+        self.api_url = api_url or ""
 
         # Derive base workspace URL. Both workspace_hash and domain are
         # required — environment alone isn't enough since we don't ship

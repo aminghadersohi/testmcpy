@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.6] - 2026-06-06
+
+### Added
+- **Sidecar JSON after every `testmcpy run`**: results are now also written to
+  `tests/.results/<run_id>.json` in addition to the SQLite DB. The file is
+  created atomically (write to `.tmp` then rename) and the directory is
+  created if it doesn't exist. Structure: `run_id`, `test_file`, `provider`,
+  `model`, `mcp_profile`, `summary` (total/passed/failed/score), `results`.
+
 ## [0.7.5] - 2026-05-28
 
 ### Fixed

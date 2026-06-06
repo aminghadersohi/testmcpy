@@ -122,9 +122,11 @@ function TestResultPanel({ result, initialExpanded = false }) {
           )}
 
           {/* Tool Call Summary */}
-          {result.tool_call_counts && (Object.keys(result.tool_call_counts).length > 1 || result.false_positive_rate > 0) && (() => {
+          {/* Tool Call Summary */}
+          {result.tool_call_counts && (Object.keys(result.tool_call_counts).length > 1 || (result.false_positive_rate ?? 0) > 0) && (() => {
+            const fpr = result.false_positive_rate ?? 0
             const totalCalls = Object.values(result.tool_call_counts).reduce((a, b) => a + b, 0)
-            const nonPrimary = Math.round(result.false_positive_rate * totalCalls)
+            const nonPrimary = Math.min(totalCalls, Math.max(0, Math.round(fpr * totalCalls)))
             return (
               <div>
                 <h4 className="text-xs font-semibold text-text-secondary mb-1.5">Tool Call Summary</h4>

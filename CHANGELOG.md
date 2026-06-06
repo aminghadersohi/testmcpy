@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.8] - 2026-06-06
+
+### Added
+- **Exponential back-off for unavailable MCP servers**: when a connection or
+  `list_tools()` call fails, the server now waits before retrying — 5 s, 10 s,
+  20 s, 40 s … capped at 5 minutes. Previously the UI's polling caused a fresh
+  (expensive) connection attempt on every request, flooding the logs and
+  hammering a dead server. Back-off state is tracked per
+  `{profile_id}:{mcp_name}` key; a successful connection resets it. Client
+  evictions (after use-time errors) also trigger back-off so reconnects are
+  throttled in that path too.
+
 ## [0.7.7] - 2026-06-06
 
 ### Fixed

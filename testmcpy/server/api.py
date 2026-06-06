@@ -4,6 +4,7 @@ FastAPI server for testmcpy web UI.
 
 import asyncio
 import os
+import time
 import warnings
 
 # Suppress all deprecation warnings from websockets before any imports
@@ -42,7 +43,7 @@ from testmcpy.server.routers import tests as tests_router  # noqa: E402
 from testmcpy.server.routers import tools as tools_router  # noqa: E402
 from testmcpy.server.websocket import strip_mcp_prefix  # noqa: E402
 from testmcpy.src.llm_integration import create_llm_provider  # noqa: E402
-from testmcpy.src.mcp_client import MCPClient, MCPToolCall  # noqa: E402
+from testmcpy.src.mcp_client import MCPClient, MCPConnectionError, MCPToolCall  # noqa: E402
 
 
 # Enums for validation
@@ -107,6 +108,34 @@ mcp_clients: dict[str, MCPClient] = {}  # Cache of MCP clients by "{profile_id}:
 _client_init_locks: dict[str, asyncio.Lock] = {}
 active_websockets: list[WebSocket] = []
 
+# Exponential back-off state for failed MCP connections.
+# Maps cache_key → (next_retry_monotonic, failure_count)
+_connection_backoff: dict[str, tuple[float, int]] = {}
+_BACKOFF_BASE = 5.0  # seconds for first retry
+_BACKOFF_MAX = 300.0  # cap at 5 minutes
+
+
+def _backoff_remaining(cache_key: str) -> float:
+    """Return seconds until the next retry is allowed, or 0.0 if ready."""
+    entry = _connection_backoff.get(cache_key)
+    if entry is None:
+        return 0.0
+    next_retry, _ = entry
+    return max(0.0, next_retry - time.monotonic())
+
+
+def _record_failure(cache_key: str) -> None:
+    """Increment failure count and push out the next-retry timestamp."""
+    _, count = _connection_backoff.get(cache_key, (0.0, 0))
+    delay = min(_BACKOFF_BASE * (2**count), _BACKOFF_MAX)
+    _connection_backoff[cache_key] = (time.monotonic() + delay, count + 1)
+    print(f"  [MCP] Back-off: '{cache_key}' failure #{count + 1}, next retry in {delay:.0f}s")
+
+
+def _clear_failure(cache_key: str) -> None:
+    """Clear back-off state after a successful connection."""
+    _connection_backoff.pop(cache_key, None)
+
 
 def _get_init_lock(cache_key: str) -> asyncio.Lock:
     """Get or create an asyncio.Lock for a given cache key."""
@@ -144,6 +173,13 @@ async def get_mcp_clients_for_profile(profile_id: str) -> list[tuple[str, MCPCli
             clients.append((mcp_server.name, mcp_clients[cache_key]))
             continue
 
+        # Enforce back-off before attempting a fresh connection
+        remaining = _backoff_remaining(cache_key)
+        if remaining > 0:
+            raise MCPConnectionError(
+                f"MCP server '{mcp_server.name}' is unavailable; retry in {remaining:.0f}s"
+            )
+
         # Lock to prevent concurrent OAuth popups for the same server
         async with _get_init_lock(cache_key):
             # Re-check after acquiring lock
@@ -151,11 +187,23 @@ async def get_mcp_clients_for_profile(profile_id: str) -> list[tuple[str, MCPCli
                 clients.append((mcp_server.name, mcp_clients[cache_key]))
                 continue
 
+            # Re-check back-off (another task may have just failed)
+            remaining = _backoff_remaining(cache_key)
+            if remaining > 0:
+                raise MCPConnectionError(
+                    f"MCP server '{mcp_server.name}' is unavailable; retry in {remaining:.0f}s"
+                )
+
             # Create client with auth configuration
             auth_dict = mcp_server.auth.to_dict() if mcp_server.auth else None
             client = MCPClient(mcp_server.mcp_url, auth=auth_dict)
-            await client.initialize()
+            try:
+                await client.initialize()
+            except Exception:
+                _record_failure(cache_key)
+                raise
 
+            _clear_failure(cache_key)
             # Cache the client
             mcp_clients[cache_key] = client
             clients.append((mcp_server.name, client))
@@ -201,17 +249,36 @@ async def get_mcp_client_for_server(profile_id: str, mcp_name: str) -> MCPClient
     if cache_key in mcp_clients:
         return mcp_clients[cache_key]
 
+    # Enforce back-off before attempting a fresh connection
+    remaining = _backoff_remaining(cache_key)
+    if remaining > 0:
+        raise MCPConnectionError(
+            f"MCP server '{mcp_name}' is unavailable; retry in {remaining:.0f}s"
+        )
+
     # Lock to prevent concurrent OAuth popups for the same server
     async with _get_init_lock(cache_key):
         # Re-check after acquiring lock
         if cache_key in mcp_clients:
             return mcp_clients[cache_key]
 
+        # Re-check back-off (another task may have just failed)
+        remaining = _backoff_remaining(cache_key)
+        if remaining > 0:
+            raise MCPConnectionError(
+                f"MCP server '{mcp_name}' is unavailable; retry in {remaining:.0f}s"
+            )
+
         # Create client with auth configuration
         auth_dict = mcp_server.auth.to_dict() if mcp_server.auth else None
         client = MCPClient(mcp_server.mcp_url, auth=auth_dict)
-        await client.initialize()
+        try:
+            await client.initialize()
+        except Exception:
+            _record_failure(cache_key)
+            raise
 
+        _clear_failure(cache_key)
         # Cache the client
         mcp_clients[cache_key] = client
         print(
@@ -235,9 +302,11 @@ async def clear_cached_client(cache_key: str) -> bool:
 
     client = mcp_clients.pop(cache_key, None)
     if client:
+        # Record a failure so the next reconnect is throttled via back-off.
+        _record_failure(cache_key)
         try:
             await client.close()
-            print(f"Cleared cached client '{cache_key}' (stale JWT token)")
+            print(f"Cleared cached client '{cache_key}'")
         except Exception as e:
             print(f"Warning: Failed to close cached client '{cache_key}': {e}")
         return True

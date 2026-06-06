@@ -154,6 +154,138 @@ class TestClaudeSDKProviderOAuth:
 
 
 # ---------------------------------------------------------------------------
+# ClaudeSDK verbose log format tests
+# ---------------------------------------------------------------------------
+
+
+class TestClaudeSDKVerboseLogs:
+    """Assert that the new log-suppression and thinking-preview logic works."""
+
+    @pytest.mark.asyncio
+    async def test_assistant_message_header_suppressed(self, monkeypatch):
+        """Message #N: AssistantMessage must NOT appear in logs (content lines replace it)."""
+        import sys
+        import types
+
+        # Build minimal fake claude_agent_sdk with the types the code imports.
+        fake_pkg = types.ModuleType("claude_agent_sdk")
+        fake_types_mod = types.ModuleType("claude_agent_sdk.types")
+
+        # Name classes without underscores so type().__name__ matches what the
+        # production code logs (e.g. "AssistantMessage", not "_AssistantMessage").
+        TextBlock = type(
+            "TextBlock", (), {"__init__": lambda s, text: setattr(s, "text", text) or None}
+        )
+        ThinkingBlock = type(
+            "ThinkingBlock", (), {"__init__": lambda s, t: setattr(s, "thinking", t) or None}
+        )
+        AssistantMessage = type(
+            "AssistantMessage", (), {"__init__": lambda s, c: setattr(s, "content", c) or None}
+        )
+        UserMessage = type("UserMessage", (), {})
+        SystemMessage = type(
+            "SystemMessage",
+            (),
+            {
+                "__init__": lambda s: (
+                    (setattr(s, "subtype", "info"), setattr(s, "data", {})) and None
+                )
+            },
+        )
+
+        rl_info = type("RLInfo", (), {"status": "allowed", "utilization": None})()
+        RateLimitEvent = type(
+            "RateLimitEvent",
+            (),
+            {"__init__": lambda s: setattr(s, "rate_limit_info", rl_info) or None},
+        )
+        ResultMessage = type(
+            "ResultMessage",
+            (),
+            {
+                "__init__": lambda s: (
+                    (
+                        setattr(s, "usage", {}),
+                        setattr(s, "total_cost_usd", 0.001),
+                        setattr(s, "duration_ms", 100),
+                        setattr(s, "num_turns", 1),
+                    )
+                    and None
+                )
+            },
+        )
+        ToolResultBlock = type("ToolResultBlock", (), {})
+
+        # Populate fake package
+        for name, cls in [
+            ("AssistantMessage", AssistantMessage),
+            ("UserMessage", UserMessage),
+            ("SystemMessage", SystemMessage),
+            ("RateLimitEvent", RateLimitEvent),
+            ("ResultMessage", ResultMessage),
+            ("TextBlock", TextBlock),
+            ("ThinkingBlock", ThinkingBlock),
+            ("ToolUseBlock", type("ToolUseBlock", (), {})),
+            ("ClaudeAgentOptions", dict),
+            ("ClaudeSDKError", Exception),
+            ("CLIConnectionError", Exception),
+            ("CLINotFoundError", Exception),
+            ("ProcessError", Exception),
+        ]:
+            setattr(fake_pkg, name, cls)
+
+        fake_types_mod.ToolResultBlock = ToolResultBlock
+
+        # 120-char thinking string so truncation fires and ellipsis appears
+        long_thinking = 'I need to call "get_dashboard_info" to answer this. ' * 3
+
+        async def fake_query(prompt, options):
+            yield AssistantMessage(
+                [
+                    TextBlock("I'll look into that."),
+                    ThinkingBlock(long_thinking),
+                ]
+            )
+            yield RateLimitEvent()
+            yield ResultMessage()
+
+        fake_pkg.query = fake_query
+
+        monkeypatch.setitem(sys.modules, "claude_agent_sdk", fake_pkg)
+        monkeypatch.setitem(sys.modules, "claude_agent_sdk.types", fake_types_mod)
+
+        provider = ClaudeSDKProvider(model="claude-sonnet-4-5")
+        provider._initialized = True
+        provider._mcp_server_config = {}
+        provider.verbose = True
+
+        result = await provider.generate_with_tools("Hello", tools=[])
+
+        log_text = "\n".join(result.logs)
+
+        # Generic class-name headers must be suppressed for content-bearing types
+        assert "Message #1: AssistantMessage" not in log_text
+        assert "Message #1: UserMessage" not in log_text
+
+        # RateLimitEvent MUST keep its header (no dedicated content line)
+        assert "Message #2: RateLimitEvent" in log_text
+
+        # ResultMessage MUST keep its header
+        assert "Message #3: ResultMessage" in log_text
+
+        # Text content line must be present
+        assert "[ClaudeSDK] Text:" in log_text
+
+        # Thinking preview must appear with repr() and ellipsis
+        assert "[ClaudeSDK] Thinking:" in log_text
+        assert "chars)" in log_text
+        # The preview should use repr() — so quotes are present
+        thinking_lines = [line for line in result.logs if "Thinking:" in line]
+        assert len(thinking_lines) == 1
+        assert "..." in thinking_lines[0]  # ellipsis because text > 100 chars
+
+
+# ---------------------------------------------------------------------------
 # LLMResult Parsing Tests
 # ---------------------------------------------------------------------------
 

@@ -9,24 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.7.13] - 2026-06-06
 
-### Added
-- **Run All directory button** in the Tests tab sidebar: each folder header now
-  shows a hover-reveal play button that sequentially runs every test file in
-  that folder using the same LLM/MCP profile as the single-file run. A
-  spinner badge shows `N/M` progress while running; a summary alert reports
-  pass/fail when complete.
-- **Multi-select delete for history runs** in the Tests tab history panel:
-  a "Select" toggle enters multi-select mode with per-row checkboxes, a
-  "Select All" header checkbox, and a "Delete N" button that calls
-  `POST /api/results/runs/bulk-delete` and removes the deleted entries from
-  the history list.
-
 ### Fixed
-- **Bottom panel tab bar coverage**: the Logs/Results tab bar is now
-  `sticky top-0 z-10` so it cannot be scrolled out of view when the panel
-  is small.
-- **Minimum panel height** reduced from 120px to 80px so the tab bar is
-  always fully visible with content below it.
+- **ClaudeSDK verbose log noise**: `Message #N: AssistantMessage` / `UserMessage`
+  header lines are now suppressed for types that already log their own content
+  (text, tool calls, tool results). Only `RateLimitEvent` and `ResultMessage` —
+  which have no content block logged below them — keep the header line.
+- **Thinking preview**: `Thinking (N chars)` is now
+  `Thinking: "first 100 chars..." (N chars)` so the model's reasoning is
+  visible at a glance without expanding anything.
 
 ## [0.7.12] - 2026-06-06
 

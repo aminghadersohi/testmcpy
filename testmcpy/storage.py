@@ -115,6 +115,31 @@ class TestStorage:
         self._SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=self._engine)
         # Ensure all tables exist (safe for existing DBs)
         Base.metadata.create_all(bind=self._engine)
+        # Add any columns introduced after the initial schema without requiring
+        # a manual `alembic upgrade` on existing DB files.
+        self._apply_column_migrations()
+
+    def _apply_column_migrations(self) -> None:
+        """Idempotently add columns that were introduced after the initial schema.
+
+        create_all() creates missing *tables* but never alters existing ones, so
+        users who created their DB before a new column was added will hit
+        OperationalError on INSERT.  This method uses PRAGMA table_info to detect
+        missing columns and issues ALTER TABLE … ADD COLUMN for each one.
+        """
+        # (table, column, DDL type)
+        migrations = [
+            ("question_results", "tool_call_counts", "JSON"),
+            ("question_results", "false_positive_rate", "FLOAT DEFAULT 0.0"),
+            ("test_runs", "total_cost", "FLOAT DEFAULT 0.0"),
+        ]
+        with self._engine.connect() as conn:
+            for table, column, col_type in migrations:
+                result = conn.execute(text(f"PRAGMA table_info({table})"))
+                existing = {row[1] for row in result}
+                if column not in existing:
+                    conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}"))
+            conn.commit()
 
     def _session(self) -> Session:
         return self._SessionLocal()

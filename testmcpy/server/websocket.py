@@ -5,6 +5,7 @@ WebSocket support for streaming chat responses and test execution.
 import asyncio
 import time
 from pathlib import Path
+from typing import Any
 
 import yaml
 from fastapi import WebSocket, WebSocketDisconnect
@@ -198,6 +199,7 @@ async def _run_test_command(websocket: WebSocket, data: dict, config, send_log):
     model = data.get("model") or config.default_model
     provider = data.get("provider") or config.default_provider
     profile = data.get("profile")
+    llm_profile_id = data.get("llm_profile")
 
     if not test_path.exists():
         await manager.send_message(
@@ -227,6 +229,45 @@ async def _run_test_command(websocket: WebSocket, data: dict, config, send_log):
 
         effective_provider = suite_provider or provider
         effective_model = suite_model or model
+
+        # Build the final provider_config. For assistant/chatbot we fold in
+        # the assistant-specific fields (workspace_hash, domain, JWT auth,
+        # path overrides) from the selected LLM profile in `.llm_providers.yaml`
+        # — without these, AssistantProvider.__init__ raises ValueError. The
+        # CLI accepts them as flags; the websocket has no flags so it must
+        # pick them up from the profile config the user already maintains.
+        # Precedence: explicit suite YAML `provider_config:` > LLM profile.
+        effective_provider_config: dict[str, Any] = dict(suite_provider_config or {})
+        if effective_provider in ("assistant", "chatbot") and llm_profile_id:
+            from testmcpy.llm_profiles import load_llm_profile
+
+            llm_profile = load_llm_profile(llm_profile_id)
+            if llm_profile:
+                # Prefer the entry in the profile whose `provider` matches the
+                # one we're about to run; otherwise fall back to the profile
+                # default. This handles the common pattern of an LLM profile
+                # bundling several providers (e.g. claude-sdk + assistant) where
+                # the suite YAML pins which one to use.
+                assistant_entry = (
+                    next(
+                        (p for p in llm_profile.providers if p.provider == effective_provider),
+                        None,
+                    )
+                    or llm_profile.get_default_provider()
+                )
+                if assistant_entry:
+                    for fname in (
+                        "workspace_hash",
+                        "domain",
+                        "api_token",
+                        "api_secret",
+                        "api_url",
+                        "conversations_path",
+                        "completions_path",
+                    ):
+                        val = getattr(assistant_entry, fname, None)
+                        if val and not effective_provider_config.get(fname):
+                            effective_provider_config[fname] = val
 
         # Filter to specific test if requested
         if test_name:
@@ -285,7 +326,7 @@ async def _run_test_command(websocket: WebSocket, data: dict, config, send_log):
             verbose=True,
             hide_tool_output=False,
             log_callback=send_log,
-            provider_config=suite_provider_config,
+            provider_config=effective_provider_config,
             # We emit our own per-test "🧪 Running test … / 📝 Prompt / ⏱️ Timeout"
             # block below, so the runner must not also emit its own (would create
             # two collapsible test groups in the UI for every test).

@@ -78,7 +78,7 @@ export function TestRunProvider({ children }) {
   }, [streamingLogs, testResults, testStatuses, runningTests, persistState])
 
   // Run all tests for a file
-  const runTests = useCallback(async (testFile, testPath, llmConfig, mcpProfile, testLocations = []) => {
+  const runTests = useCallback(async (testFile, testPath, llmConfig, mcpProfile, testLocations = [], llmProfile = null) => {
     if (running) return
 
     setRunning(true)
@@ -118,6 +118,7 @@ export function TestRunProvider({ children }) {
           model: llmConfig.model,
           provider: llmConfig.provider,
           profile: mcpProfile,
+          llm_profile: llmProfile,
         }))
       }
 
@@ -229,7 +230,7 @@ export function TestRunProvider({ children }) {
   }, [running])
 
   // Run a single test
-  const runSingleTest = useCallback(async (testName, testFile, testPath, llmConfig, mcpProfile) => {
+  const runSingleTest = useCallback(async (testName, testFile, testPath, llmConfig, mcpProfile, llmProfile = null) => {
     if (running) return
 
     setRunning(true)
@@ -255,6 +256,7 @@ export function TestRunProvider({ children }) {
           model: llmConfig.model,
           provider: llmConfig.provider,
           profile: mcpProfile,
+          llm_profile: llmProfile,
         }))
       }
 

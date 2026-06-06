@@ -44,6 +44,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with a "suite override" pill, and `getLlmConfig()` (used for both
   single-test and run-all flows) sends the override-aware values to the
   websocket.
+- **Chatbot YAMLs crashed in the UI with `AssistantProvider requires
+  workspace_hash AND domain`**: the websocket never folded
+  `.llm_providers.yaml` credentials into the runner's `provider_config`
+  the way `POST /tests/run-single` already does. UI now sends the
+  selected `llm_profile` over the WebSocket; server-side, when the
+  effective provider is `assistant`/`chatbot`, the websocket loads the
+  profile and merges `workspace_hash` / `domain` / `api_token` /
+  `api_secret` / `api_url` / `conversations_path` / `completions_path`
+  into `provider_config` (suite-level YAML keys still win). Chatbot
+  YAMLs now launch from the Tests page without the
+  `--workspace-hash`/`--domain` CLI flags.
 
 ## [0.7.15] - 2026-06-06
 

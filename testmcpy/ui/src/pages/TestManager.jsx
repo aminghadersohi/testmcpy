@@ -1019,7 +1019,7 @@ function TestManager({ selectedProfiles = [], selectedLlmProfile = null, llmProf
     if (!selectedFile || running) return
     const llmConfig = getLlmConfig()
     const testFile = selectedFile.relative_path || selectedFile.filename
-    contextRunSingleTest(testName, testFile, selectedFile.path, llmConfig, selectedMcpProfile)
+    contextRunSingleTest(testName, testFile, selectedFile.path, llmConfig, selectedMcpProfile, selectedLlmProfile)
   }
 
   const loadTestFiles = async () => {
@@ -1166,7 +1166,7 @@ tests:
     if (!selectedFile) return
     const llmConfig = getLlmConfig()
     const testFile = selectedFile.relative_path || selectedFile.filename
-    contextRunTests(testFile, selectedFile.path, llmConfig, selectedMcpProfile, testLocations)
+    contextRunTests(testFile, selectedFile.path, llmConfig, selectedMcpProfile, testLocations, selectedLlmProfile)
     setBottomPanelTab('logs') // Show logs while running
   }
 

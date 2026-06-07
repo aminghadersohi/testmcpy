@@ -480,13 +480,32 @@ async def _run_test_command(websocket: WebSocket, data: dict, config, send_log):
         # Save results to history
         try:
             from testmcpy.server.routers.results import save_test_run_to_file
+            from testmcpy.server.routers.tests import _extra_tests_dirs
 
-            # Get relative path from tests directory if possible
+            # Derive a stable history label. Prefer the relative path
+            # under <cwd>/tests (or any TESTMCPY_EXTRA_TESTS_DIRS root,
+            # namespaced under that root's basename) so two external
+            # suites that happen to share a YAML basename — e.g.
+            # `foo/C01.yaml` and `bar/C01.yaml` — get distinct history
+            # entries instead of colliding on `C01.yaml`.
             tests_dir = Path.cwd() / "tests"
-            if test_path.is_relative_to(tests_dir):
-                test_file_name = str(test_path.relative_to(tests_dir))
-            else:
-                test_file_name = test_path.name
+            test_file_name = test_path.name
+            try:
+                resolved_test_path = test_path.resolve()
+                if resolved_test_path.is_relative_to(tests_dir.resolve()):
+                    test_file_name = str(resolved_test_path.relative_to(tests_dir.resolve()))
+                else:
+                    for extra_root in _extra_tests_dirs():
+                        extra_real = extra_root.resolve()
+                        if resolved_test_path.is_relative_to(extra_real):
+                            test_file_name = (
+                                f"{extra_root.name}/{resolved_test_path.relative_to(extra_real)}"
+                            )
+                            break
+            except OSError:
+                # resolve() failed (broken symlink, etc.) — fall back to
+                # the basename rather than crashing the save.
+                pass
 
             save_data = {
                 "test_file": test_file_name,

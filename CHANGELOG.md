@@ -7,6 +7,82 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.17] - 2026-06-06
+
+### Fixed
+- **Chatbot evals always returned an empty response after server-side
+  tool execution**: the Preset `/api/v1/copilot/completions` endpoint
+  emits `tool_call` + `tool_result` events on the first SSE stream and
+  then closes WITHOUT a `final` / `token` event. The generated answer
+  arrives only on a SECOND POST that reuses the same `conversation_id`.
+  `AssistantProvider.generate_with_tools` only made one POST, so
+  `response_includes`-style evaluators couldn't match anything.
+  `generate_with_tools` now issues a follow-up POST when the previous
+  turn ended with tool_results but no answer text and no
+  final/error/abort signal. Capped at `MAX_COMPLETION_TURNS = 3` and
+  stops early when a turn produces zero new tool_results (so a backend
+  in a steady "no more work" state can't pin the runner). The
+  concurrency-limit semaphore is now held across all turns so the cap
+  limits parallel logical requests, not parallel POSTs.
+- **Multi-turn loop stopped too early on transitional text**
+  (regression in C01_2_dashboard_drill_down): the Preset chatbot
+  backend streams "thinking aloud" sentences (e.g. `Let me work through
+  this step by step.`) ALONGSIDE tool calls in the same SSE turn — no
+  `final` event yet. The first stop-condition (`text grew → break`)
+  surfaced that fragment as the answer and never issued the follow-up
+  that contained the real analysis. Stop conditions reordered:
+  `got_final`/`got_error` first (authoritative), then aborts, then
+  `text grew AND no new tool_results` (heuristic). Transitional text
+  alongside new tool calls now correctly keeps the loop going. 2 added
+  tests pin the transitional-text path and the "text without new
+  tool_results triggers stop even without a `final` event" path. 8
+  total multi-turn tests.
+
+### Added
+- **External / symlinked test directory discovery in the UI**:
+  - `GET /api/tests` now walks `<cwd>/tests` with `os.walk(followlinks=True)`,
+    so a `ln -s /path/to/external/suite tests/suite` shows up in the
+    Tests page (Path.rglob in 3.11 silently skipped these).
+  - A new `TESTMCPY_EXTRA_TESTS_DIRS` env var (os.pathsep-separated
+    absolute paths) registers external test roots that get walked and
+    namespaced under their basename so different suites stay
+    visually distinct in the file tree.
+  - Symlink-cycle guard via `realpath` so `tests/loop -> tests/` (or
+    any cross-tree loop between roots) terminates safely.
+  - The same `realpath` set now suppresses duplicate listings when the
+    same physical dir is reachable BOTH via a symlink under `tests/`
+    AND a `TESTMCPY_EXTRA_TESTS_DIRS` entry. The symlink label wins
+    (primary scan runs first). When both modes resolve to the same
+    suite, prefer the symlink form so the editor + edit endpoints have
+    a single canonical local path.
+  - `GET /api/tests/{filename}`, `PUT /api/tests/{filename}`, and
+    `DELETE /api/tests/{filename}` now resolve via a shared
+    `_resolve_test_file` helper that searches `<cwd>/tests` AND each
+    `TESTMCPY_EXTRA_TESTS_DIRS` root. Externally-discovered files are
+    now viewable + savable + deletable from the UI editor (previously
+    they 404ed because the endpoints only checked under `<cwd>/tests`).
+    Path-traversal guards (`is_relative_to(allowed_root)`) extend to
+    every allowed root.
+  - The streaming runner's history label now uses the discovered
+    relative path under any allowed root (e.g.
+    `preset-mcp-tests/chatbot/C01.yaml`) rather than collapsing to a
+    bare basename, so two external suites sharing a filename can't
+    collide in the history index.
+  - Discovery loop catches `Exception` (with a `noqa` rationale) so
+    one bad YAML — UnicodeDecodeError, malformed structure, etc. —
+    doesn't 500 the entire Tests page.
+  - All discovered files carry absolute `path` values so
+    `run-single` / the streaming runner can open them regardless of
+    discovery method.
+  - 17 unit tests cover symlinked subdirs, cycle guard, single + multi
+    extra-root, stale env-var entries, dedup, broken-YAML resilience,
+    view/edit-extra-root resolution, path-traversal block, and baseline
+    no-regression paths.
+
+> If a suite is reachable both via a `tests/<sym>` symlink AND a
+> `TESTMCPY_EXTRA_TESTS_DIRS` entry, the symlink label wins — pick one
+> mechanism per suite to keep the UI grouping predictable.
+
 ## [0.7.16] - 2026-06-06
 
 ### Fixed

@@ -49,12 +49,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     visually distinct in the file tree.
   - Symlink-cycle guard via `realpath` so `tests/loop -> tests/` (or
     any cross-tree loop between roots) terminates safely.
+  - The same `realpath` set now suppresses duplicate listings when the
+    same physical dir is reachable BOTH via a symlink under `tests/`
+    AND a `TESTMCPY_EXTRA_TESTS_DIRS` entry. The symlink label wins
+    (primary scan runs first). When both modes resolve to the same
+    suite, prefer the symlink form so the editor + edit endpoints have
+    a single canonical local path.
+  - `GET /api/tests/{filename}`, `PUT /api/tests/{filename}`, and
+    `DELETE /api/tests/{filename}` now resolve via a shared
+    `_resolve_test_file` helper that searches `<cwd>/tests` AND each
+    `TESTMCPY_EXTRA_TESTS_DIRS` root. Externally-discovered files are
+    now viewable + savable + deletable from the UI editor (previously
+    they 404ed because the endpoints only checked under `<cwd>/tests`).
+    Path-traversal guards (`is_relative_to(allowed_root)`) extend to
+    every allowed root.
+  - The streaming runner's history label now uses the discovered
+    relative path under any allowed root (e.g.
+    `preset-mcp-tests/chatbot/C01.yaml`) rather than collapsing to a
+    bare basename, so two external suites sharing a filename can't
+    collide in the history index.
+  - Discovery loop catches `Exception` (with a `noqa` rationale) so
+    one bad YAML — UnicodeDecodeError, malformed structure, etc. —
+    doesn't 500 the entire Tests page.
   - All discovered files carry absolute `path` values so
     `run-single` / the streaming runner can open them regardless of
-    discovery method; the existing websocket fallback to `test_path.name`
-    handles display names for files outside `<cwd>/tests`.
-  - 9 unit tests cover the symlinked-subdir, cycle-guard, single + multi
-    extra-root, stale-env-var-entries, and baseline-no-regression paths.
+    discovery method.
+  - 17 unit tests cover symlinked subdirs, cycle guard, single + multi
+    extra-root, stale env-var entries, dedup, broken-YAML resilience,
+    view/edit-extra-root resolution, path-traversal block, and baseline
+    no-regression paths.
+
+> If a suite is reachable both via a `tests/<sym>` symlink AND a
+> `TESTMCPY_EXTRA_TESTS_DIRS` entry, the symlink label wins — pick one
+> mechanism per suite to keep the UI grouping predictable.
 
 ## [0.7.16] - 2026-06-06
 

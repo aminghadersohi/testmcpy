@@ -14,11 +14,16 @@ import os
 from pathlib import Path
 
 import pytest
+from fastapi import HTTPException
 
+from testmcpy.server.routers.tests import TestFileUpdate as _TestFileUpdate
 from testmcpy.server.routers.tests import (
     _discover_yaml_tests,
     _extra_tests_dirs,
+    _resolve_test_file,
+    get_test_file,
     list_tests,
+    update_test_file,
 )
 
 # ----------------------------------------------------------------------
@@ -212,3 +217,176 @@ def test_discover_yaml_tests_returns_empty_for_nonexistent_root(tmp_path):
     folders, files = _discover_yaml_tests(tmp_path / "does-not-exist")
     assert folders == {}
     assert files == []
+
+
+# ----------------------------------------------------------------------
+# Dedup: same dir via symlink AND extra-root must not list files twice
+# (Copilot review on PR #73, line 115).
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_same_dir_via_symlink_and_extra_root_is_deduped(tmp_path, monkeypatch):
+    """The realpath dedup check kicks in BEFORE the walk so YAMLs that
+    sit directly under a root reachable both as a `tests/<sym>` symlink
+    AND a `TESTMCPY_EXTRA_TESTS_DIRS` entry don't appear twice. The
+    symlink label wins because the primary scan runs first."""
+    cwd = tmp_path / "cwd"
+    (cwd / "tests").mkdir(parents=True)
+    external = tmp_path / "external"
+    _write_yaml(external / "A.yaml", "a")
+    os.symlink(external, cwd / "tests" / "external")
+
+    monkeypatch.chdir(cwd)
+    monkeypatch.setenv("TESTMCPY_EXTRA_TESTS_DIRS", str(external))
+    result = await list_tests()
+
+    # Every file appears at most once across the flattened listing.
+    flat = list(result["files"]) + [f for v in result["folders"].values() for f in v]
+    a_yaml = [f for f in flat if f["filename"] == "A.yaml"]
+    assert len(a_yaml) == 1, flat
+    # Symlink-label group wins because the primary `tests/` walk ran first.
+    assert "external" in result["folders"], result["folders"].keys()
+
+
+# ----------------------------------------------------------------------
+# Bad YAMLs: a single unreadable file must not 500 the endpoint
+# (Copilot review on PR #73, line 172).
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_unreadable_yaml_does_not_break_discovery(tmp_path, monkeypatch):
+    """A YAML with invalid UTF-8 (or other parse fault) used to surface
+    as a 500 because the catch was narrowed to (OSError, yaml.YAMLError).
+    Discovery must skip the file and keep listing the rest of the tree."""
+    cwd = tmp_path / "cwd"
+    (cwd / "tests").mkdir(parents=True)
+    _write_yaml(cwd / "tests" / "ok.yaml", "ok")
+    # Write invalid UTF-8 bytes to a .yaml file — open(f).read() will raise
+    # UnicodeDecodeError before yaml.safe_load is even called.
+    (cwd / "tests" / "broken.yaml").write_bytes(b"\xff\xfe\x00\x00not utf-8")
+
+    monkeypatch.chdir(cwd)
+    monkeypatch.delenv("TESTMCPY_EXTRA_TESTS_DIRS", raising=False)
+    result = await list_tests()
+
+    filenames = [f["filename"] for f in result["files"]]
+    assert "ok.yaml" in filenames
+    # The broken file is silently skipped (a print() goes to stderr
+    # in real life; nothing leaks to the API response).
+    assert "broken.yaml" not in filenames
+
+
+# ----------------------------------------------------------------------
+# _resolve_test_file + view/edit endpoints for extra-root files
+# (Amin review on PR #73, item 1).
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_view_endpoint_resolves_extra_root_file(tmp_path, monkeypatch):
+    """`GET /api/tests/{filename}` must succeed for a file discovered
+    via `TESTMCPY_EXTRA_TESTS_DIRS`. Before this fix the endpoint
+    short-circuited to 404 because it only checked under <cwd>/tests."""
+    cwd = tmp_path / "cwd"
+    (cwd / "tests").mkdir(parents=True)
+    external = tmp_path / "preset-mcp-tests"
+    _write_yaml(external / "chatbot" / "C01.yaml", "c1")
+
+    monkeypatch.chdir(cwd)
+    monkeypatch.setenv("TESTMCPY_EXTRA_TESTS_DIRS", str(external))
+
+    # Discovery key for that file is `<root.name>/<rel>` (the same shape
+    # the file tree uses as `relative_path`).
+    response = await get_test_file("preset-mcp-tests/chatbot/C01.yaml")
+    assert "C01.yaml" in response["path"]
+    assert "name: c1" in response["content"]
+
+
+@pytest.mark.asyncio
+async def test_view_endpoint_404_for_missing_extra_root_file(tmp_path, monkeypatch):
+    """Asking for a path that doesn't exist under any allowed root must
+    still 404 — the new resolver must not accidentally open arbitrary
+    files (path-traversal guard)."""
+    cwd = tmp_path / "cwd"
+    (cwd / "tests").mkdir(parents=True)
+    external = tmp_path / "preset-mcp-tests"
+    external.mkdir()
+    monkeypatch.chdir(cwd)
+    monkeypatch.setenv("TESTMCPY_EXTRA_TESTS_DIRS", str(external))
+
+    with pytest.raises(HTTPException) as exc:
+        await get_test_file("preset-mcp-tests/does-not-exist.yaml")
+    assert exc.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_view_endpoint_blocks_path_traversal_via_extra_root(tmp_path, monkeypatch):
+    """`preset-mcp-tests/../../../etc/passwd`-style paths must NOT
+    resolve to anything outside the extra root, even though they have
+    the right prefix."""
+    cwd = tmp_path / "cwd"
+    (cwd / "tests").mkdir(parents=True)
+    external = tmp_path / "preset-mcp-tests"
+    external.mkdir()
+    # A real file outside the extra root that traversal would otherwise hit.
+    (tmp_path / "secret.yaml").write_text("name: leaked")
+    monkeypatch.chdir(cwd)
+    monkeypatch.setenv("TESTMCPY_EXTRA_TESTS_DIRS", str(external))
+
+    assert _resolve_test_file("preset-mcp-tests/../secret.yaml") is None
+    with pytest.raises(HTTPException) as exc:
+        await get_test_file("preset-mcp-tests/../secret.yaml")
+    assert exc.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_update_endpoint_writes_back_to_extra_root(tmp_path, monkeypatch):
+    """The save flow must write to the file's original on-disk location
+    (under the extra root), not silently create a fresh copy under
+    <cwd>/tests."""
+    cwd = tmp_path / "cwd"
+    (cwd / "tests").mkdir(parents=True)
+    external = tmp_path / "preset-mcp-tests"
+    _write_yaml(external / "chatbot" / "C01.yaml", "c1")
+
+    monkeypatch.chdir(cwd)
+    monkeypatch.setenv("TESTMCPY_EXTRA_TESTS_DIRS", str(external))
+
+    new_yaml = "tests:\n  - name: c1_updated\n    prompt: changed"
+    body = _TestFileUpdate(content=new_yaml)
+    response = await update_test_file("preset-mcp-tests/chatbot/C01.yaml", body)
+    # The on-disk file actually changed and stays under the external root.
+    on_disk = (external / "chatbot" / "C01.yaml").read_text()
+    assert "c1_updated" in on_disk
+    # A local mirror was NOT created under <cwd>/tests.
+    assert not (cwd / "tests" / "preset-mcp-tests").exists()
+    assert response["filename"] == "preset-mcp-tests/chatbot/C01.yaml"
+
+
+def test_resolve_test_file_local_files_still_work(tmp_path, monkeypatch):
+    """Sanity-check the local path: a plain <cwd>/tests file resolves
+    without going through the extra-root branch."""
+    cwd = tmp_path / "cwd"
+    (cwd / "tests").mkdir(parents=True)
+    _write_yaml(cwd / "tests" / "smoke.yaml", "s")
+    monkeypatch.chdir(cwd)
+    monkeypatch.delenv("TESTMCPY_EXTRA_TESTS_DIRS", raising=False)
+
+    resolved = _resolve_test_file("smoke.yaml")
+    assert resolved is not None
+    assert resolved.name == "smoke.yaml"
+
+
+def test_resolve_test_file_returns_none_for_unknown_root(tmp_path, monkeypatch):
+    """If the head of the filename doesn't match any extra root's
+    basename, _resolve_test_file returns None (no silent walks)."""
+    cwd = tmp_path / "cwd"
+    (cwd / "tests").mkdir(parents=True)
+    external = tmp_path / "preset-mcp-tests"
+    external.mkdir()
+    monkeypatch.chdir(cwd)
+    monkeypatch.setenv("TESTMCPY_EXTRA_TESTS_DIRS", str(external))
+
+    assert _resolve_test_file("some-other-suite/file.yaml") is None

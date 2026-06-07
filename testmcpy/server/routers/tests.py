@@ -110,9 +110,19 @@ def _discover_yaml_tests(
     if seen_real_dirs is None:
         seen_real_dirs = set()
     try:
-        seen_real_dirs.add(os.path.realpath(root))
+        root_real = os.path.realpath(root)
     except OSError:
-        pass
+        root_real = None
+    # If the same physical directory was already walked by a previous
+    # invocation (e.g. an external root is also reachable via a symlink
+    # under `tests/`), skip the whole walk — otherwise the YAMLs sitting
+    # directly inside `root` would be listed twice. The earlier-walk's
+    # label wins, which matches the user-visible behaviour we want
+    # (symlink label > env-var label for files reachable via both).
+    if root_real is not None and root_real in seen_real_dirs:
+        return folders, root_files
+    if root_real is not None:
+        seen_real_dirs.add(root_real)
 
     # os.walk with followlinks=True lets symlinked subdirs under `root`
     # be discovered (Path.rglob in 3.11 deliberately skips them).
@@ -137,6 +147,12 @@ def _discover_yaml_tests(
             if not fname.endswith(".yaml"):
                 continue
             file = Path(dirpath) / fname
+            # Discovery is best-effort: a single malformed/unreadable YAML
+            # must NOT 500 the entire /api/tests endpoint. The previous
+            # implementation caught Exception for this reason; the narrower
+            # (OSError, yaml.YAMLError) catch missed UnicodeDecodeError,
+            # AttributeError, and TypeError that real-world files trip
+            # (https://github.com/preset-io/testmcpy/pull/73#…).
             try:
                 with open(file) as f:
                     content = f.read()
@@ -168,9 +184,54 @@ def _discover_yaml_tests(
                     folders.setdefault(folder_name, []).append(file_info)
                 else:
                     root_files.append(file_info)
-            except (OSError, yaml.YAMLError) as e:
+            except Exception as e:  # noqa: BLE001 — discovery loop, see comment above
                 print(f"Error reading {file}: {e}")
     return folders, root_files
+
+
+def _resolve_test_file(filename: str) -> Path | None:
+    """Map a UI-supplied `relative_path` (the field that `/api/tests`
+    returns for every discovered file) to its actual filesystem path,
+    covering both the local `tests/` tree (and any symlinks under it)
+    AND any external roots registered via `TESTMCPY_EXTRA_TESTS_DIRS`.
+
+    Returns the resolved file Path if it exists under any allowed root,
+    else None. Allowed roots are: `<cwd>/tests` and every directory
+    listed in `TESTMCPY_EXTRA_TESTS_DIRS`. We resolve()-canonicalize
+    both root and candidate before comparing so a symlink anywhere in
+    the path can't escape (e.g. `../../etc/passwd`).
+
+    External roots match the first path segment of `filename` against
+    the root's basename — same shape `_discover_yaml_tests` writes to
+    `relative_path` (e.g. `preset-mcp-tests/chatbot/C01.yaml` resolves
+    to `<that-root>/chatbot/C01.yaml`).
+    """
+    if not filename:
+        return None
+
+    tests_dir = Path.cwd() / "tests"
+    candidate = (tests_dir / filename).resolve()
+    try:
+        if candidate.exists() and candidate.is_relative_to(tests_dir.resolve()):
+            return candidate
+    except OSError:
+        # resolve() can raise on weird platforms; treat as miss.
+        pass
+
+    head, _, rest = filename.partition("/")
+    if not head or not rest:
+        # No prefix to match against an extra root.
+        return None
+    for extra_root in _extra_tests_dirs():
+        if extra_root.name != head:
+            continue
+        candidate = (extra_root / rest).resolve()
+        try:
+            if candidate.exists() and candidate.is_relative_to(extra_root.resolve()):
+                return candidate
+        except OSError:
+            continue
+    return None
 
 
 def _extra_tests_dirs() -> list[Path]:
@@ -906,11 +967,15 @@ tests:"""
 
 @router.get("/tests/{filename:path}")
 async def get_test_file(filename: str):
-    """Get content of a specific test file (supports paths like 'folder/file.yaml')."""
-    tests_dir = Path.cwd() / "tests"
-    file_path = tests_dir / filename
+    """Get content of a specific test file (supports paths like 'folder/file.yaml').
 
-    if not file_path.exists() or not file_path.is_relative_to(tests_dir):
+    Resolves against both `<cwd>/tests` (and its symlinks) and any
+    `TESTMCPY_EXTRA_TESTS_DIRS` external root so the editor opens files
+    surfaced via either discovery mode — previously env-var-registered
+    files were run-only and 404ed in the UI editor.
+    """
+    file_path = _resolve_test_file(filename)
+    if file_path is None:
         raise HTTPException(status_code=404, detail="Test file not found")
 
     try:
@@ -977,11 +1042,13 @@ async def create_test_file(request: TestFileCreate):
 
 @router.put("/tests/{filename:path}")
 async def update_test_file(filename: str, request: TestFileUpdate):
-    """Update an existing test file. Accepts either structured test data or raw YAML content."""
-    tests_dir = Path.cwd() / "tests"
-    file_path = tests_dir / filename
-
-    if not file_path.exists() or not file_path.is_relative_to(tests_dir):
+    """Update an existing test file. Accepts either structured test data
+    or raw YAML content. Resolves against `<cwd>/tests` AND any
+    `TESTMCPY_EXTRA_TESTS_DIRS` external root — the editor saves the
+    file back where it was discovered, not into a fresh local copy.
+    """
+    file_path = _resolve_test_file(filename)
+    if file_path is None:
         raise HTTPException(status_code=404, detail="Test file not found")
 
     # Determine if this is structured data or raw content
@@ -1023,11 +1090,15 @@ async def update_test_file(filename: str, request: TestFileUpdate):
 
 @router.delete("/tests/{filename:path}")
 async def delete_test_file(filename: str):
-    """Delete a test file (supports paths like 'folder/file.yaml')."""
-    tests_dir = Path.cwd() / "tests"
-    file_path = tests_dir / filename
+    """Delete a test file (supports paths like 'folder/file.yaml').
 
-    if not file_path.exists() or not file_path.is_relative_to(tests_dir):
+    Resolves against `<cwd>/tests` AND any `TESTMCPY_EXTRA_TESTS_DIRS`
+    external root so external suites have the same delete behaviour as
+    local files. The resolver's allowed-root check still protects
+    against path-traversal escapes.
+    """
+    file_path = _resolve_test_file(filename)
+    if file_path is None:
         raise HTTPException(status_code=404, detail="Test file not found")
 
     try:

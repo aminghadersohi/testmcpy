@@ -23,9 +23,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stops early when a turn produces zero new tool_results (so a backend
   in a steady "no more work" state can't pin the runner). The
   concurrency-limit semaphore is now held across all turns so the cap
-  limits parallel logical requests, not parallel POSTs. 6 unit tests
-  cover the two-turn / single-shot / three-turn / cap-hit /
-  no-new-tool-results / same-payload paths.
+  limits parallel logical requests, not parallel POSTs.
+- **Multi-turn loop stopped too early on transitional text**
+  (regression in C01_2_dashboard_drill_down): the Preset chatbot
+  backend streams "thinking aloud" sentences (e.g. `Let me work through
+  this step by step.`) ALONGSIDE tool calls in the same SSE turn — no
+  `final` event yet. The first stop-condition (`text grew → break`)
+  surfaced that fragment as the answer and never issued the follow-up
+  that contained the real analysis. Stop conditions reordered:
+  `got_final`/`got_error` first (authoritative), then aborts, then
+  `text grew AND no new tool_results` (heuristic). Transitional text
+  alongside new tool calls now correctly keeps the loop going. 2 added
+  tests pin the transitional-text path and the "text without new
+  tool_results triggers stop even without a `final` event" path. 8
+  total multi-turn tests.
 
 ### Added
 - **External / symlinked test directory discovery in the UI**:

@@ -145,6 +145,41 @@ _THIRD_TURN_ANSWER = [
     "",
 ]
 
+# Real-world Preset chatbot pattern from C01_2_dashboard_drill_down:
+# the backend streams a transitional "thinking aloud" sentence ALONGSIDE
+# tool calls in the same SSE turn — there is no `final` event yet.
+# Earlier code that broke on any text growth would surface this fragment
+# as the final answer; the loop must keep going.
+_FIRST_TURN_TRANSITIONAL_TEXT_PLUS_TOOLS = [
+    "event: token",
+    'data: {"chunk": "Let me work through this step by step."}',
+    "",
+    "event: tool_call",
+    'data: {"tool_call_id": "tc-1", "tool_name": "search_tools", "input": {"q": "dashboard"}}',
+    "",
+    "event: tool_result",
+    'data: {"tool_call_id": "tc-1", "tool_name": "search_tools", "result": {"hits": 5}}',
+    "",
+    "event: tool_call",
+    'data: {"tool_call_id": "tc-2", "tool_name": "list_dashboards", "input": {}}',
+    "",
+    "event: tool_result",
+    'data: {"tool_call_id": "tc-2", "tool_name": "list_dashboards", "result": {"items": []}}',
+    "",
+]
+
+_SECOND_TURN_FINAL_ANALYSIS = [
+    "event: token",
+    'data: {"chunk": "The Sales Overview dashboard contains 3 charts measuring "}',
+    "",
+    "event: token",
+    'data: {"chunk": "monthly revenue from the orders dataset."}',
+    "",
+    "event: final",
+    'data: {"answer": "The Sales Overview dashboard contains 3 charts measuring monthly revenue from the orders dataset."}',
+    "",
+]
+
 
 @pytest.mark.asyncio
 async def test_followup_post_when_first_turn_only_returns_tool_results():
@@ -240,9 +275,9 @@ async def test_no_followup_when_first_turn_emits_no_tool_results():
 
     assert len(client.posts) == 1
     assert result.response == ""
-    assert any(
-        "No new tool_results this turn and no answer text" in line for line in result.logs
-    ), result.logs
+    assert any("No new tool_results and no answer text" in line for line in result.logs), (
+        result.logs
+    )
 
 
 @pytest.mark.asyncio
@@ -265,6 +300,74 @@ async def test_three_turn_flow_text_in_final_turn():
     assert result.response == "Done."
     assert len(result.tool_calls) == 3
     assert len(result.tool_results) == 3
+
+
+@pytest.mark.asyncio
+async def test_followup_post_when_first_turn_has_transitional_text_with_tools():
+    """Regression for the C01_2_dashboard_drill_down failure: the backend
+    streams a transitional sentence ("Let me work through this step by
+    step.") *alongside* tool_call + tool_result events in the same SSE
+    turn — and does NOT emit a `final` event yet. The earlier "any text
+    arrived → stop" check surfaced that fragment as the answer and never
+    issued the follow-up POST. The fix requires text growth AND no new
+    tool_results to break, so transitional chatter while tools are still
+    in flight keeps the loop going.
+    """
+    client = _ScriptedAsyncClient(
+        [_FIRST_TURN_TRANSITIONAL_TEXT_PLUS_TOOLS, _SECOND_TURN_FINAL_ANALYSIS]
+    )
+    p = _provider(client)
+
+    result = await p.generate_with_tools(
+        prompt="Find any dashboard on this workspace and tell me what it measures.",
+        timeout=30.0,
+    )
+
+    assert len(client.posts) == 2, (
+        "expected a follow-up POST — transitional text + new tool_results must NOT stop the loop"
+    )
+    # The synthesized answer from the second turn overrides the fragment.
+    assert (
+        result.response == "Let me work through this step by step."
+        "The Sales Overview dashboard contains 3 charts measuring "
+        "monthly revenue from the orders dataset."
+    )
+    # response_includes-style evaluators now have a body that matches.
+    for keyword in ("dashboard", "charts", "measuring"):
+        assert keyword in result.response, (keyword, result.response)
+    # Tool state accumulated from turn 1.
+    assert [tc["name"] for tc in result.tool_calls] == [
+        "search_tools",
+        "list_dashboards",
+    ]
+    assert len(result.tool_results) == 2
+
+
+@pytest.mark.asyncio
+async def test_loop_stops_when_text_grows_without_new_tool_results():
+    """Counterpart to the transitional-text test: if a turn produces
+    answer text and NO new tool calls (the backend's "I'm done, here's
+    the answer" state), the loop must stop even without an explicit
+    `final` event. Otherwise a chatbot that doesn't emit `final` would
+    waste the remaining budget on no-op follow-ups."""
+    # Turn 1 has the original tools + text. Turn 2 returns ONLY text —
+    # no new tool_results, no `final` event. Loop should break after
+    # turn 2 and not waste a 3rd POST.
+    text_only_no_final = [
+        "event: token",
+        'data: {"chunk": "Here is the answer."}',
+        "",
+    ]
+    client = _ScriptedAsyncClient([_FIRST_TURN_TRANSITIONAL_TEXT_PLUS_TOOLS, text_only_no_final])
+    p = _provider(client)
+
+    result = await p.generate_with_tools(prompt="give me the answer", timeout=30.0)
+
+    assert len(client.posts) == 2, (
+        f"expected exactly 2 POSTs, got {len(client.posts)} — loop should "
+        "stop once text grows with no new tool_results, even without a final event"
+    )
+    assert "Here is the answer." in result.response
 
 
 @pytest.mark.asyncio

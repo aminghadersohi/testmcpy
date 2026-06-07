@@ -2530,24 +2530,33 @@ class AssistantProvider(LLMProvider):
 
                 total_event_count += event_count
 
-                # Decide whether to do a follow-up POST. We stop on ANY of:
-                #   - we have answer text (the whole point — backend returned
-                #     either streamed tokens or a final.answer)
-                #   - backend explicitly signaled completion (`final` event)
-                #   - backend signaled an error
-                #   - one of the streaming safety guards fired
-                #   - this turn didn't produce any new tool_results (so a
-                #     follow-up would just be wasted POSTs against a backend
-                #     that has nothing more to do)
-                if state.response_text and len(state.response_text) > pre_turn_response_len:
-                    break
+                # Decide whether to do a follow-up POST. Order matters here —
+                # `got_final` is the AUTHORITATIVE completion signal and must
+                # win over the heuristic text-grew check (the chatbot backend
+                # interleaves transitional text like "Let me work through this
+                # step by step." with tool calls in the same SSE turn; a naïve
+                # "any text arrived → stop" would have surfaced that fragment
+                # as the final answer and never issue the follow-up that
+                # contains the real analysis. SC-108177).
+                #
+                # Stop on ANY of:
+                #   1. backend explicitly signaled completion or error
+                #   2. one of the streaming safety guards fired
+                #   3. text grew AND no new tool_results this turn — we got a
+                #      synthesized answer with no outstanding server-side work
+                #   4. nothing happened this turn (no text, no tools) — a
+                #      follow-up would just be a no-op POST
                 if state.got_final or state.got_error:
                     break
                 if idle_aborted or wall_clock_aborted:
                     break
-                if len(state.tool_results) == pre_turn_tool_results:
+                text_grew = len(state.response_text) > pre_turn_response_len
+                new_tool_results_this_turn = len(state.tool_results) > pre_turn_tool_results
+                if text_grew and not new_tool_results_this_turn:
+                    break
+                if not text_grew and not new_tool_results_this_turn:
                     log(
-                        "[Assistant] No new tool_results this turn and no answer text — "
+                        "[Assistant] No new tool_results and no answer text — "
                         "stopping multi-turn loop (would be a no-op POST)"
                     )
                     break

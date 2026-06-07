@@ -43,13 +43,18 @@ import EditorTabStrip from '../components/EditorTabStrip'
 //
 // We scan only the leading lines (before `tests:` or any deeper block),
 // matching `key: value` with no indentation. Quoted values are stripped.
+// `continue` (not `break`) on indented/nested lines: top-level keys can
+// legitimately appear after a multi-line nested block (e.g. a
+// `provider_config:` map followed by `tests:`). The `tests:` key always
+// terminates the scan since per-test prompts/models live below it; this
+// guards against picking up a stray `model:` from inside a test entry.
 // Returns { provider: string|null, model: string|null }.
 function parseSuiteOverride(content) {
   if (!content) return { provider: null, model: null }
   const out = { provider: null, model: null }
   const lines = content.split('\n')
   for (const line of lines) {
-    // Stop scanning once we hit a nested block — top-level keys are flush left.
+    // Skip nested / indented lines — top-level keys are flush left.
     if (line.startsWith('  ') || line.startsWith('\t') || line.startsWith('-')) continue
     const m = line.match(/^([A-Za-z_][\w]*)\s*:\s*(.*?)\s*(?:#.*)?$/)
     if (!m) continue
@@ -811,7 +816,9 @@ function TestManager({ selectedProfiles = [], selectedLlmProfile = null, llmProf
   // whatever the LLM profile defaults to).
   const getLlmConfig = () => {
     const suite = parseSuiteOverride(fileContent)
-    let model = 'claude-sonnet-4-20250514'
+    // Defaults match what the Python config layer uses when nothing is
+    // configured (keep these in sync with config.default_model / default_provider).
+    let model = 'claude-sonnet-4-6'
     let provider = 'claude-sdk'
     if (selectedLlmProfile && llmProfiles.length > 0) {
       const profile = llmProfiles.find(p => p.profile_id === selectedLlmProfile)
@@ -1643,11 +1650,21 @@ tests:
                   const effectiveModel = suite.model || defaultProv.model
                   const effectiveProvider = suite.provider || defaultProv.provider
                   const overridden = !!(suite.provider || suite.model)
+                  // Chatbot YAMLs declare `model: default` to mean "let the
+                  // server pick" — rendering the literal string "default" as
+                  // a model name reads like a bug. Show a friendlier label
+                  // (italic, lowercased) so the user can tell it's a sentinel.
+                  const modelIsSentinel = effectiveModel === 'default'
                   return (
                     <div className="flex items-center gap-2 text-xs">
                       <span className="text-text-tertiary">Using:</span>
-                      <span className="px-2 py-1 rounded bg-surface-elevated border border-border text-text-secondary font-mono">
-                        {effectiveModel}
+                      <span
+                        className={`px-2 py-1 rounded bg-surface-elevated border border-border font-mono ${
+                          modelIsSentinel ? 'italic text-text-tertiary' : 'text-text-secondary'
+                        }`}
+                        title={modelIsSentinel ? 'YAML declares model: default — the chatbot endpoint picks the actual model.' : effectiveModel}
+                      >
+                        {modelIsSentinel ? 'provider default' : effectiveModel}
                       </span>
                       <span className="px-1.5 py-0.5 rounded text-[10px] font-medium uppercase tracking-wide bg-blue-500/20 text-blue-400">
                         {effectiveProvider}

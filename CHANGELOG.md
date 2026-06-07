@@ -55,6 +55,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   into `provider_config` (suite-level YAML keys still win). Chatbot
   YAMLs now launch from the Tests page without the
   `--workspace-hash`/`--domain` CLI flags.
+- **MCP-profile fallback for chatbot credentials**: most users'
+  `.llm_providers.yaml` only lists Claude/OpenAI providers — they have
+  no `assistant` entry to merge from. The websocket now derives
+  `workspace_hash` + `domain` from the selected MCP profile's URL
+  (`https://<workspace_hash>.<domain>/mcp`) and pulls `api_url` /
+  `api_token` / `api_secret` from the MCP profile's JWT auth block. A
+  `🔑 Derived from MCP profile …` log line names exactly which fields
+  were filled, so users can see what to add to `.llm_providers.yaml`
+  if they want explicit control. Suite YAML and LLM profile values
+  still win — this is the last resort, not a default.
+
+### Changed
+- **`getLlmConfig` UI fallback model**: `claude-sonnet-4-20250514` is
+  retired; default fallback is now `claude-sonnet-4-6` (matches the
+  Python defaults already updated in earlier releases).
+- **"Using:" badge handles the `model: default` sentinel**: chatbot
+  YAMLs declare `model: default` to mean "let the chatbot endpoint
+  pick"; the badge now renders this as italic "provider default"
+  with a tooltip explaining the sentinel, instead of looking like a
+  buggy literal "default" string.
 
 ## [0.7.15] - 2026-06-06
 

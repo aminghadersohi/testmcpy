@@ -398,8 +398,14 @@ def run(
         mcp_client = None
         skip_mcp_init = banner_provider in ("assistant", "chatbot")
 
+        # For assistant/chatbot we never open a local MCP connection
+        # (tools are resolved server-side by the chatbot endpoint).
+        # For everything else, pick the auth source (inline > profile > default).
         if skip_mcp_init:
-            pass  # mcp_client stays None
+            # The `pass` looks redundant but isn't — without it the elif/else
+            # below would run for assistant/chatbot too and try to open OAuth
+            # against an MCP server we never intended to hit.
+            pass
         elif inline_auth and effective_mcp_url:
             # Use inline auth flags — bypass profile system entirely
             from testmcpy.src.mcp_client import MCPClient

@@ -6,6 +6,7 @@ import asyncio
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import yaml
 from fastapi import WebSocket, WebSocketDisconnect
@@ -27,6 +28,35 @@ def strip_mcp_prefix(tool_name: str) -> str:
         # Get the last part after the final __
         return tool_name.rsplit("__", 1)[-1]
     return tool_name
+
+
+def _derive_workspace_and_domain_from_mcp_url(mcp_url: str) -> tuple[str | None, str | None]:
+    """Split a Preset MCP URL into (workspace_hash, domain).
+
+    Preset workspaces always live at `https://<workspace_hash>.<domain>/mcp`
+    — the workspace hash is the leftmost subdomain. We use this when running
+    a chatbot YAML from the UI: the selected MCP profile already encodes
+    which workspace the chat tests should target, so we can populate the
+    AssistantProvider's `workspace_hash`/`domain` automatically rather than
+    forcing the user to duplicate that info in `.llm_providers.yaml`.
+
+    Returns (None, None) if the URL is missing, lacks a host, has only one
+    label, or is otherwise unparseable — the caller treats that as "no
+    fallback available" and leaves the existing config untouched.
+    """
+    if not mcp_url:
+        return None, None
+    try:
+        parsed = urlparse(mcp_url)
+    except (ValueError, TypeError):
+        return None, None
+    host = parsed.hostname
+    if not host or "." not in host:
+        return None, None
+    workspace, _, domain = host.partition(".")
+    if not workspace or not domain:
+        return None, None
+    return workspace, domain
 
 
 class ConnectionManager:
@@ -316,6 +346,48 @@ async def _run_test_command(websocket: WebSocket, data: dict, config, send_log):
         effective_mcp_url = config.get_mcp_url()
         if mcp_client and hasattr(mcp_client, "base_url") and mcp_client.base_url:
             effective_mcp_url = mcp_client.base_url
+
+        # MCP profile fallback for assistant/chatbot credentials.
+        #
+        # The CLI takes workspace_hash/domain/JWT via flags; the WebSocket
+        # has no flag-equivalent. We've already tried the LLM profile —
+        # if it didn't have an `assistant`/`chatbot` entry (very common —
+        # most users' `.llm_providers.yaml` only lists Claude/OpenAI
+        # providers), the merge above was a no-op and we'd otherwise crash
+        # in AssistantProvider.__init__.
+        #
+        # The selected MCP profile already encodes which workspace we're
+        # targeting, and Preset chatbot endpoints use the same JWT as the
+        # MCP server, so deriving the missing fields from the MCP profile
+        # is the correct path for the "run a chatbot eval from the UI"
+        # flow. We never overwrite an explicit suite-YAML or LLM-profile
+        # value — this is a last-resort fallback.
+        if effective_provider in ("assistant", "chatbot") and mcp_client is not None:
+            filled_from_mcp: list[str] = []
+            ws_hash, domain = _derive_workspace_and_domain_from_mcp_url(effective_mcp_url)
+            if ws_hash and not effective_provider_config.get("workspace_hash"):
+                effective_provider_config["workspace_hash"] = ws_hash
+                filled_from_mcp.append("workspace_hash")
+            if domain and not effective_provider_config.get("domain"):
+                effective_provider_config["domain"] = domain
+                filled_from_mcp.append("domain")
+            auth_cfg = getattr(mcp_client, "auth_config", None) or {}
+            if isinstance(auth_cfg, dict) and auth_cfg.get("type") == "jwt":
+                for src_key, dst_key in (
+                    ("api_url", "api_url"),
+                    ("api_token", "api_token"),
+                    ("api_secret", "api_secret"),
+                ):
+                    val = auth_cfg.get(src_key)
+                    if val and not effective_provider_config.get(dst_key):
+                        effective_provider_config[dst_key] = val
+                        filled_from_mcp.append(dst_key)
+            if filled_from_mcp:
+                await send_log(
+                    f"🔑 Derived from MCP profile '{effective_profile}': "
+                    f"{', '.join(filled_from_mcp)} "
+                    "(add an `assistant` entry to .llm_providers.yaml to override)"
+                )
 
         # Create runner with streaming log callback
         runner = TestRunner(

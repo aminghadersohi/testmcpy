@@ -12,8 +12,8 @@ duplicate group header in the UI's StreamingLogViewer, which parses every
 
 import pytest
 
-from testmcpy.src.test_runner import TestCase, TestRunner
 from testmcpy.src.llm_integration import LLMResult
+from testmcpy.src.test_runner import TestCase, TestRunner
 
 
 class _FakeProvider:
@@ -124,3 +124,28 @@ async def test_quiet_mode_suppresses_chatbot_announcement_lines_too():
     assert not any(line.startswith("Chatbot API:") for line in logs), logs
     assert not any("(Tools provided server-side" in line for line in logs), logs
     assert not any(line.startswith("Provider: ") for line in logs), logs
+
+
+@pytest.mark.asyncio
+async def test_loud_mode_chatbot_emits_chatbot_api_and_tools_server_side_lines():
+    """Counterpart to the quiet-mode chatbot test: in loud mode (CLI default)
+    the chatbot branch DOES emit its dedicated 'Chatbot API:' + 'Tools provided
+    server-side' lines (the assistant/chatbot branch in run_test). Without
+    this positive test, a refactor that silently dropped both branches would
+    only get caught by the quiet-mode test's negative assertions, which can't
+    distinguish "branch removed" from "branch correctly suppressed"."""
+    runner, logs = _make_runner(quiet=False, provider="chatbot")
+    # Give the provider a base_url + completions_path so "Chatbot API:" gets
+    # the endpoint suffix and is exercised end-to-end.
+    runner.llm_provider.base_url = "https://ws-test.example.com"  # type: ignore[attr-defined]
+    runner.llm_provider.completions_path = "/api/v1/copilot/completions"  # type: ignore[attr-defined]
+
+    await runner.run_test(_make_test_case())
+
+    chatbot_api_lines = [line for line in logs if line.startswith("Chatbot API:")]
+    assert chatbot_api_lines, logs
+    assert "ws-test.example.com/api/v1/copilot/completions" in chatbot_api_lines[0]
+    assert any("(Tools provided server-side" in line for line in logs), logs
+    # claude-sdk-specific lines must NOT appear on the chatbot path.
+    assert not any(line.startswith("MCP URL:") for line in logs), logs
+    assert not any(line.startswith("Available tools:") for line in logs), logs

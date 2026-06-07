@@ -5,6 +5,8 @@ WebSocket support for streaming chat responses and test execution.
 import asyncio
 import time
 from pathlib import Path
+from typing import Any
+from urllib.parse import urlparse
 
 import yaml
 from fastapi import WebSocket, WebSocketDisconnect
@@ -26,6 +28,35 @@ def strip_mcp_prefix(tool_name: str) -> str:
         # Get the last part after the final __
         return tool_name.rsplit("__", 1)[-1]
     return tool_name
+
+
+def _derive_workspace_and_domain_from_mcp_url(mcp_url: str) -> tuple[str | None, str | None]:
+    """Split a Preset MCP URL into (workspace_hash, domain).
+
+    Preset workspaces always live at `https://<workspace_hash>.<domain>/mcp`
+    — the workspace hash is the leftmost subdomain. We use this when running
+    a chatbot YAML from the UI: the selected MCP profile already encodes
+    which workspace the chat tests should target, so we can populate the
+    AssistantProvider's `workspace_hash`/`domain` automatically rather than
+    forcing the user to duplicate that info in `.llm_providers.yaml`.
+
+    Returns (None, None) if the URL is missing, lacks a host, has only one
+    label, or is otherwise unparseable — the caller treats that as "no
+    fallback available" and leaves the existing config untouched.
+    """
+    if not mcp_url:
+        return None, None
+    try:
+        parsed = urlparse(mcp_url)
+    except (ValueError, TypeError):
+        return None, None
+    host = parsed.hostname
+    if not host or "." not in host:
+        return None, None
+    workspace, _, domain = host.partition(".")
+    if not workspace or not domain:
+        return None, None
+    return workspace, domain
 
 
 class ConnectionManager:
@@ -198,6 +229,7 @@ async def _run_test_command(websocket: WebSocket, data: dict, config, send_log):
     model = data.get("model") or config.default_model
     provider = data.get("provider") or config.default_provider
     profile = data.get("profile")
+    llm_profile_id = data.get("llm_profile")
 
     if not test_path.exists():
         await manager.send_message(
@@ -227,6 +259,45 @@ async def _run_test_command(websocket: WebSocket, data: dict, config, send_log):
 
         effective_provider = suite_provider or provider
         effective_model = suite_model or model
+
+        # Build the final provider_config. For assistant/chatbot we fold in
+        # the assistant-specific fields (workspace_hash, domain, JWT auth,
+        # path overrides) from the selected LLM profile in `.llm_providers.yaml`
+        # — without these, AssistantProvider.__init__ raises ValueError. The
+        # CLI accepts them as flags; the websocket has no flags so it must
+        # pick them up from the profile config the user already maintains.
+        # Precedence: explicit suite YAML `provider_config:` > LLM profile.
+        effective_provider_config: dict[str, Any] = dict(suite_provider_config or {})
+        if effective_provider in ("assistant", "chatbot") and llm_profile_id:
+            from testmcpy.llm_profiles import load_llm_profile
+
+            llm_profile = load_llm_profile(llm_profile_id)
+            if llm_profile:
+                # Prefer the entry in the profile whose `provider` matches the
+                # one we're about to run; otherwise fall back to the profile
+                # default. This handles the common pattern of an LLM profile
+                # bundling several providers (e.g. claude-sdk + assistant) where
+                # the suite YAML pins which one to use.
+                assistant_entry = (
+                    next(
+                        (p for p in llm_profile.providers if p.provider == effective_provider),
+                        None,
+                    )
+                    or llm_profile.get_default_provider()
+                )
+                if assistant_entry:
+                    for fname in (
+                        "workspace_hash",
+                        "domain",
+                        "api_token",
+                        "api_secret",
+                        "api_url",
+                        "conversations_path",
+                        "completions_path",
+                    ):
+                        val = getattr(assistant_entry, fname, None)
+                        if val and not effective_provider_config.get(fname):
+                            effective_provider_config[fname] = val
 
         # Filter to specific test if requested
         if test_name:
@@ -276,6 +347,48 @@ async def _run_test_command(websocket: WebSocket, data: dict, config, send_log):
         if mcp_client and hasattr(mcp_client, "base_url") and mcp_client.base_url:
             effective_mcp_url = mcp_client.base_url
 
+        # MCP profile fallback for assistant/chatbot credentials.
+        #
+        # The CLI takes workspace_hash/domain/JWT via flags; the WebSocket
+        # has no flag-equivalent. We've already tried the LLM profile —
+        # if it didn't have an `assistant`/`chatbot` entry (very common —
+        # most users' `.llm_providers.yaml` only lists Claude/OpenAI
+        # providers), the merge above was a no-op and we'd otherwise crash
+        # in AssistantProvider.__init__.
+        #
+        # The selected MCP profile already encodes which workspace we're
+        # targeting, and Preset chatbot endpoints use the same JWT as the
+        # MCP server, so deriving the missing fields from the MCP profile
+        # is the correct path for the "run a chatbot eval from the UI"
+        # flow. We never overwrite an explicit suite-YAML or LLM-profile
+        # value — this is a last-resort fallback.
+        if effective_provider in ("assistant", "chatbot") and mcp_client is not None:
+            filled_from_mcp: list[str] = []
+            ws_hash, domain = _derive_workspace_and_domain_from_mcp_url(effective_mcp_url)
+            if ws_hash and not effective_provider_config.get("workspace_hash"):
+                effective_provider_config["workspace_hash"] = ws_hash
+                filled_from_mcp.append("workspace_hash")
+            if domain and not effective_provider_config.get("domain"):
+                effective_provider_config["domain"] = domain
+                filled_from_mcp.append("domain")
+            auth_cfg = getattr(mcp_client, "auth_config", None) or {}
+            if isinstance(auth_cfg, dict) and auth_cfg.get("type") == "jwt":
+                for src_key, dst_key in (
+                    ("api_url", "api_url"),
+                    ("api_token", "api_token"),
+                    ("api_secret", "api_secret"),
+                ):
+                    val = auth_cfg.get(src_key)
+                    if val and not effective_provider_config.get(dst_key):
+                        effective_provider_config[dst_key] = val
+                        filled_from_mcp.append(dst_key)
+            if filled_from_mcp:
+                await send_log(
+                    f"🔑 Derived from MCP profile '{effective_profile}': "
+                    f"{', '.join(filled_from_mcp)} "
+                    "(add an `assistant` entry to .llm_providers.yaml to override)"
+                )
+
         # Create runner with streaming log callback
         runner = TestRunner(
             model=effective_model,
@@ -285,7 +398,11 @@ async def _run_test_command(websocket: WebSocket, data: dict, config, send_log):
             verbose=True,
             hide_tool_output=False,
             log_callback=send_log,
-            provider_config=suite_provider_config,
+            provider_config=effective_provider_config,
+            # We emit our own per-test "🧪 Running test … / 📝 Prompt / ⏱️ Timeout"
+            # block below, so the runner must not also emit its own (would create
+            # two collapsible test groups in the UI for every test).
+            quiet_test_announcement=True,
         )
 
         await send_log("⚙️ Initializing test runner...")
@@ -307,7 +424,7 @@ async def _run_test_command(websocket: WebSocket, data: dict, config, send_log):
 
             await send_log(f"\n{'=' * 50}")
             await send_log(f"🧪 Running test {i + 1}/{len(test_cases)}: {tc.name}")
-            await send_log(f"📝 Prompt: {tc.prompt[:100]}...")
+            await send_log(f"📝 Prompt: {tc.prompt}")
             await send_log(f"⏱️ Timeout: {tc.timeout}s")
 
             start_time = time.time()

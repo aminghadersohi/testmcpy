@@ -7,6 +7,75 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.16] - 2026-06-06
+
+### Fixed
+- **Test runner logs panel rendered each test as two collapsible groups**: both
+  the websocket (`🧪 Running test 1/N: name` + `📝 Prompt: …` + `⏱️ Timeout: …s`)
+  AND `TestRunner.run_test` (`Running test: name` + full `Prompt: …` +
+  `Provider: …, Model: …` + `Available tools: N` + `MCP URL: …`) emitted
+  test-start headers. The `StreamingLogViewer` parser greedily grouped on
+  every `Running test:` line, producing two cards per test — first a
+  near-empty card with the truncated prompt, then the real card with all
+  the actual entries. Added a `quiet_test_announcement` flag to `TestRunner`
+  that the websocket sets, suppressing the duplicate header / prompt /
+  provider / MCP-URL / chatbot-API lines inside the runner.
+- **Truncated prompt in streamed logs**: websocket no longer trims
+  `tc.prompt` to 100 chars — it sends the full prompt as the in-group
+  `📝 Prompt: …` entry.
+- **Sticky group header looked doubled / ghosted when multiple tests were
+  expanded**: replaced the translucent `bg-*/20 backdrop-blur-sm` sticky
+  header with a solid `bg-surface-elevated` + colored left-border accent.
+  Sticky headers no longer bleed through one another at the top of the
+  scroll container.
+- **CLI banner + MCP init ignored suite-level `provider:` declaration**:
+  `testmcpy run` printed `Provider: <CLI default>` in the startup banner
+  and always tried to initialize the local MCP client even when the YAML
+  declared `provider: assistant` at the top level (which means tools are
+  resolved server-side and no local MCP is needed). We now peek the file
+  for a top-level `provider:` / `model:` before printing the banner and
+  before computing `skip_mcp_init`, so chatbot YAML files no longer trigger
+  spurious OAuth flows or banner mismatches.
+- **UI "Using:" badge ignored suite-level overrides**: when a YAML test
+  file declared `provider:` / `model:` at the top level, the Tests-page
+  badge still showed whatever the LLM-profile default was. Added a
+  `parseSuiteOverride()` helper that scans the open file's leading
+  top-level keys; the badge now displays the effective model/provider
+  with a "suite override" pill, and `getLlmConfig()` (used for both
+  single-test and run-all flows) sends the override-aware values to the
+  websocket.
+- **Chatbot YAMLs crashed in the UI with `AssistantProvider requires
+  workspace_hash AND domain`**: the websocket never folded
+  `.llm_providers.yaml` credentials into the runner's `provider_config`
+  the way `POST /tests/run-single` already does. UI now sends the
+  selected `llm_profile` over the WebSocket; server-side, when the
+  effective provider is `assistant`/`chatbot`, the websocket loads the
+  profile and merges `workspace_hash` / `domain` / `api_token` /
+  `api_secret` / `api_url` / `conversations_path` / `completions_path`
+  into `provider_config` (suite-level YAML keys still win). Chatbot
+  YAMLs now launch from the Tests page without the
+  `--workspace-hash`/`--domain` CLI flags.
+- **MCP-profile fallback for chatbot credentials**: most users'
+  `.llm_providers.yaml` only lists Claude/OpenAI providers — they have
+  no `assistant` entry to merge from. The websocket now derives
+  `workspace_hash` + `domain` from the selected MCP profile's URL
+  (`https://<workspace_hash>.<domain>/mcp`) and pulls `api_url` /
+  `api_token` / `api_secret` from the MCP profile's JWT auth block. A
+  `🔑 Derived from MCP profile …` log line names exactly which fields
+  were filled, so users can see what to add to `.llm_providers.yaml`
+  if they want explicit control. Suite YAML and LLM profile values
+  still win — this is the last resort, not a default.
+
+### Changed
+- **`getLlmConfig` UI fallback model**: `claude-sonnet-4-20250514` is
+  retired; default fallback is now `claude-sonnet-4-6` (matches the
+  Python defaults already updated in earlier releases).
+- **"Using:" badge handles the `model: default` sentinel**: chatbot
+  YAMLs declare `model: default` to mean "let the chatbot endpoint
+  pick"; the badge now renders this as italic "provider default"
+  with a tooltip explaining the sentinel, instead of looking like a
+  buggy literal "default" string.
+
 ## [0.7.15] - 2026-06-06
 
 ### Changed

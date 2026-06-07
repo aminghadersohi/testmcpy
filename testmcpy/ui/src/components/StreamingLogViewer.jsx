@@ -788,20 +788,26 @@ function PerTestGroup({ group, isActive, defaultOpen }) {
     pending: 'bg-surface-elevated border-border/50',
   }[status]
 
-  // Solid header tint so the sticky bar reads cleanly when entries scroll under it.
-  const headerTint = {
-    running: 'bg-yellow-500/20',
-    passed: 'bg-green-500/15',
-    failed: 'bg-red-500/15',
-    pending: 'bg-surface-elevated',
+  // Subtle left-edge accent + solid surface bg. The previous translucent
+  // bg-color/20 + backdrop-blur-sm let one sticky header bleed through
+  // another when multiple groups were expanded — making the header look
+  // doubled / ghosty as you scrolled. Solid bg-surface-elevated + a 3px
+  // left border keeps the colored status hint without any transparency.
+  const headerAccent = {
+    running: 'border-l-[3px] border-l-yellow-400',
+    passed: 'border-l-[3px] border-l-green-400',
+    failed: 'border-l-[3px] border-l-red-400',
+    pending: 'border-l-[3px] border-l-border',
   }[status]
 
   return (
     <div className={`mt-2 first:mt-0 rounded-lg border ${statusClasses}`}>
       {/* Header is two siblings (toggle + copy) inside a sticky row, not a
-          button-inside-button — prior structure was invalid HTML. */}
+          button-inside-button — prior structure was invalid HTML.
+          Solid bg-surface-elevated prevents the previous "ghost" effect
+          where one sticky header showed through another via backdrop-blur. */}
       <div
-        className={`sticky top-0 z-10 flex items-center gap-2 px-2.5 py-1.5 ${headerTint} backdrop-blur-sm rounded-t-lg`}
+        className={`sticky top-0 z-10 flex items-center gap-2 px-2.5 py-1.5 bg-surface-elevated rounded-t-lg ${headerAccent}`}
       >
         <button
           type="button"

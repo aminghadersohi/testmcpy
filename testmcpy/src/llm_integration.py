@@ -2160,6 +2160,14 @@ class AssistantProvider(LLMProvider):
     # streaming" from "child is wedged" without parsing every event.
     HEARTBEAT_SECONDS: float = 10.0
 
+    # Max number of completion POSTs per generate_with_tools invocation.
+    # The Preset chatbot backend executes tools server-side in a first
+    # SSE stream that emits tool_call + tool_result events and then closes
+    # WITHOUT a final / token event — the generated answer arrives only on
+    # a SECOND POST against the same conversation_id. Cap protects against
+    # a backend that keeps reporting tool calls without ever returning text.
+    MAX_COMPLETION_TURNS: int = 3
+
     # Optional process-wide cap on concurrent SSE streams. Set via
     # ``--max-concurrent-streams`` on ``testmcpy run``. ``None`` =
     # unbounded. Stored as a class attribute (not instance) so multiple
@@ -2344,8 +2352,6 @@ class AssistantProvider(LLMProvider):
         completions_url = f"{self.base_url}{self.completions_path}"
         headers = {**self._build_headers(), "Accept": "text/event-stream"}
 
-        log(f"[Assistant] POST {completions_url} (conversation={self._conversation_id})")
-
         # Three layers of timeout protection on the SSE consumption:
         #   1. SSE_IDLE_ABORT_SECONDS  — fires when no recognized event
         #      arrives for N seconds (server still sending keepalives
@@ -2361,16 +2367,15 @@ class AssistantProvider(LLMProvider):
         sse_idle_abort_seconds = self.SSE_IDLE_ABORT_SECONDS
         per_call_wall_clock_seconds = self.PER_CALL_WALL_CLOCK_SECONDS
         heartbeat_seconds = self.HEARTBEAT_SECONDS
-        last_event_at = time.time()
-        last_heartbeat_at = time.time()
+        max_turns = self.MAX_COMPLETION_TURNS
         idle_aborted = False
         wall_clock_aborted = False
-        event_count = 0
 
         state = _SSEStreamState()
         # Optional process-wide concurrency cap. When unset the semaphore
         # is None and acquisition is a no-op. Held for the entire SSE
-        # consumption so the cap really does limit parallel streams.
+        # consumption (across follow-up turns too) so the cap really does
+        # limit parallel logical requests, not parallel POSTs.
         sem = type(self)._get_stream_semaphore()
         sem_held = False
         if sem is not None:
@@ -2383,14 +2388,6 @@ class AssistantProvider(LLMProvider):
                     f"[Assistant] Waited {sem_wait:.1f}s for concurrency-limit "
                     f"semaphore (max={type(self)._max_concurrent_streams})"
                 )
-            # Reset the per-call wall-clock baseline AFTER we actually
-            # got a slot: time spent waiting for the semaphore should
-            # not consume the SSE budget. start_time stays as-is for
-            # the overall LLMResult.duration; the SSE loop uses
-            # `stream_start_time` from here on.
-            stream_start_time = time.time()
-        else:
-            stream_start_time = start_time
 
         def _release_sem():
             nonlocal sem_held
@@ -2398,127 +2395,181 @@ class AssistantProvider(LLMProvider):
                 sem.release()
                 sem_held = False
 
+        # Multi-turn loop. The Preset chatbot backend executes tools
+        # server-side and emits tool_call + tool_result events on the
+        # FIRST POST but then closes the stream WITHOUT emitting a
+        # final/token event — the generated answer arrives on a SECOND
+        # POST that reuses the same conversation_id. Loop continues
+        # until we get text, a final marker, an error, or hit the cap.
+        # See SC-108177.
+        total_event_count = 0
+        turn_idx = 0
         try:
-            async with self._client.stream(
-                "POST", completions_url, headers=headers, json=payload, timeout=timeout
-            ) as resp:
-                if resp.status_code != 200:
-                    body = await resp.aread()
-                    raise RuntimeError(
-                        f"Assistant API error: HTTP {resp.status_code} - "
-                        f"{body.decode('utf-8', errors='replace')}"
+            for turn_idx in range(max_turns):
+                if turn_idx == 0:
+                    log(
+                        f"[Assistant] POST {completions_url} (conversation={self._conversation_id})"
                     )
-
-                current_event: str | None = None
-                # Drive the line iterator manually so we can wrap each
-                # await in asyncio.wait_for(...). httpx's aiter_lines()
-                # blocks inside __anext__ when no bytes arrive — a plain
-                # `async for` would be suspended forever. The wait_for
-                # catches the case where the SSE connection stays open
-                # but never sends another byte (real-world c29 hang).
-                line_iter = resp.aiter_lines().__aiter__()
-                idle_budget_str = _format_seconds(sse_idle_abort_seconds)
-                wall_clock_budget_str = _format_seconds(per_call_wall_clock_seconds)
-                while True:
-                    now = time.time()
-                    # Per-call wall-clock check: total time spent on the
-                    # SSE stream itself (NOT counting time waiting for
-                    # the concurrency-limit semaphore) exceeded budget.
-                    total_elapsed = now - stream_start_time
-                    if total_elapsed >= per_call_wall_clock_seconds:
-                        log(
-                            f"[Assistant] SSE wall-clock abort: per-call budget "
-                            f"{wall_clock_budget_str} exceeded "
-                            f"({total_elapsed:.0f}s, {event_count} events) — "
-                            "closing stream"
-                        )
-                        wall_clock_aborted = True
-                        break
-                    # Idle check: no recognized event for too long.
-                    elapsed_since_event = now - last_event_at
-                    idle_remaining = sse_idle_abort_seconds - elapsed_since_event
-                    if idle_remaining <= 0:
-                        log(
-                            f"[Assistant] SSE idle abort: no recognized event for "
-                            f"{idle_budget_str} — closing stream"
-                        )
-                        idle_aborted = True
-                        break
-                    # Heartbeat: non-fatal "still alive" log.
-                    if now - last_heartbeat_at >= heartbeat_seconds:
-                        log(
-                            f"[Assistant] still streaming … "
-                            f"{total_elapsed:.0f}s elapsed, "
-                            f"{event_count} events, "
-                            f"{elapsed_since_event:.0f}s since last event"
-                        )
-                        last_heartbeat_at = now
-                    # Per-line read budget = min(idle_remaining, time-to-next-heartbeat,
-                    # wall-clock-remaining). Smaller waits let the heartbeat /
-                    # wall-clock checks fire on schedule even when no bytes arrive.
-                    wall_clock_remaining = per_call_wall_clock_seconds - total_elapsed
-                    next_heartbeat_in = heartbeat_seconds - (now - last_heartbeat_at)
-                    read_timeout = max(
-                        0.05,
-                        min(idle_remaining, wall_clock_remaining, next_heartbeat_in),
+                else:
+                    log(
+                        f"[Assistant] Follow-up POST {turn_idx + 1}/{max_turns} "
+                        f"(server-side tools executed but no answer text yet — "
+                        f"reissuing same prompt on conversation={self._conversation_id})"
                     )
-                    try:
-                        raw_line = await asyncio.wait_for(
-                            line_iter.__anext__(), timeout=read_timeout
+                # Per-turn timing. Wall-clock + idle budgets apply per turn,
+                # not across the whole multi-turn loop, because a follow-up
+                # POST is a separate SSE stream from the backend's POV.
+                stream_start_time = time.time()
+                last_event_at = stream_start_time
+                last_heartbeat_at = stream_start_time
+                event_count = 0
+                pre_turn_response_len = len(state.response_text)
+                pre_turn_tool_results = len(state.tool_results)
+                async with self._client.stream(
+                    "POST", completions_url, headers=headers, json=payload, timeout=timeout
+                ) as resp:
+                    if resp.status_code != 200:
+                        body = await resp.aread()
+                        raise RuntimeError(
+                            f"Assistant API error: HTTP {resp.status_code} - "
+                            f"{body.decode('utf-8', errors='replace')}"
                         )
-                    except StopAsyncIteration:
-                        break
-                    except asyncio.TimeoutError:
-                        # Read deadline expired — loop top will re-check
-                        # idle / wall-clock / heartbeat. Most likely the
-                        # heartbeat tick.
-                        continue
 
-                    line = raw_line.strip()
-                    if not line:
-                        current_event = None
-                        continue
-                    if line.startswith("event:"):
-                        current_event = line[6:].strip()
-                        continue
-                    if not line.startswith("data:") or current_event is None:
-                        continue
+                    current_event: str | None = None
+                    # Drive the line iterator manually so we can wrap each
+                    # await in asyncio.wait_for(...). httpx's aiter_lines()
+                    # blocks inside __anext__ when no bytes arrive — a plain
+                    # `async for` would be suspended forever. The wait_for
+                    # catches the case where the SSE connection stays open
+                    # but never sends another byte (real-world c29 hang).
+                    line_iter = resp.aiter_lines().__aiter__()
+                    idle_budget_str = _format_seconds(sse_idle_abort_seconds)
+                    wall_clock_budget_str = _format_seconds(per_call_wall_clock_seconds)
+                    while True:
+                        now = time.time()
+                        # Per-call wall-clock check: total time spent on the
+                        # SSE stream itself (NOT counting time waiting for
+                        # the concurrency-limit semaphore) exceeded budget.
+                        total_elapsed = now - stream_start_time
+                        if total_elapsed >= per_call_wall_clock_seconds:
+                            log(
+                                f"[Assistant] SSE wall-clock abort: per-call budget "
+                                f"{wall_clock_budget_str} exceeded "
+                                f"({total_elapsed:.0f}s, {event_count} events) — "
+                                "closing stream"
+                            )
+                            wall_clock_aborted = True
+                            break
+                        # Idle check: no recognized event for too long.
+                        elapsed_since_event = now - last_event_at
+                        idle_remaining = sse_idle_abort_seconds - elapsed_since_event
+                        if idle_remaining <= 0:
+                            log(
+                                f"[Assistant] SSE idle abort: no recognized event for "
+                                f"{idle_budget_str} — closing stream"
+                            )
+                            idle_aborted = True
+                            break
+                        # Heartbeat: non-fatal "still alive" log.
+                        if now - last_heartbeat_at >= heartbeat_seconds:
+                            log(
+                                f"[Assistant] still streaming … "
+                                f"{total_elapsed:.0f}s elapsed, "
+                                f"{event_count} events, "
+                                f"{elapsed_since_event:.0f}s since last event"
+                            )
+                            last_heartbeat_at = now
+                        # Per-line read budget = min(idle_remaining, time-to-next-heartbeat,
+                        # wall-clock-remaining). Smaller waits let the heartbeat /
+                        # wall-clock checks fire on schedule even when no bytes arrive.
+                        wall_clock_remaining = per_call_wall_clock_seconds - total_elapsed
+                        next_heartbeat_in = heartbeat_seconds - (now - last_heartbeat_at)
+                        read_timeout = max(
+                            0.05,
+                            min(idle_remaining, wall_clock_remaining, next_heartbeat_in),
+                        )
+                        try:
+                            raw_line = await asyncio.wait_for(
+                                line_iter.__anext__(), timeout=read_timeout
+                            )
+                        except StopAsyncIteration:
+                            break
+                        except asyncio.TimeoutError:
+                            # Read deadline expired — loop top will re-check
+                            # idle / wall-clock / heartbeat. Most likely the
+                            # heartbeat tick.
+                            continue
 
-                    json_str = line[5:].strip()
-                    if not json_str:
-                        continue
+                        line = raw_line.strip()
+                        if not line:
+                            current_event = None
+                            continue
+                        if line.startswith("event:"):
+                            current_event = line[6:].strip()
+                            continue
+                        if not line.startswith("data:") or current_event is None:
+                            continue
 
-                    if state.tti_ms is None and current_event == self._first_token_event():
-                        state.tti_ms = int((time.time() - start_time) * 1000)
+                        json_str = line[5:].strip()
+                        if not json_str:
+                            continue
 
-                    try:
-                        data = json.loads(json_str)
-                    except json.JSONDecodeError:
-                        log(f"[Assistant] Failed to parse SSE data: {json_str[:100]}")
-                        continue
+                        if state.tti_ms is None and current_event == self._first_token_event():
+                            state.tti_ms = int((time.time() - start_time) * 1000)
 
-                    self._handle_sse_event(current_event, data, state, log)
-                    # A real event arrived — reset the idle timer.
-                    last_event_at = time.time()
-                    event_count += 1
+                        try:
+                            data = json.loads(json_str)
+                        except json.JSONDecodeError:
+                            log(f"[Assistant] Failed to parse SSE data: {json_str[:100]}")
+                            continue
 
+                        self._handle_sse_event(current_event, data, state, log)
+                        # A real event arrived — reset the idle timer.
+                        last_event_at = time.time()
+                        event_count += 1
+
+                total_event_count += event_count
+
+                # Decide whether to do a follow-up POST. We stop on ANY of:
+                #   - we have answer text (the whole point — backend returned
+                #     either streamed tokens or a final.answer)
+                #   - backend explicitly signaled completion (`final` event)
+                #   - backend signaled an error
+                #   - one of the streaming safety guards fired
+                #   - this turn didn't produce any new tool_results (so a
+                #     follow-up would just be wasted POSTs against a backend
+                #     that has nothing more to do)
+                if state.response_text and len(state.response_text) > pre_turn_response_len:
+                    break
+                if state.got_final or state.got_error:
+                    break
+                if idle_aborted or wall_clock_aborted:
+                    break
+                if len(state.tool_results) == pre_turn_tool_results:
+                    log(
+                        "[Assistant] No new tool_results this turn and no answer text — "
+                        "stopping multi-turn loop (would be a no-op POST)"
+                    )
+                    break
         except httpx.TimeoutException:
             duration = time.time() - start_time
-            log(f"[Assistant] TIMEOUT after {duration:.1f}s")
+            log(f"[Assistant] TIMEOUT after {duration:.1f}s (turn {turn_idx + 1})")
             _release_sem()
             return LLMResult(
                 response=f"Error: Assistant request timed out after {timeout}s",
                 tool_calls=state.tool_calls,
+                tool_results=state.tool_results,
                 duration=duration,
                 logs=logs,
             )
         except (httpx.HTTPStatusError, httpx.ConnectError, RuntimeError) as e:
             duration = time.time() - start_time
-            log(f"[Assistant] Request failed: {e}")
+            log(f"[Assistant] Request failed (turn {turn_idx + 1}): {e}")
             _release_sem()
             return LLMResult(
                 response=f"Error: {e}",
                 tool_calls=state.tool_calls,
+                tool_results=state.tool_results,
                 duration=duration,
                 logs=logs,
             )
@@ -2528,6 +2579,10 @@ class AssistantProvider(LLMProvider):
             # the except branches above.
             _release_sem()
 
+        # For logging / accounting downstream.
+        event_count = total_event_count
+        # Final per-call wall clock for the abort message uses the LAST
+        # turn's stream_start_time (set at the top of every turn).
         duration = time.time() - start_time
         if state.got_error and not state.response_text:
             state.response_text = f"Error: {state.error_message}"
@@ -2563,7 +2618,10 @@ class AssistantProvider(LLMProvider):
             abort_marker = " [SSE wall-clock aborted]"
         log(
             f"[Assistant] Done: {len(state.response_text)} chars, "
-            f"{len(state.tool_calls)} tool calls, {state.token_event_count} tokens, "
+            f"{len(state.tool_calls)} tool calls, "
+            f"{len(state.tool_results)} tool results, "
+            f"{state.token_event_count} tokens, "
+            f"turns={turn_idx + 1}/{max_turns}, "
             f"final={'yes' if state.got_final else 'no'}, "
             f"error={'yes' if state.got_error else 'no'}, "
             f"{duration:.2f}s" + abort_marker

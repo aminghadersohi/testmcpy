@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.17] - 2026-06-06
+
+### Fixed
+- **Chatbot evals always returned an empty response after server-side
+  tool execution**: the Preset `/api/v1/copilot/completions` endpoint
+  emits `tool_call` + `tool_result` events on the first SSE stream and
+  then closes WITHOUT a `final` / `token` event. The generated answer
+  arrives only on a SECOND POST that reuses the same `conversation_id`.
+  `AssistantProvider.generate_with_tools` only made one POST, so
+  `response_includes`-style evaluators couldn't match anything.
+  `generate_with_tools` now issues a follow-up POST when the previous
+  turn ended with tool_results but no answer text and no
+  final/error/abort signal. Capped at `MAX_COMPLETION_TURNS = 3` and
+  stops early when a turn produces zero new tool_results (so a backend
+  in a steady "no more work" state can't pin the runner). The
+  concurrency-limit semaphore is now held across all turns so the cap
+  limits parallel logical requests, not parallel POSTs. 6 unit tests
+  cover the two-turn / single-shot / three-turn / cap-hit /
+  no-new-tool-results / same-payload paths.
+
+### Added
+- **External / symlinked test directory discovery in the UI**:
+  - `GET /api/tests` now walks `<cwd>/tests` with `os.walk(followlinks=True)`,
+    so a `ln -s /path/to/external/suite tests/suite` shows up in the
+    Tests page (Path.rglob in 3.11 silently skipped these).
+  - A new `TESTMCPY_EXTRA_TESTS_DIRS` env var (os.pathsep-separated
+    absolute paths) registers external test roots that get walked and
+    namespaced under their basename so different suites stay
+    visually distinct in the file tree.
+  - Symlink-cycle guard via `realpath` so `tests/loop -> tests/` (or
+    any cross-tree loop between roots) terminates safely.
+  - All discovered files carry absolute `path` values so
+    `run-single` / the streaming runner can open them regardless of
+    discovery method; the existing websocket fallback to `test_path.name`
+    handles display names for files outside `<cwd>/tests`.
+  - 9 unit tests cover the symlinked-subdir, cycle-guard, single + multi
+    extra-root, stale-env-var-entries, and baseline-no-regression paths.
+
 ## [0.7.16] - 2026-06-06
 
 ### Fixed

@@ -1,6 +1,7 @@
 """Test file management and execution endpoints."""
 
 import json
+import os
 import re
 from datetime import datetime
 from pathlib import Path
@@ -83,55 +84,163 @@ class GenerateTestsRequest(BaseModel):
     provider: str | None = None
 
 
-@router.get("/tests")
-async def list_tests():
-    """List all test files in the tests directory, including subdirectories."""
-    tests_dir = Path.cwd() / "tests"
-    if not tests_dir.exists():
-        return {"folders": {}, "files": []}
+def _discover_yaml_tests(
+    root: Path,
+    *,
+    label_prefix: str = "",
+    seen_real_dirs: set[str] | None = None,
+) -> tuple[dict[str, list[dict]], list[dict]]:
+    """Walk ``root`` for ``*.yaml`` test files and bucket them into
+    (folders, root_files). Follows symlinked subdirectories with a cycle
+    guard so a `tests/external -> /path/that/loops` symlink can't pin the
+    server. ``label_prefix`` is prepended to the relative path stored in
+    each ``relative_path`` field so external roots end up under their
+    root's basename in the UI tree (e.g. ``preset-mcp-tests/chatbot/...``).
 
-    folders = {}  # folder_name -> list of files
-    root_files = []  # files in root tests/ directory
+    All ``path`` fields are absolute so ``run-single`` and the streaming
+    runner can open the file directly regardless of how it was discovered.
+    """
+    folders: dict[str, list[dict]] = {}
+    root_files: list[dict] = []
+    if not root.exists() or not root.is_dir():
+        return folders, root_files
 
-    # Recursively search for YAML files
-    for file in tests_dir.rglob("*.yaml"):
-        try:
-            with open(file) as f:
-                content = f.read()
-                data = yaml.safe_load(content)
+    # Track canonical (realpath) directories we've already descended into
+    # so cycles created via symlinks back into an ancestor terminate.
+    if seen_real_dirs is None:
+        seen_real_dirs = set()
+    try:
+        seen_real_dirs.add(os.path.realpath(root))
+    except OSError:
+        pass
 
-                # Count tests
-                test_count = len(data.get("tests", [])) if "tests" in data else 1
+    # os.walk with followlinks=True lets symlinked subdirs under `root`
+    # be discovered (Path.rglob in 3.11 deliberately skips them).
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=True):
+        # Prune symlinked subdirs that would revisit a path we've already
+        # walked — protects against `tests/loop -> tests/` and similar.
+        pruned: list[str] = []
+        for d in list(dirnames):
+            full = os.path.join(dirpath, d)
+            try:
+                real = os.path.realpath(full)
+            except OSError:
+                continue
+            if real in seen_real_dirs:
+                pruned.append(d)
+            else:
+                seen_real_dirs.add(real)
+        for d in pruned:
+            dirnames.remove(d)
 
-                # Get relative path from tests dir
-                rel_path = file.relative_to(tests_dir)
-                folder_name = str(rel_path.parent) if rel_path.parent != Path(".") else None
-
+        for fname in filenames:
+            if not fname.endswith(".yaml"):
+                continue
+            file = Path(dirpath) / fname
+            try:
+                with open(file) as f:
+                    content = f.read()
+                    data = yaml.safe_load(content)
+                test_count = (
+                    len(data.get("tests", [])) if isinstance(data, dict) and "tests" in data else 1
+                )
+                rel_path = file.relative_to(root)
+                folder_name_parts: list[str] = []
+                if label_prefix:
+                    folder_name_parts.append(label_prefix)
+                if rel_path.parent != Path("."):
+                    folder_name_parts.append(str(rel_path.parent))
+                folder_name = "/".join(folder_name_parts) if folder_name_parts else None
+                # Keep the displayed relative path stable across discovery
+                # modes: just the (prefixed) rel path inside the discovered
+                # root. The absolute `path` is what the runner uses.
+                display_rel = f"{label_prefix}/{rel_path}" if label_prefix else str(rel_path)
+                stat = file.stat()
                 file_info = {
                     "filename": file.name,
-                    "relative_path": str(rel_path),
-                    "path": str(file),
+                    "relative_path": display_rel,
+                    "path": str(file.resolve()),
                     "test_count": test_count,
-                    "size": file.stat().st_size,
-                    "modified": file.stat().st_mtime,
+                    "size": stat.st_size,
+                    "modified": stat.st_mtime,
                 }
-
-                if folder_name and folder_name != ".":
-                    # File is in a subfolder
-                    if folder_name not in folders:
-                        folders[folder_name] = []
-                    folders[folder_name].append(file_info)
+                if folder_name:
+                    folders.setdefault(folder_name, []).append(file_info)
                 else:
-                    # File is in root
                     root_files.append(file_info)
+            except (OSError, yaml.YAMLError) as e:
+                print(f"Error reading {file}: {e}")
+    return folders, root_files
 
-        except Exception as e:
-            print(f"Error reading {file}: {e}")
 
-    # Sort files within each folder by modified time
+def _extra_tests_dirs() -> list[Path]:
+    """Resolve ``TESTMCPY_EXTRA_TESTS_DIRS`` (os.pathsep-separated) into
+    a list of existing absolute directories. Silently skips entries that
+    don't exist or aren't directories so a stale env var can't break the
+    Tests page; warnings go to stderr for diagnosis.
+    """
+    raw = os.environ.get("TESTMCPY_EXTRA_TESTS_DIRS", "")
+    if not raw.strip():
+        return []
+    out: list[Path] = []
+    for entry in raw.split(os.pathsep):
+        entry = entry.strip()
+        if not entry:
+            continue
+        p = Path(entry).expanduser()
+        if not p.is_absolute():
+            print(
+                f"[testmcpy] TESTMCPY_EXTRA_TESTS_DIRS entry must be absolute: {entry!r} — skipping"
+            )
+            continue
+        if not p.exists() or not p.is_dir():
+            print(f"[testmcpy] TESTMCPY_EXTRA_TESTS_DIRS entry missing: {entry!r} — skipping")
+            continue
+        out.append(p)
+    return out
+
+
+@router.get("/tests")
+async def list_tests():
+    """List all test files in the tests directory and any configured
+    external roots, including symlinked subdirectories. External roots
+    can be added via the ``TESTMCPY_EXTRA_TESTS_DIRS`` environment
+    variable (os.pathsep-separated absolute paths) — each root's basename
+    becomes the UI folder label.
+    """
+    tests_dir = Path.cwd() / "tests"
+    folders: dict[str, list[dict]] = {}
+    root_files: list[dict] = []
+
+    # Symlink cycle tracker is shared across all roots so an external dir
+    # that's already linked under tests/ doesn't get listed twice.
+    seen_real_dirs: set[str] = set()
+
+    # Primary: <cwd>/tests (unchanged behaviour, just symlink-aware now).
+    if tests_dir.exists():
+        f, rf = _discover_yaml_tests(tests_dir, seen_real_dirs=seen_real_dirs)
+        folders.update(f)
+        root_files.extend(rf)
+
+    # Secondary: each TESTMCPY_EXTRA_TESTS_DIRS entry, namespaced under
+    # the root's basename so external suites don't collide with each
+    # other or with the local tree.
+    for extra_root in _extra_tests_dirs():
+        f, rf = _discover_yaml_tests(
+            extra_root, label_prefix=extra_root.name, seen_real_dirs=seen_real_dirs
+        )
+        # Merge — same folder key (e.g. two external roots with a
+        # `chatbot` subdir) appends rather than overwrites.
+        for k, v in f.items():
+            folders.setdefault(k, []).extend(v)
+        if rf:
+            # Files at the root of an extra dir still get grouped under
+            # the root's basename so the UI can distinguish them.
+            folders.setdefault(extra_root.name, []).extend(rf)
+
+    # Sort files within each folder by modified time (most recent first).
     for folder in folders:
         folders[folder] = sorted(folders[folder], key=lambda x: x["modified"], reverse=True)
-
     root_files = sorted(root_files, key=lambda x: x["modified"], reverse=True)
 
     return {"folders": folders, "files": root_files}

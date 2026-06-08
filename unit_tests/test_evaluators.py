@@ -20,6 +20,7 @@ from testmcpy.evals.base_evaluators import (
     ExecutionSuccessful,
     FinalAnswerContains,
     NoHallucination,
+    NoToolCallErrors,
     ParameterValueInRange,
     ResponseIncludes,
     SQLQueryValid,
@@ -330,6 +331,140 @@ class TestExecutionSuccessful:
         result = evaluator.evaluate(context)
         assert result.passed is True
         assert result.score == 1.0
+
+
+class TestNoToolCallErrors:
+    """Pin the new evaluator's contract: it must catch the false-negative
+    `is_error=False` + error-text-in-content shape that `execution_successful`
+    misses. SC-108214 — observed 51 silent-pass tests on workspace bcff9fe0
+    before this was added."""
+
+    def test_clean_result_passes(self):
+        evaluator = NoToolCallErrors()
+        context = {
+            "tool_results": [
+                MockToolResult(tool_call_id="1", content="rows: 42", is_error=False),
+                MockToolResult(
+                    tool_call_id="2",
+                    content={"type": "text", "text": '{"datasets": 12}'},
+                    is_error=False,
+                ),
+            ]
+        }
+        result = evaluator.evaluate(context)
+        assert result.passed is True
+        assert result.score == 1.0
+        assert result.details == {"checked": 2}
+
+    def test_is_error_true_fails(self):
+        """The cheap case: is_error=True is still a fail. This evaluator is
+        STRICTER than execution_successful, not separate from it."""
+        evaluator = NoToolCallErrors()
+        context = {
+            "tool_results": [
+                MockToolResult(
+                    tool_call_id="1",
+                    content=None,
+                    is_error=True,
+                    error_message="Connection failed",
+                    tool_name="list_charts",
+                ),
+            ]
+        }
+        result = evaluator.evaluate(context)
+        assert result.passed is False
+        assert result.score == 0.0
+        assert "1 tool call(s)" in result.reason
+        errs = result.details["errors"]
+        assert errs[0]["is_error_flag"] is True
+        assert errs[0]["tool"] == "list_charts"
+
+    def test_validation_error_with_is_error_false_fails(self):
+        """The bug this evaluator exists to catch — pydantic validation
+        error returned as a dict content payload with is_error=False. The
+        observed wire shape from workspace bcff9fe0."""
+        evaluator = NoToolCallErrors()
+        validation_text = (
+            "Error: 1 validation error for call[list_charts]\n"
+            "page_size\n"
+            "  Unexpected keyword argument [type=unexpected_keyword_argument, "
+            "input_value=20]"
+        )
+        context = {
+            "tool_results": [
+                MockToolResult(
+                    tool_call_id="1",
+                    content={"type": "text", "text": validation_text},
+                    is_error=False,
+                    tool_name="list_charts",
+                ),
+            ]
+        }
+        result = evaluator.evaluate(context)
+        assert result.passed is False
+        assert result.score == 0.0
+        errs = result.details["errors"]
+        assert len(errs) == 1
+        assert errs[0]["is_error_flag"] is False  # is_error didn't catch it
+        # The earliest matching pattern wins. Multiple patterns match this
+        # particular payload (`Error: ` AND `validation error for call[`);
+        # we care that ONE of them did so the error gets surfaced.
+        assert errs[0]["matched_pattern"] in (
+            "Error: ",
+            "validation error for call[",
+        )
+        assert "list_charts" in errs[0]["snippet"]
+
+    def test_unknown_tool_pattern_fails(self):
+        evaluator = NoToolCallErrors()
+        context = {
+            "tool_results": [
+                MockToolResult(
+                    tool_call_id="1",
+                    content="Unknown tool: 'list_charts_v2' is not registered",
+                    is_error=False,
+                ),
+            ]
+        }
+        result = evaluator.evaluate(context)
+        assert result.passed is False
+        assert result.details["errors"][0]["matched_pattern"] == "Unknown tool:"
+
+    def test_list_content_normalises_before_matching(self):
+        """The MCP wire format sometimes hands us a list of text blocks
+        instead of a single one. The error pattern must still match — a
+        future refactor that normalises content differently would surface
+        through this test."""
+        evaluator = NoToolCallErrors()
+        context = {
+            "tool_results": [
+                MockToolResult(
+                    tool_call_id="1",
+                    content=[
+                        {"type": "text", "text": "preamble"},
+                        {"type": "text", "text": "Error: validation error for call[x]"},
+                    ],
+                    is_error=False,
+                ),
+            ]
+        }
+        result = evaluator.evaluate(context)
+        assert result.passed is False
+
+    def test_no_tool_results_passes(self):
+        """Composable: pair with `was_mcp_tool_called` if you ALSO want to
+        assert a tool fired. By itself, "no tools made" isn't an error."""
+        evaluator = NoToolCallErrors()
+        result = evaluator.evaluate({"tool_results": []})
+        assert result.passed is True
+        assert result.score == 1.0
+
+    def test_registered_in_factory(self):
+        """The runner discovers evaluators via `create_evaluator(name)`. A
+        rename in the factory dict would silently drop this evaluator from
+        every YAML referencing it — catch that."""
+        ev = create_evaluator("no_tool_call_errors")
+        assert isinstance(ev, NoToolCallErrors)
 
 
 class TestFinalAnswerContains:

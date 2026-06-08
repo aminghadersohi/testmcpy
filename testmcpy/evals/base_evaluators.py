@@ -285,6 +285,127 @@ class ExecutionSuccessful(BaseEvaluator):
         )
 
 
+class NoToolCallErrors(BaseEvaluator):
+    """Fail if any tool result is an error — including MCP-level validation
+    errors that come back with ``is_error=False`` but error text embedded in
+    ``content`` (the MCP transport flag only catches transport-level
+    failures, not server-side validation rejections).
+
+    Background: ``ExecutionSuccessful`` checks ``result.is_error``. When a
+    Preset MCP server rejects an argument shape (e.g. an unknown kwarg) the
+    response is shaped as ``is_error=False`` with a text block like::
+
+        {"type": "text", "text": "Error: 1 validation error for call[list_charts]\\n
+         page_size\\n  Unexpected keyword argument …"}
+
+    The model usually recovers by retrying with different arguments, so the
+    test ends up tool-calling successfully — but the *first* attempt was a
+    silent error that hides bad tool-schema interactions. This evaluator
+    catches those by scanning the content string for known error patterns.
+    """
+
+    # Substrings that mark a content payload as an MCP-level error. Kept
+    # conservative — patterns specific enough not to fire on a tool that
+    # legitimately discusses errors (e.g. an "explain this error" tool).
+    # Add new patterns sparingly; over-eager matching turns this into a
+    # false-positive factory (which is exactly what we're fixing for
+    # execution_successful).
+    _ERROR_PATTERNS = (
+        "Error: ",
+        "validation error for call[",
+        "Unknown tool:",
+        "Unknown tool '",
+        "error_type",
+        "ASCIIError",
+    )
+
+    @property
+    def name(self) -> str:
+        return "no_tool_call_errors"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Stricter than execution_successful: also fails if a tool result "
+            "comes back with is_error=False but error text in content "
+            "(MCP server-side validation rejections)."
+        )
+
+    @staticmethod
+    def _to_str(content: Any) -> str:
+        """Normalise an MCPToolResult.content (dict | list | str | None) to
+        a single string suitable for substring matching."""
+        if content is None:
+            return ""
+        if isinstance(content, str):
+            return content
+        if isinstance(content, dict):
+            text = content.get("text")
+            return text if isinstance(text, str) else str(content)
+        if isinstance(content, list):
+            parts: list[str] = []
+            for item in content:
+                if isinstance(item, dict):
+                    text = item.get("text")
+                    parts.append(text if isinstance(text, str) else str(item))
+                else:
+                    parts.append(str(item))
+            return " ".join(parts)
+        return str(content)
+
+    def evaluate(self, context: dict[str, Any]) -> EvalResult:
+        tool_results = context.get("tool_results", [])
+        if not tool_results:
+            # "No tool calls" is not an error condition for this evaluator
+            # — pair it with `was_mcp_tool_called` if you also want to
+            # assert a tool fired. Returning passed=True keeps it
+            # composable with response-only tests.
+            return EvalResult(
+                passed=True,
+                score=1.0,
+                reason="No tool calls made — nothing to check for errors",
+            )
+
+        errors: list[dict[str, Any]] = []
+        for result in tool_results:
+            content_str = self._to_str(getattr(result, "content", None))
+            is_error = bool(getattr(result, "is_error", False))
+            matched_pattern: str | None = None
+            for pattern in self._ERROR_PATTERNS:
+                if pattern in content_str:
+                    matched_pattern = pattern
+                    break
+            if is_error or matched_pattern is not None:
+                tool_name = getattr(result, "tool_name", None) or ""
+                tool_id = getattr(result, "tool_call_id", None) or ""
+                errors.append(
+                    {
+                        "tool": tool_name or tool_id or "?",
+                        "is_error_flag": is_error,
+                        "matched_pattern": matched_pattern,
+                        # Trim aggressively — eval reports are read at
+                        # human speed and a long error blob crowds out
+                        # everything else.
+                        "snippet": content_str[:200],
+                    }
+                )
+
+        if errors:
+            return EvalResult(
+                passed=False,
+                score=0.0,
+                reason=f"{len(errors)} tool call(s) returned errors",
+                details={"errors": errors, "checked": len(tool_results)},
+            )
+
+        return EvalResult(
+            passed=True,
+            score=1.0,
+            reason="All tool calls returned without errors",
+            details={"checked": len(tool_results)},
+        )
+
+
 class FinalAnswerContains(BaseEvaluator):
     """Check if the final answer contains expected content."""
 
@@ -2678,6 +2799,7 @@ def create_evaluator(name: str, **kwargs) -> BaseEvaluator:
         # Basic evaluators
         "was_mcp_tool_called": WasMCPToolCalled,
         "execution_successful": ExecutionSuccessful,
+        "no_tool_call_errors": NoToolCallErrors,
         "final_answer_contains": FinalAnswerContains,
         "response_includes": ResponseIncludes,  # More intuitive name
         "no_hallucination": NoHallucination,

@@ -442,6 +442,7 @@ function TestManager({ selectedProfiles = [], selectedLlmProfile = null, llmProf
     pinnedHistoryRun,
     runTests: contextRunTests,
     runSingleTest: contextRunSingleTest,
+    runDirectory: contextRunDirectory,
     stopTests,
     clearLogs,
     clearResults,
@@ -451,6 +452,8 @@ function TestManager({ selectedProfiles = [], selectedLlmProfile = null, llmProf
     setPinnedHistoryRun,
     setRunning,
     setRunningTests,
+    directoryRunProgress,
+    setDirectoryRunProgress,
   } = useTestRun()
 
   // Local UI state (doesn't need to persist)
@@ -479,7 +482,8 @@ function TestManager({ selectedProfiles = [], selectedLlmProfile = null, llmProf
   const [selectedTestProfile, setSelectedTestProfile] = useState(null)
   const [runAllLlmsMode, setRunAllLlmsMode] = useState(false)
   const [allLlmsResults, setAllLlmsResults] = useState(null) // results from running all LLMs
-  const [directoryRunProgress, setDirectoryRunProgress] = useState(null) // { folder, current, total, results: [] }
+  // directoryRunProgress moved to TestRunContext (SC-108184) so a reload
+  // mid-batch can reattach via the persisted currentRunId.
   const [resultsHistory, setResultsHistory] = useState([])
   const [showHistory, setShowHistory] = useState(false)
   const [selectedHistoryRun, setSelectedHistoryRun] = useState(null)
@@ -1180,37 +1184,20 @@ tests:
   const runAllInDirectory = async (folderName, files) => {
     if (running || directoryRunProgress || !files || files.length === 0) return
     const llmConfig = getLlmConfig()
-    setDirectoryRunProgress({ folder: folderName, current: 0, total: files.length, results: [] })
-    const results = []
-    for (let i = 0; i < files.length; i++) {
-      const file = files[i]
-      setDirectoryRunProgress({ folder: folderName, current: i + 1, total: files.length, results })
-      try {
-        const res = await fetch('/api/tests/run', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            test_path: file.path,
-            model: llmConfig.model,
-            provider: llmConfig.provider,
-            profile: selectedMcpProfile,
-          }),
-        })
-        if (res.ok) {
-          const data = await res.json()
-          results.push({ file: file.filename, success: true, summary: data.summary })
-        } else {
-          const errData = await res.json().catch(() => ({ detail: 'Unknown error' }))
-          results.push({ file: file.filename, success: false, error: errData.detail || `HTTP ${res.status}` })
-        }
-      } catch (error) {
-        results.push({ file: file.filename, success: false, error: error.message })
-      }
-    }
-    const passed = results.filter(r => r.success && (r.summary?.failed ?? 0) === 0).length
-    const failed = results.length - passed
-    setDirectoryRunProgress(null)
-    alert(`Directory run complete: ${passed} file(s) passed, ${failed} file(s) had failures.`)
+    // Surface the Logs tab immediately — the WS stream lands per-file
+    // logs there as the batch progresses.
+    setBottomPanelTab('logs')
+    // Delegate to the context's WS-based directory runner (SC-108184).
+    // Pre-fix this issued sequential HTTP POSTs with no streaming and
+    // ended in an alert() box; now logs flow naturally through the
+    // Logs tab and a reload mid-batch can reattach to the same run.
+    await contextRunDirectory(
+      folderName,
+      files,
+      llmConfig,
+      selectedMcpProfile,
+      selectedLlmProfile,
+    )
   }
 
   // Switch to results tab when tests complete

@@ -7,7 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.7.17] - 2026-06-06
+## [0.7.18] - 2026-06-07
+
+### Fixed
+- **Chatbot evals failing intermittently in long suites with empty SSE
+  streams (no tool calls, no text, no error)**: `AssistantProvider`
+  opened a single conversation in `initialize()` and reused the same
+  `conversation_id` across every test in the run. By later tests
+  (observed reliably on `test_C01_4_sql_discovery_and_query` once the
+  preceding C01 tests had run) the conversation carried the entire
+  accumulated history of tool calls and responses, and the Preset
+  chatbot backend either hit a context limit or silently returned an
+  empty stream — surfacing as `execution_successful: FAIL` with zero
+  tool_calls and an empty response. Moved conversation creation out of
+  `initialize()` into the start of every `generate_with_tools()` call,
+  so each test gets a fresh conversation. The multi-turn follow-up
+  POSTs inside a single call still share that one fresh
+  conversation_id (the in-call turn threading is preserved). Failure
+  to create the conversation now surfaces as an `LLMResult` with
+  `response="Error: failed to create conversation: …"` so the test
+  runner gets a real result back instead of an exception.
+
+### Added
+- 2 unit tests in `test_assistant_sse_multi_turn.py` pin the new
+  invariant:
+  - `test_fresh_conversation_per_generate_with_tools_call` — three
+    successive calls produce three distinct conversation_ids; the
+    `_open_conversation` helper fires exactly once per call regardless
+    of how many follow-up POSTs the multi-turn loop issues.
+  - `test_conversation_creation_failure_returns_error_llmresult` —
+    a raising `_open_conversation` surfaces as a clean error
+    `LLMResult` (not an exception) and no SSE POST is issued.
 
 ### Fixed
 - **Chatbot evals always returned an empty response after server-side

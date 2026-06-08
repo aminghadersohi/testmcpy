@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.7.19] - 2026-06-07
+## [0.7.20] - 2026-06-07
 
 ### Fixed
 - **Multi-turn loop terminated on `got_final` even when the same turn
@@ -36,6 +36,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     backwards-compat for the clean-text-with-final path.
   - `test_got_error_terminates_immediately_even_with_new_tool_results`
     — confirms `got_error` stays unconditional.
+
+### Changed
+- **`AssistantProvider.MAX_COMPLETION_TURNS` raised from 3 → 8**
+  (SC-108183). After the `got_final` fix above, C02_1 still failed —
+  log showed `turns=3/3, final=no, 4 tool calls` (all info-gathering:
+  `get_instance_info`, `search_tools`, `list_datasets` × 2) and 128
+  chars of transitional text. The chatbot legitimately walks through
+  several discovery tool calls across multiple turns before invoking
+  `generate_explore_link` and synthesising — the 3-turn budget was
+  clipping the synthesis turn off. Idle (`SSE_IDLE_ABORT_SECONDS`,
+  default 90s) and per-call wall-clock (`PER_CALL_WALL_CLOCK_SECONDS`,
+  default 180s) still bound runaway streams independently of this cap.
+  The cap-hits test now drives `MAX_COMPLETION_TURNS` batches
+  parameterically rather than hard-coding 3 so the assertion follows
+  future cap changes.
 
 ## [0.7.18] - 2026-06-07
 

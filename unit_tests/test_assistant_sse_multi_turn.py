@@ -247,24 +247,27 @@ async def test_single_turn_when_first_response_has_text():
 @pytest.mark.asyncio
 async def test_stops_after_max_turns_even_if_backend_keeps_returning_tools():
     """Cap protects against a backend that keeps reporting tool calls
-    without ever returning text — the runner must NOT loop forever."""
-    # Three batches in a row that each emit a fresh tool result. With
-    # MAX_COMPLETION_TURNS=3 this exhausts the budget without ever
-    # getting an answer, and the provider must give up cleanly.
-    client = _ScriptedAsyncClient(
-        [
-            _FIRST_TURN_TOOLS_THEN_CLOSE,
-            _SECOND_TURN_MORE_TOOLS,
-            [
-                "event: tool_call",
-                'data: {"tool_call_id": "tc-4", "tool_name": "x", "input": {}}',
-                "",
-                "event: tool_result",
-                'data: {"tool_call_id": "tc-4", "tool_name": "x", "result": {}}',
-                "",
-            ],
+    without ever returning text — the runner must NOT loop forever.
+    Drives MAX_COMPLETION_TURNS batches, each with a fresh tool_result,
+    and verifies the loop stops exactly at the cap regardless of the
+    constant's current value (raised 3 → 8 in v0.7.20)."""
+
+    def _one_tool_turn(idx: int) -> list[str]:
+        tc_id = f"tc-{idx}"
+        return [
+            "event: tool_call",
+            f'data: {{"tool_call_id": "{tc_id}", "tool_name": "tool_{idx}", "input": {{}}}}',
+            "",
+            "event: tool_result",
+            f'data: {{"tool_call_id": "{tc_id}", "tool_name": "tool_{idx}", "result": {{}}}}',
+            "",
         ]
-    )
+
+    cap = AssistantProvider.MAX_COMPLETION_TURNS
+    # One batch per allowed turn — chatbot keeps emitting fresh tools every
+    # turn, never produces text or a final event.
+    batches = [_one_tool_turn(i) for i in range(cap)]
+    client = _ScriptedAsyncClient(batches)
     p = _provider(client)
 
     result = await p.generate_with_tools(prompt="loop forever pls", timeout=30.0)
@@ -275,9 +278,9 @@ async def test_stops_after_max_turns_even_if_backend_keeps_returning_tools():
     # No answer reached — empty response is acceptable here; the cap
     # fired before completion.
     assert result.response == ""
-    # All four tool calls across the three turns were captured.
-    assert len(result.tool_calls) == 4
-    assert len(result.tool_results) == 4
+    # One tool call per turn → cap-many total.
+    assert len(result.tool_calls) == cap
+    assert len(result.tool_results) == cap
 
 
 @pytest.mark.asyncio

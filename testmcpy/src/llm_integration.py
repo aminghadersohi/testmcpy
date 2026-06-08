@@ -2166,7 +2166,17 @@ class AssistantProvider(LLMProvider):
     # WITHOUT a final / token event — the generated answer arrives only on
     # a SECOND POST against the same conversation_id. Cap protects against
     # a backend that keeps reporting tool calls without ever returning text.
-    MAX_COMPLETION_TURNS: int = 3
+    #
+    # Raised from 3 → 8 in v0.7.20 (SC-108183): multi-step chatbot prompts
+    # (e.g. C02_1 "give me an explore URL") legitimately walk through
+    # info-gathering tool calls across several turns
+    # (get_instance_info → search_tools → list_datasets → list_datasets →
+    # generate_explore_link → synthesise) before the chatbot is ready to
+    # produce a final answer. The cap was clipping the synthesis turn off.
+    # Idle (SSE_IDLE_ABORT_SECONDS, default 90s) and per-call wall-clock
+    # (PER_CALL_WALL_CLOCK_SECONDS, default 180s) still bound runaway
+    # streams independently of this cap.
+    MAX_COMPLETION_TURNS: int = 8
 
     # Optional process-wide cap on concurrent SSE streams. Set via
     # ``--max-concurrent-streams`` on ``testmcpy run``. ``None`` =

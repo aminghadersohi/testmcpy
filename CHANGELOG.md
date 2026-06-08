@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.22] - 2026-06-08
+
+### Added
+- **New `no_tool_call_errors` evaluator (SC-108214)** catches false-negative
+  passes where `execution_successful` was happy because `is_error=False`,
+  yet the tool result's `content` block carried error text the model then
+  silently recovered from (51 such silent passes observed on workspace
+  `bcff9fe0`).
+
+  The MCP transport flag (`result.is_error`) only catches transport-level
+  failures. When a Preset MCP server rejects an argument shape (e.g.
+  pydantic validation), the response comes back with `is_error=False` and
+  a text block like `Error: 1 validation error for call[list_charts] …`.
+  The model usually recovers by retrying with different arguments — the
+  test passes, but the first attempt was a silent error.
+
+  `no_tool_call_errors` normalises the `content` payload (dict / list of
+  text blocks / plain string / None) and scans for known error patterns:
+  `"Error: "`, `"validation error for call["`, `"Unknown tool:"`,
+  `"Unknown tool '"`, `"error_type"`, `"ASCIIError"`. Strictly stronger
+  than `execution_successful`: `is_error=True` is still a fail.
+  Composable: "no tools made" passes (pair with `was_mcp_tool_called`
+  to also assert a tool fired).
+
+  Registered in the factory as `"no_tool_call_errors"`. 7 unit tests
+  pin clean-pass, `is_error=True`-fails, validation-error-with-
+  `is_error=False`-fails, unknown-tool pattern, list-content
+  normalisation, empty results, and factory registration.
+
 ## [0.7.21] - 2026-06-08
 
 ### Added

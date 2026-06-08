@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.19] - 2026-06-07
+
+### Fixed
+- **Multi-turn loop terminated on `got_final` even when the same turn
+  also produced new tool_results**: the Preset chatbot backend emits
+  the `final` event in the SAME SSE stream as the tool_call /
+  tool_result events for some flows (observed in
+  `test_C02_1_explore_not_generate`: 4 tools including
+  `generate_explore_link` ran, then `final` arrived, but the actual
+  synthesized answer — the explore URL — was on a follow-up POST that
+  never happened). `got_final` was treated as unconditional "stop",
+  collapsing the response to the transitional opener
+  (`"Sure! I'll use Vehicle Sales."`).
+
+  Reordered the stop conditions so `got_error` is unconditional but
+  `got_final` only terminates when no new tool_results arrived this
+  turn — otherwise the loop keeps going so the backend can produce
+  the synthesized answer in a follow-up POST. The
+  text-grew + no-new-tool-results stop still wins for cases where the
+  backend doesn't emit `final` at all.
+
+### Added
+- 3 unit tests in `test_assistant_sse_multi_turn.py`:
+  - `test_followup_post_when_final_arrives_alongside_new_tool_results`
+    — pins the C02_1 regression.
+  - `test_got_final_alone_still_stops_when_no_new_tool_results` —
+    backwards-compat for the clean-text-with-final path.
+  - `test_got_error_terminates_immediately_even_with_new_tool_results`
+    — confirms `got_error` stays unconditional.
+
 ## [0.7.18] - 2026-06-07
 
 ### Fixed

@@ -2556,28 +2556,37 @@ class AssistantProvider(LLMProvider):
 
                 total_event_count += event_count
 
-                # Decide whether to do a follow-up POST. Order matters here —
-                # `got_final` is the AUTHORITATIVE completion signal and must
-                # win over the heuristic text-grew check (the chatbot backend
-                # interleaves transitional text like "Let me work through this
-                # step by step." with tool calls in the same SSE turn; a naïve
-                # "any text arrived → stop" would have surfaced that fragment
-                # as the final answer and never issue the follow-up that
-                # contains the real analysis. SC-108177).
+                # Decide whether to do a follow-up POST. Several subtle
+                # interactions to keep straight:
+                #
+                # - The chatbot backend interleaves transitional text
+                #   ("Let me work through this step by step.") with tool
+                #   calls in the same SSE turn — a naïve "any text →
+                #   stop" surfaced the fragment as the answer (SC-108177).
+                # - The backend ALSO sends `final` in the SAME turn as
+                #   the tool calls in some flows (C02_1 generate_explore_link:
+                #   tool ran, `final` arrived, but the actual synthesized
+                #   answer was on a follow-up POST). Treating `final` as
+                #   unconditional "we're done" then dropped that synthesis.
                 #
                 # Stop on ANY of:
-                #   1. backend explicitly signaled completion or error
-                #   2. one of the streaming safety guards fired
-                #   3. text grew AND no new tool_results this turn — we got a
-                #      synthesized answer with no outstanding server-side work
-                #   4. nothing happened this turn (no text, no tools) — a
-                #      follow-up would just be a no-op POST
-                if state.got_final or state.got_error:
+                #   1. backend signaled an error — terminal regardless.
+                #   2. backend signaled `final` AND no new tool_results
+                #      this turn — backend has nothing left to synthesize.
+                #   3. one of the streaming safety guards fired.
+                #   4. text grew AND no new tool_results — we got a
+                #      synthesized answer with no outstanding server-side
+                #      work.
+                #   5. nothing happened this turn (no text, no tools) —
+                #      a follow-up would just be a no-op POST.
+                if state.got_error:
+                    break
+                new_tool_results_this_turn = len(state.tool_results) > pre_turn_tool_results
+                if state.got_final and not new_tool_results_this_turn:
                     break
                 if idle_aborted or wall_clock_aborted:
                     break
                 text_grew = len(state.response_text) > pre_turn_response_len
-                new_tool_results_this_turn = len(state.tool_results) > pre_turn_tool_results
                 if text_grew and not new_tool_results_this_turn:
                     break
                 if not text_grew and not new_tool_results_this_turn:

@@ -254,6 +254,83 @@ async def test_second_attach_supersedes_first_with_marker(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_directory_batch_emits_one_terminal_all_complete(monkeypatch):
+    """A run_directory batch must emit EXACTLY ONE terminal `all_complete`
+    — the per-file save runs but the per-file `all_complete` event is
+    suppressed via the `_in_batch` flag. Without this, the FIRST file's
+    `all_complete` would terminate the client (setRunning=false, close
+    WS) before files 2..N could run (Copilot review on PR #76).
+
+    Drives _run_directory_command directly so we don't have to stand up
+    a real TestRunner; the per-file delegate is stubbed to a coroutine
+    that emits a small fake all_complete IF it isn't told to suppress.
+    """
+    per_file_all_completes: list[int] = []
+
+    async def _fake_run_test_command(handle, data, config):
+        # Emit one log + one test_complete per file so the batch loop
+        # has something to slice into `file_complete`.
+        ws_module._emit_log(handle, f"running {data.get('name')}")
+        ws_module._emit_event(
+            handle,
+            {
+                "type": "test_complete",
+                "test_name": f"t_{data.get('name')}",
+                "result": {"passed": True, "cost": 0.0, "test_name": f"t_{data.get('name')}"},
+            },
+        )
+        handle.results.append({"passed": True, "cost": 0.0, "test_name": f"t_{data.get('name')}"})
+        # Mimic the real function's `_in_batch` gate. If the parent
+        # batch loop forgot to set it, this would emit a per-file
+        # all_complete and the test would catch it via the counter.
+        if not data.get("_in_batch"):
+            per_file_all_completes.append(1)
+            ws_module._emit_event(
+                handle,
+                {"type": "all_complete", "summary": {"total": 1, "passed": 1, "failed": 0}},
+            )
+
+    monkeypatch.setattr(ws_module, "_run_test_command", _fake_run_test_command)
+
+    handle = await run_registry.create_run(kind="directory", meta={})
+    queue, _token = await run_registry.attach(handle)
+    await ws_module._run_directory_command(
+        handle,
+        {
+            "files": [
+                {"test_path": "/a.yaml", "name": "a.yaml"},
+                {"test_path": "/b.yaml", "name": "b.yaml"},
+                {"test_path": "/c.yaml", "name": "c.yaml"},
+            ],
+        },
+        config=None,
+    )
+
+    # Drain everything the batch emitted into the queue.
+    emitted: list[dict] = []
+    while not queue.empty():
+        emitted.append(queue.get_nowait())
+
+    all_completes = [m for m in emitted if m.get("type") == "all_complete"]
+    file_starts = [m for m in emitted if m.get("type") == "file_start"]
+    file_completes = [m for m in emitted if m.get("type") == "file_complete"]
+
+    assert len(all_completes) == 1, (
+        f"expected exactly 1 terminal all_complete; got {len(all_completes)} "
+        f"(per_file_unsuppressed={per_file_all_completes})"
+    )
+    assert per_file_all_completes == [], (
+        "the _in_batch flag should suppress every per-file all_complete; "
+        f"got {len(per_file_all_completes)} leaked through"
+    )
+    assert len(file_starts) == 3
+    assert len(file_completes) == 3
+    # Terminal summary aggregates across all 3 files.
+    assert all_completes[0]["summary"]["total"] == 3
+    assert all_completes[0]["summary"]["passed"] == 3
+
+
+@pytest.mark.asyncio
 async def test_attach_unknown_run_id_returns_error_and_continues():
     """Attaching to a nonexistent run_id replies with an error and the
     dispatcher stays alive for the next message — the user's WS is not

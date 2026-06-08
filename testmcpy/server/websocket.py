@@ -530,14 +530,23 @@ async def _run_test_command(handle: RunHandle, data: dict, config) -> None:
         except Exception as save_err:
             _emit_log(handle, f"⚠️ Failed to save results: {save_err}")
 
-        _emit_event(
-            handle,
-            {
-                "type": "all_complete",
-                "summary": summary,
-                "results": results_list,
-            },
-        )
+        # `all_complete` is a TERMINAL signal on the wire (the UI sets
+        # running=false, clears directoryRunProgress, and closes the WS).
+        # Suppress it when invoked as a sub-call from `_run_directory_command`
+        # — the batch loop emits its own single terminal all_complete after
+        # the last file. Driven by an explicit `_in_batch` flag the parent
+        # injects into `data`. (Copilot review on PR #76: without this,
+        # a directory batch appeared to finish after the FIRST file and
+        # the WS got closed mid-batch.)
+        if not data.get("_in_batch"):
+            _emit_event(
+                handle,
+                {
+                    "type": "all_complete",
+                    "summary": summary,
+                    "results": results_list,
+                },
+            )
 
     except asyncio.CancelledError:
         # Stopped by user — let the caller emit the user-facing message.
@@ -553,19 +562,22 @@ async def _run_test_command(handle: RunHandle, data: dict, config) -> None:
 
 async def _run_directory_command(handle: RunHandle, data: dict, config) -> None:
     """Execute a 'run_directory' command — a batch of YAML files under
-    one logical run_id.
+    one logical batch ``run_id``.
 
-    Iterates the files sequentially within ONE task so the user gets a
-    single run_id (and a single "all_complete" / save-history event) for
-    the whole batch. Per-file boundaries surface as ``file_start`` and
-    ``file_complete`` structured events the UI uses to drive its
-    directory-progress strip.
+    Iterates the files sequentially within ONE task. Per-file boundaries
+    surface as ``file_start`` / ``file_complete`` events the UI uses to
+    drive its directory-progress strip; the batch as a whole emits a
+    SINGLE terminal ``all_complete`` with the aggregated summary.
 
-    Each file delegates to ``_run_test_command`` (passing the file's
-    test_path / test_name / etc. on top of the shared model/provider/
-    profile config). We DON'T call save-history per file — only one
-    aggregate save at the end, keyed by the registry's run_id, so the
-    /reports view shows one entry per batch.
+    Each file delegates to ``_run_test_command`` with ``_in_batch=True``,
+    which:
+    - SUPPRESSES the per-file ``all_complete`` (it would otherwise be a
+      terminal signal that closes the WS mid-batch — Copilot review on
+      PR #76); the batch loop owns the single terminal ``all_complete``.
+    - Still SAVES per-file history with a fresh per-file run_id, so each
+      YAML keeps its own row in ``/reports`` (the storage schema is
+      one-suite-per-run; aggregating into a single record would need a
+      bigger schema change and would hide per-file detail).
     """
     files: list[dict] = data.get("files") or []
     if not files:
@@ -611,26 +623,15 @@ async def _run_directory_command(handle: RunHandle, data: dict, config) -> None:
             _emit_log(handle, f"📂 File {idx + 1}/{len(files)}: {file_name}")
             _emit_log(handle, f"{'#' * 50}")
 
-            # _run_test_command writes test results into `handle.results`
-            # and the test_complete events fly through the registry. We
-            # snapshot len(handle.results) before/after to pick up just
-            # this file's results for the per-file file_complete event,
-            # and we suppress its own all_complete + save-history blocks
-            # by NOT calling save_test_run_to_file here — _run_test_command
-            # already emits all_complete + saves at the end of its single-
-            # file invocation, so we'd double-save if we let it run as-is.
-            #
-            # Strategy: re-run _run_test_command per file but the events
-            # still belong to the BATCH handle. Inside, the function emits
-            # its own all_complete + save block per file. We don't want
-            # that for a directory batch. Resolve by directly inlining a
-            # streamlined version: just call _run_test_command and absorb
-            # its all_complete as a "per-file all_complete" — the client
-            # already differentiates via the file_complete event we emit
-            # below, and the per-file save is actually USEFUL (each YAML
-            # gets its own row in /reports). Skip the trailing aggregate
-            # save for the directory itself to avoid double-bookkeeping.
-            file_data = {**common, **file_entry}
+            # Delegate to the single-file runner but mark it as a
+            # sub-call so its terminal all_complete is suppressed —
+            # the batch loop owns the single terminal all_complete
+            # after the last file. Per-file save_test_run_to_file
+            # still runs so each YAML keeps its own /reports row.
+            # We snapshot `handle.results` length before/after to
+            # slice out just this file's results for the per-file
+            # `file_complete` summary.
+            file_data = {**common, **file_entry, "_in_batch": True}
             pre_results_len = len(handle.results)
             try:
                 await _run_test_command(handle, file_data, config)

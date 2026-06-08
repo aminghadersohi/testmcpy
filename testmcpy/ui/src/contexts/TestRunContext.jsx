@@ -128,7 +128,10 @@ export function TestRunProvider({ children }) {
   // server-side; pre-SC-108184 the switch was duplicated three times.
   // Each caller can pass options to tune behaviour for their flow:
   // - closeOnComplete: close the WS once `all_complete` arrives.
-  //   Reattach mode passes false because the server closes its end.
+  //   All current callers (runTests, runSingleTest, runDirectory,
+  //   attachToRun) pass true — the option is retained so a future
+  //   caller can keep the socket open across multiple sequential
+  //   runs without re-handshaking.
   const _handleServerMessage = useCallback((ws, data, options = {}) => {
     const { closeOnComplete = true } = options
     switch (data.type) {
@@ -217,10 +220,18 @@ export function TestRunProvider({ children }) {
         if (data.summary && data.results) {
           setTestResults({ summary: data.summary, results: data.results })
         }
+        // Pin BOTH `completed` and `total` from the summary. For
+        // single-file runs they were already aligned (the per-test
+        // test_start events updated `total`), but for directory
+        // batches `total` was initialised to files.length and then
+        // overwritten per-file by test_start events, leaving
+        // `completed` (= total tests across files) > `total` after
+        // the batch finishes (Copilot review on PR #76).
         setRunningTests(prev => ({
           ...prev,
           current: null,
           completed: data.summary?.total ?? prev.completed,
+          total: data.summary?.total ?? prev.total,
           status: 'completed',
         }))
         setRunning(false)

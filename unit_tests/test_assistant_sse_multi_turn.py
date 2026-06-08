@@ -510,6 +510,16 @@ async def test_followup_post_when_final_arrives_alongside_new_tool_results():
     )
     assert "explore?slice_id=1" in result.response, result.response
     assert any(tc["name"] == "generate_explore_link" for tc in result.tool_calls)
+    # Directly assert BOTH `final` events were successfully parsed. Without
+    # these, a silent JSONDecodeError on the scripted `final` payload would
+    # let this test pass purely on the token-chunk assertions while leaving
+    # got_final-handling regressions invisible.
+    final_log_lines = [line for line in result.logs if "Final event received" in line]
+    assert len(final_log_lines) == 2, (
+        f"expected 2 `Final event received` log lines (one per turn), got "
+        f"{len(final_log_lines)}: {result.logs}"
+    )
+    assert not any("Failed to parse SSE data" in line for line in result.logs), result.logs
 
 
 @pytest.mark.asyncio

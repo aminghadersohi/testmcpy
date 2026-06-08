@@ -247,24 +247,27 @@ async def test_single_turn_when_first_response_has_text():
 @pytest.mark.asyncio
 async def test_stops_after_max_turns_even_if_backend_keeps_returning_tools():
     """Cap protects against a backend that keeps reporting tool calls
-    without ever returning text — the runner must NOT loop forever."""
-    # Three batches in a row that each emit a fresh tool result. With
-    # MAX_COMPLETION_TURNS=3 this exhausts the budget without ever
-    # getting an answer, and the provider must give up cleanly.
-    client = _ScriptedAsyncClient(
-        [
-            _FIRST_TURN_TOOLS_THEN_CLOSE,
-            _SECOND_TURN_MORE_TOOLS,
-            [
-                "event: tool_call",
-                'data: {"tool_call_id": "tc-4", "tool_name": "x", "input": {}}',
-                "",
-                "event: tool_result",
-                'data: {"tool_call_id": "tc-4", "tool_name": "x", "result": {}}',
-                "",
-            ],
+    without ever returning text — the runner must NOT loop forever.
+    Drives MAX_COMPLETION_TURNS batches, each with a fresh tool_result,
+    and verifies the loop stops exactly at the cap regardless of the
+    constant's current value (raised 3 → 8 in v0.7.20)."""
+
+    def _one_tool_turn(idx: int) -> list[str]:
+        tc_id = f"tc-{idx}"
+        return [
+            "event: tool_call",
+            f'data: {{"tool_call_id": "{tc_id}", "tool_name": "tool_{idx}", "input": {{}}}}',
+            "",
+            "event: tool_result",
+            f'data: {{"tool_call_id": "{tc_id}", "tool_name": "tool_{idx}", "result": {{}}}}',
+            "",
         ]
-    )
+
+    cap = AssistantProvider.MAX_COMPLETION_TURNS
+    # One batch per allowed turn — chatbot keeps emitting fresh tools every
+    # turn, never produces text or a final event.
+    batches = [_one_tool_turn(i) for i in range(cap)]
+    client = _ScriptedAsyncClient(batches)
     p = _provider(client)
 
     result = await p.generate_with_tools(prompt="loop forever pls", timeout=30.0)
@@ -275,9 +278,9 @@ async def test_stops_after_max_turns_even_if_backend_keeps_returning_tools():
     # No answer reached — empty response is acceptable here; the cap
     # fired before completion.
     assert result.response == ""
-    # All four tool calls across the three turns were captured.
-    assert len(result.tool_calls) == 4
-    assert len(result.tool_results) == 4
+    # One tool call per turn → cap-many total.
+    assert len(result.tool_calls) == cap
+    assert len(result.tool_results) == cap
 
 
 @pytest.mark.asyncio
@@ -446,6 +449,131 @@ async def test_fresh_conversation_per_generate_with_tools_call():
     # not silently reusing one.
     distinct_ids = sorted(set(conv_ids))
     assert distinct_ids == ["conv-test-1", "conv-test-2", "conv-test-3"], conv_ids
+
+
+@pytest.mark.asyncio
+async def test_followup_post_when_final_arrives_alongside_new_tool_results():
+    """Regression for the C02_1_explore_not_generate failure (SC-108182):
+    the Preset chatbot backend emits a `final` event in the SAME SSE turn
+    as the tool_call + tool_result events. The earlier "got_final → break"
+    check terminated immediately and dropped the follow-up POST that
+    carries the actual synthesized answer (the explore URL after
+    generate_explore_link ran). With the fix, `got_final` only stops the
+    loop when no new tool_results arrived this turn — otherwise we keep
+    going so the backend can synthesize the answer in a follow-up POST.
+    """
+    first_turn_tools_plus_final = [
+        "event: token",
+        'data: {"chunk": "Sure! I\'ll use Vehicle Sales."}',
+        "",
+        "event: tool_call",
+        'data: {"tool_call_id": "tc-1", "tool_name": "search_tools", "input": {}}',
+        "",
+        "event: tool_result",
+        'data: {"tool_call_id": "tc-1", "tool_name": "search_tools", "result": {}}',
+        "",
+        "event: tool_call",
+        'data: {"tool_call_id": "tc-2", "tool_name": "generate_explore_link", "input": {}}',
+        "",
+        "event: tool_result",
+        'data: {"tool_call_id": "tc-2", "tool_name": "generate_explore_link",'
+        ' "result": {"url": "https://example/explore?slice_id=1"}}',
+        "",
+        # Backend signals `final` AT THE SAME TIME as the tool calls — the
+        # synthesized answer comes on the follow-up POST, not in this turn.
+        "event: final",
+        'data: {"answer": "Sure! I\'ll use Vehicle Sales."}',
+        "",
+    ]
+    second_turn_synthesis = [
+        "event: token",
+        'data: {"chunk": "Here\'s your explore URL: "}',
+        "",
+        "event: token",
+        'data: {"chunk": "https://example/explore?slice_id=1"}',
+        "",
+        # NB: this data: line was previously two adjacent string literals
+        # which Python concatenated without a separator, producing invalid
+        # JSON (`."Here's…`) that SSE parsing silently dropped. Now a single
+        # well-formed JSON object.
+        "event: final",
+        'data: {"answer": "Sure! Here\'s your explore URL: https://example/explore?slice_id=1"}',
+        "",
+    ]
+    client = _ScriptedAsyncClient([first_turn_tools_plus_final, second_turn_synthesis])
+    p = _provider(client)
+
+    result = await p.generate_with_tools(
+        prompt="Give me an explore URL I can tweak in the browser.", timeout=30.0
+    )
+
+    assert len(client.posts) == 2, (
+        "expected a follow-up POST — `final` alongside new tool_results must "
+        "NOT short-circuit the loop"
+    )
+    assert "explore?slice_id=1" in result.response, result.response
+    assert any(tc["name"] == "generate_explore_link" for tc in result.tool_calls)
+    # Directly assert BOTH `final` events were successfully parsed. Without
+    # these, a silent JSONDecodeError on the scripted `final` payload would
+    # let this test pass purely on the token-chunk assertions while leaving
+    # got_final-handling regressions invisible.
+    final_log_lines = [line for line in result.logs if "Final event received" in line]
+    assert len(final_log_lines) == 2, (
+        f"expected 2 `Final event received` log lines (one per turn), got "
+        f"{len(final_log_lines)}: {result.logs}"
+    )
+    assert not any("Failed to parse SSE data" in line for line in result.logs), result.logs
+
+
+@pytest.mark.asyncio
+async def test_got_final_alone_still_stops_when_no_new_tool_results():
+    """Counterpart to the prior test: when `final` arrives in a turn that
+    produced ONLY text (no new tool_results), the loop must still stop —
+    the backend has nothing more to synthesize. Without this guard a
+    backend that emits `final` after a clean text-only turn would burn a
+    follow-up POST."""
+    text_only_final = [
+        "event: token",
+        'data: {"chunk": "Done."}',
+        "",
+        "event: final",
+        'data: {"answer": "Done."}',
+        "",
+    ]
+    client = _ScriptedAsyncClient([text_only_final])
+    p = _provider(client)
+
+    result = await p.generate_with_tools(prompt="hi", timeout=30.0)
+
+    assert len(client.posts) == 1
+    assert result.response == "Done."
+
+
+@pytest.mark.asyncio
+async def test_got_error_terminates_immediately_even_with_new_tool_results():
+    """`got_error` is unconditional — an error from the backend is
+    terminal regardless of whether tools fired in the same turn. Avoid
+    follow-up POSTs that would surface a second error from the same
+    broken conversation."""
+    error_turn = [
+        "event: tool_call",
+        'data: {"tool_call_id": "tc-1", "tool_name": "search_tools", "input": {}}',
+        "",
+        "event: tool_result",
+        'data: {"tool_call_id": "tc-1", "tool_name": "search_tools", "result": {}}',
+        "",
+        "event: error",
+        'data: {"error": "backend exploded"}',
+        "",
+    ]
+    client = _ScriptedAsyncClient([error_turn, _SECOND_TURN_ANSWER])
+    p = _provider(client)
+
+    result = await p.generate_with_tools(prompt="hi", timeout=30.0)
+
+    # Stopped after the first turn even though tool_results arrived.
+    assert len(client.posts) == 1, client.posts
+    assert "backend exploded" in result.response or "Error" in result.response
 
 
 @pytest.mark.asyncio

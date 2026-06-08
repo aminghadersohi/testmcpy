@@ -861,20 +861,31 @@ function Reports() {
     if (selectedRuns.size === 0) return
     if (!confirm(`Delete ${selectedRuns.size} run${selectedRuns.size > 1 ? 's' : ''}?`)) return
     try {
-      await fetch('/api/results/runs/bulk-delete', {
+      const res = await fetch('/api/results/runs/bulk-delete', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ run_ids: [...selectedRuns] }),
       })
-      setTestRuns(prev => prev.filter(r => !selectedRuns.has(r.run_id)))
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        alert(`Delete failed: ${err.detail || res.statusText}`)
+        return
+      }
       if (selectedRuns.has(selectedRun?.id)) {
         setSelectedRun(null)
         setRunDetails(null)
       }
       setSelectedRuns(new Set())
       setSelectMode(false)
+      // Re-fetch from the server (SC-108367 #1). The list endpoint is
+      // capped at limit=100; if the user deletes the 100 visible rows
+      // and we only filter locally, the next 100 stay hidden until they
+      // reload. Re-fetch + refresh the filter counts so the page state
+      // matches the DB.
+      await Promise.all([loadTestRuns(), loadFilterOptions()])
     } catch (error) {
       console.error('Bulk delete failed:', error)
+      alert(`Delete failed: ${error.message || error}`)
     }
   }
 

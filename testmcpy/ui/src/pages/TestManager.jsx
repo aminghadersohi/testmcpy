@@ -1955,7 +1955,6 @@ tests:
                               }
                               const { run_ids: deletedIds } = await res.json()
                               const deletedSet = new Set(deletedIds)
-                              setResultsHistory(prev => prev.filter(r => !deletedSet.has(r.run_id)))
                               if (selectedHistoryRun && deletedSet.has(selectedHistoryRun.run_id)) {
                                 setSelectedHistoryRun(null)
                               }
@@ -1964,6 +1963,15 @@ tests:
                               }
                               setSelectedRunIds(new Set())
                               setHistorySelectMode(false)
+                              // Re-fetch instead of just filtering locally
+                              // (SC-108367 #1). For consistency with the
+                              // /reports bulk-delete fix — the per-file
+                              // history endpoint is smaller so the
+                              // limit-window edge case is unlikely here,
+                              // but a fresh fetch also picks up any
+                              // concurrent writes the user can't see.
+                              const testFile = selectedFile?.relative_path || selectedFile?.filename
+                              if (testFile) loadResultsHistory(testFile)
                             } catch (error) {
                               console.error('Bulk delete failed:', error)
                               alert('Failed to delete selected runs')

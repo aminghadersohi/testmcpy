@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.24] - 2026-06-08
+
+### Fixed
+- **Bulk-delete in `/reports` left the page apparently empty until a
+  manual reload (SC-108367 #1).** `loadTestRuns` fetches with
+  `limit=100`. After bulk-delete the client only filtered the deleted
+  IDs out of local state — runs beyond the 100-row window stayed
+  hidden until the user reloaded the page. Now re-fetches
+  `loadTestRuns()` + `loadFilterOptions()` after a successful delete,
+  also adds the missing `res.ok` check + a user-visible error toast on
+  failure. Same fix applied to the per-file history bulk-delete in
+  TestManager (`loadResultsHistory(testFile)` after success).
+
 ## [0.7.23] - 2026-06-08
 
 ### Fixed

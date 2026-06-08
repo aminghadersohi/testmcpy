@@ -489,9 +489,12 @@ async def test_followup_post_when_final_arrives_alongside_new_tool_results():
         "event: token",
         'data: {"chunk": "https://example/explore?slice_id=1"}',
         "",
+        # NB: this data: line was previously two adjacent string literals
+        # which Python concatenated without a separator, producing invalid
+        # JSON (`."Here's…`) that SSE parsing silently dropped. Now a single
+        # well-formed JSON object.
         "event: final",
-        'data: {"answer": "Sure! I\'ll use Vehicle Sales."'
-        "Here's your explore URL: https://example/explore?slice_id=1\"}",
+        'data: {"answer": "Sure! Here\'s your explore URL: https://example/explore?slice_id=1"}',
         "",
     ]
     client = _ScriptedAsyncClient([first_turn_tools_plus_final, second_turn_synthesis])

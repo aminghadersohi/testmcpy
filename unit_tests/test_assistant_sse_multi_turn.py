@@ -84,10 +84,23 @@ def _provider(client: _ScriptedAsyncClient) -> AssistantProvider:
         completions_path="/api/v1/copilot/completions",
     )
     # Bypass auth / conversation creation — generate_with_tools just needs
-    # these three values to be truthy to proceed past the init check.
+    # these to be truthy to proceed past the init check. _open_conversation
+    # is also now called per-call (SC-108179 — fresh conv per test) so stub
+    # it to a no-op that just refreshes the conversation_id; otherwise the
+    # fake client (which only fakes `.stream()`) would crash on `.post()`.
     p._client = client  # type: ignore[assignment]
     p._session_token = "jwt-test"
     p._conversation_id = "conv-test"
+
+    _counter = {"n": 0}
+
+    async def _fake_open_conversation():
+        _counter["n"] += 1
+        p._conversation_id = f"conv-test-{_counter['n']}"
+
+    p._open_conversation = _fake_open_conversation  # type: ignore[assignment]
+    p._open_conversation_calls = _counter  # type: ignore[attr-defined]
+
     # Shrink the timing thresholds so unit tests finish in well under a
     # second; the multi-turn behaviour we're testing is independent of
     # them but we don't want a wall-clock or idle abort racing with the
@@ -193,8 +206,12 @@ async def test_followup_post_when_first_turn_only_returns_tool_results():
     result: LLMResult = await p.generate_with_tools(prompt="show me chart tools", timeout=30.0)
 
     assert len(client.posts) == 2, "expected a follow-up POST after first turn had tools only"
-    # Both POSTs hit the completions endpoint with the same conversation_id.
-    assert all(post["json"]["conversation_id"] == "conv-test" for post in client.posts)
+    # Both POSTs in this single generate_with_tools call use the same fresh
+    # conversation_id minted at the start of the call (cross-call freshness
+    # is asserted by test_fresh_conversation_per_generate_with_tools_call).
+    conv_ids = [post["json"]["conversation_id"] for post in client.posts]
+    assert len(set(conv_ids)) == 1, conv_ids
+    assert conv_ids[0].startswith("conv-test-"), conv_ids[0]
     assert result.response == "I found 3 chart-related tools."
     # Accumulated tool state across both turns.
     assert [tc["name"] for tc in result.tool_calls] == ["get_instance_info", "search_tools"]
@@ -372,9 +389,10 @@ async def test_loop_stops_when_text_grows_without_new_tool_results():
 
 @pytest.mark.asyncio
 async def test_followup_payload_matches_first_payload():
-    """The follow-up POST should reuse the SAME payload (same prompt,
-    same conversation_id) — the backend threads context via
-    conversation_id, not via a `query` continuation marker."""
+    """Within a single ``generate_with_tools`` invocation, the follow-up
+    POST reuses the SAME payload (same prompt, same conversation_id) —
+    the backend threads context via conversation_id within a call. (The
+    cross-call freshness invariant is asserted separately below.)"""
     client = _ScriptedAsyncClient([_FIRST_TURN_TOOLS_THEN_CLOSE, _SECOND_TURN_ANSWER])
     p = _provider(client)
 
@@ -384,5 +402,70 @@ async def test_followup_payload_matches_first_payload():
     first_body = client.posts[0]["json"]
     second_body = client.posts[1]["json"]
     assert first_body == second_body
-    assert first_body["conversation_id"] == "conv-test"
+    # The fake _open_conversation we install in `_provider` sets
+    # conversation_id to "conv-test-1" on the first generate_with_tools
+    # call; what matters here is that BOTH POSTs in this single call use
+    # the same one.
+    assert first_body["conversation_id"] == "conv-test-1"
     assert first_body["messages"] == [{"role": "user", "content": "same prompt"}]
+
+
+@pytest.mark.asyncio
+async def test_fresh_conversation_per_generate_with_tools_call():
+    """SC-108179: each generate_with_tools call must open its own
+    conversation. Reusing one across the suite let the backend's
+    per-conversation history grow unbounded and later tests silently
+    returned empty SSE streams. We assert: (a) the conversation-creation
+    helper fires once per generate_with_tools, regardless of how many
+    multi-turn follow-up POSTs happen inside it, and (b) each call's
+    conversation_id is distinct across calls."""
+    client = _ScriptedAsyncClient(
+        [
+            _SECOND_TURN_ANSWER,  # call 1 → 1 POST
+            _FIRST_TURN_TOOLS_THEN_CLOSE,  # call 2 → 2 POSTs (multi-turn)
+            _SECOND_TURN_ANSWER,
+            _SECOND_TURN_ANSWER,  # call 3 → 1 POST
+        ]
+    )
+    p = _provider(client)
+
+    await p.generate_with_tools(prompt="first", timeout=30.0)
+    await p.generate_with_tools(prompt="second", timeout=30.0)
+    await p.generate_with_tools(prompt="third", timeout=30.0)
+
+    # _open_conversation fires exactly once per call (even when a call
+    # makes multiple internal follow-up POSTs).
+    assert p._open_conversation_calls["n"] == 3, p._open_conversation_calls
+
+    # Each call's POSTs use a fresh, distinct conversation_id. Group
+    # POSTs into the calls that issued them via _open_conversation
+    # counter — turn 1 of each call carries a brand-new id; follow-ups
+    # within the same call reuse it.
+    conv_ids = [post["json"]["conversation_id"] for post in client.posts]
+    # Three unique conversation_ids across three calls — proves we're
+    # not silently reusing one.
+    distinct_ids = sorted(set(conv_ids))
+    assert distinct_ids == ["conv-test-1", "conv-test-2", "conv-test-3"], conv_ids
+
+
+@pytest.mark.asyncio
+async def test_conversation_creation_failure_returns_error_llmresult():
+    """If _open_conversation raises, generate_with_tools must surface a
+    well-formed LLMResult with an error response — NOT propagate the
+    exception. The test runner expects an LLMResult per call."""
+    client = _ScriptedAsyncClient([])
+    p = _provider(client)
+
+    async def _failing_open_conversation():
+        raise RuntimeError("Conversation creation failed: HTTP 503 - down")
+
+    p._open_conversation = _failing_open_conversation  # type: ignore[assignment]
+
+    result = await p.generate_with_tools(prompt="hi", timeout=30.0)
+
+    assert "failed to create conversation" in result.response.lower(), result.response
+    assert "HTTP 503" in result.response
+    # No POST should have happened because we never reached the SSE loop.
+    assert client.posts == []
+    # Logs include a diagnostic line so debugging is possible.
+    assert any("Conversation creation failed" in line for line in result.logs), result.logs

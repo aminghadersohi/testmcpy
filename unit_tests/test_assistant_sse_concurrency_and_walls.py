@@ -85,6 +85,14 @@ def _provider(
     p._client = _FakeAsyncClient(response)  # type: ignore[assignment]
     p._session_token = "jwt"
     p._conversation_id = "conv"
+
+    # generate_with_tools now opens a fresh conversation per call (SC-108179).
+    # The fake httpx client only fakes .stream(), not .post(), so stub the
+    # helper to a no-op.
+    async def _fake_open_conversation():
+        p._conversation_id = "conv"
+
+    p._open_conversation = _fake_open_conversation  # type: ignore[assignment]
     return p
 
 

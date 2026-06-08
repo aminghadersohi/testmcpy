@@ -2284,7 +2284,15 @@ class AssistantProvider(LLMProvider):
         return f"{self.base_url}{self.completions_path}"
 
     async def initialize(self):
-        """Validate config, create an HTTP client, authenticate, open conv."""
+        """Validate config, create an HTTP client, authenticate.
+
+        NOTE: conversation creation moved into ``generate_with_tools`` so each
+        test gets a fresh conversation. Reusing a single conversation across
+        a multi-test suite let the backend's per-conversation history grow
+        unbounded — later tests in C01-exploration silently returned empty
+        SSE streams (zero tool_calls, zero text, no error) once the
+        conversation hit its server-side context limit. SC-108179.
+        """
         cls_name = type(self).__name__
         if not self.base_url:
             raise ValueError(
@@ -2310,7 +2318,6 @@ class AssistantProvider(LLMProvider):
 
         self._client = httpx.AsyncClient(timeout=60.0)
         await self._authenticate()
-        await self._open_conversation()
 
     async def close(self):
         """Close the httpx client."""
@@ -2338,7 +2345,7 @@ class AssistantProvider(LLMProvider):
             _assistant_logger.info(msg)
             logs.append(msg)
 
-        if not self._client or not self._session_token or not self._conversation_id:
+        if not self._client or not self._session_token:
             return LLMResult(
                 response=(
                     f"Error: {type(self).__name__} not initialized. Call initialize() first."
@@ -2347,6 +2354,25 @@ class AssistantProvider(LLMProvider):
                 duration=time.time() - start_time,
                 logs=logs,
             )
+
+        # Open a fresh conversation for every call. Reusing the same
+        # conversation_id across a multi-test suite let the backend's
+        # per-conversation history grow unbounded — later tests silently
+        # returned empty SSE streams (zero tool_calls, zero text, no
+        # error) once the conversation hit its context limit (SC-108179).
+        # Failures here surface as an LLMResult-with-error so the test
+        # runner gets a real result object back, not an exception.
+        try:
+            await self._open_conversation()
+        except (RuntimeError, httpx.HTTPError, ValueError) as e:
+            log(f"[Assistant] Conversation creation failed: {e}")
+            return LLMResult(
+                response=f"Error: failed to create conversation: {e}",
+                tool_calls=[],
+                duration=time.time() - start_time,
+                logs=logs,
+            )
+        log(f"[Assistant] Fresh conversation: {self._conversation_id}")
 
         payload = self._build_completions_payload(prompt)
         completions_url = f"{self.base_url}{self.completions_path}"

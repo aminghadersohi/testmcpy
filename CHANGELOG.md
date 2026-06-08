@@ -7,6 +7,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.21] - 2026-06-08
+
+### Added
+- **Directory "Run All" streams logs end-to-end (SC-108184).** Previously
+  `runAllInDirectory` issued sequential HTTP `POST /api/tests/run`
+  requests with no streaming — the Logs tab was gated on
+  `running || streamingLogs.length` and never opened for batch runs.
+  The directory flow now goes through a new server-side
+  `{type: "run_directory"}` WebSocket command that runs the batch under
+  ONE registry run_id and surfaces per-file boundaries as `file_start` /
+  `file_complete` events. The Logs tab opens the moment a batch starts.
+- **Browser reload survives in-flight runs (SC-108184).** The WS handler
+  used to run `_watch_for_stop` alongside the test task with
+  `asyncio.wait(FIRST_COMPLETED)`; on `WebSocketDisconnect` the watcher
+  returned and `run_task.cancel()` fired — runs died on reload. A new
+  in-memory `run_registry` module now owns the asyncio task plus a
+  bounded log buffer (`deque(maxlen=20_000)`) and a list of structured
+  events. WebSocket connections become *attachments* rather than owners:
+  disconnect drops the attachment only; the task keeps writing to the
+  buffer. The client persists `currentRunId` to localStorage and, on
+  mount-with-recent-run-still-active, sends `{type: "attach", run_id}`
+  to reattach. The dispatcher replays buffered logs as `log_replay`
+  events, then live-streams from the registry queue. Users see a
+  `🔁 Reattached to run …` banner.
+- New top-level WebSocket messages:
+  - `run_directory` (client → server) — start a batch under one run_id.
+  - `attach` (client → server) — reattach to an in-flight or
+    recently-finished run.
+  - `run_started` (server → client) — sent immediately on a new run
+    OR on a successful reattach (with `reattached: true`).
+  - `log_replay`, `file_start`, `file_complete`, `superseded` (server →
+    client) — backlog replay marker, directory per-file boundaries,
+    and a marker the prior attachment receives when another client
+    supersedes it.
+
+### Changed
+- **`save_test_run_to_file`** honors a caller-supplied `run_id` so the
+  WebSocket runner's registry id matches the saved history record. For
+  single-file runs the live "Reattached" banner and the `/reports` row
+  now show the same id. Directory sub-saves still mint their own per-file
+  ids — each YAML keeps its own `/reports` row.
+- **`TestRunContext`** centralises WS event handling in a single
+  `_handleServerMessage` helper (was three duplicated switch
+  statements). Adds `runDirectory` and `attachToRun` actions plus
+  `currentRunId` and `directoryRunProgress` state, all persisted to
+  localStorage.
+- **`TestManager`** `runAllInDirectory` delegates to
+  `contextRunDirectory` and drops the trailing `alert()` summary in
+  favour of the live Logs tab + Results tab updating in place. The
+  `directoryRunProgress` state lives in the context now so a reload
+  during a batch still renders the per-folder progress strip.
+
+### Notes
+- Runs are held in memory only — runs are lost on server restart. Finished
+  runs are retained for 30 min so a slow reload can still pick up the
+  final state, then GC'd lazily on the next `create_run` call.
+- Only one attachment per run at a time; a second client attaching
+  receives the backlog and the first attachment gets a `superseded`
+  marker. Avoids fan-out complexity.
+
 ## [0.7.20] - 2026-06-07
 
 ### Fixed

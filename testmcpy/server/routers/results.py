@@ -62,7 +62,13 @@ def save_test_run_to_file(data: dict[str, Any]) -> dict[str, Any]:
     }
     """
     storage = get_storage()
-    run_id = str(uuid.uuid4())[:8] + "_" + datetime.now().strftime("%Y%m%d_%H%M%S")
+    # Honor a caller-supplied run_id if present (the WebSocket runner mints
+    # one upfront via the run_registry so the in-flight registry entry and
+    # the saved history record correlate on a single identifier; SC-108184).
+    # Otherwise, generate one in the legacy `<8 uuid>_<timestamp>` shape.
+    run_id = data.get("run_id") or (
+        str(uuid.uuid4())[:8] + "_" + datetime.now().strftime("%Y%m%d_%H%M%S")
+    )
 
     results = data.get("results", [])
 

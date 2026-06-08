@@ -3,6 +3,7 @@ WebSocket support for streaming chat responses and test execution.
 """
 
 import asyncio
+import contextlib
 import time
 from pathlib import Path
 from typing import Any
@@ -12,6 +13,8 @@ import yaml
 from fastapi import WebSocket, WebSocketDisconnect
 
 from testmcpy.config import get_config
+from testmcpy.server import run_registry
+from testmcpy.server.run_registry import RunHandle
 from testmcpy.server.state import get_or_create_mcp_client
 from testmcpy.src.llm_integration import create_llm_provider
 from testmcpy.src.mcp_client import MCPClient, MCPToolCall
@@ -217,12 +220,26 @@ async def handle_chat_websocket(websocket: WebSocket, mcp_client: MCPClient):
         manager.disconnect(websocket)
 
 
-async def _run_test_command(websocket: WebSocket, data: dict, config, send_log):
-    """Execute a single 'run_test' command from the client.
+def _emit_log(handle: RunHandle, msg: str) -> None:
+    """Publish a free-text log line through the registry. The registry
+    buffers it AND forwards to whoever (if anyone) is currently attached."""
+    run_registry.log(handle, msg)
 
-    Extracted to module scope so it can be wrapped in an asyncio.Task and
-    cancelled by `handle_test_websocket` when the user clicks Stop.
-    Cooperative cancellation is honored at every `await` point.
+
+def _emit_event(handle: RunHandle, event_msg: dict[str, Any]) -> None:
+    """Publish a structured event (test_start / test_complete / file_start /
+    all_complete / error) through the registry."""
+    run_registry.event(handle, event_msg)
+
+
+async def _run_test_command(handle: RunHandle, data: dict, config) -> None:
+    """Execute a single 'run_test' command tied to ``handle``.
+
+    All output goes through the registry — no direct WebSocket I/O. Whoever
+    is currently attached to ``handle`` will see the live stream; clients
+    that disconnect mid-run can reattach later and get a replay of the
+    buffered log lines + structured events from before they arrived.
+    Cooperative cancellation is honored at every `await` point (Stop button).
     """
     test_path = Path(data.get("test_path", ""))
     test_name = data.get("test_name")
@@ -232,13 +249,13 @@ async def _run_test_command(websocket: WebSocket, data: dict, config, send_log):
     llm_profile_id = data.get("llm_profile")
 
     if not test_path.exists():
-        await manager.send_message(
+        _emit_event(
+            handle,
             {"type": "error", "message": f"Test file not found: {test_path}"},
-            websocket,
         )
         return
 
-    await send_log(f"📁 Loading test file: {test_path}")
+    _emit_log(handle, f"📁 Loading test file: {test_path}")
 
     try:
         # Load test cases
@@ -303,16 +320,16 @@ async def _run_test_command(websocket: WebSocket, data: dict, config, send_log):
         if test_name:
             test_cases = [tc for tc in test_cases if tc.name == test_name]
             if not test_cases:
-                await manager.send_message(
+                _emit_event(
+                    handle,
                     {"type": "error", "message": f"Test '{test_name}' not found"},
-                    websocket,
                 )
                 return
 
-        await send_log(f"📋 Found {len(test_cases)} test(s) to run")
-        await send_log(f"🤖 Provider: {effective_provider}, Model: {effective_model}")
+        _emit_log(handle, f"📋 Found {len(test_cases)} test(s) to run")
+        _emit_log(handle, f"🤖 Provider: {effective_provider}, Model: {effective_model}")
         if suite_provider:
-            await send_log(f"📝 Suite-level provider override: {suite_provider}")
+            _emit_log(handle, f"📝 Suite-level provider override: {suite_provider}")
 
         # Get MCP client - use profile or default
         mcp_client = None
@@ -324,13 +341,14 @@ async def _run_test_command(websocket: WebSocket, data: dict, config, send_log):
             mcp_config = load_mcp_yaml()
             effective_profile = mcp_config.get("default")
             if effective_profile:
-                await send_log(f"🔌 Using default MCP profile: {effective_profile}")
+                _emit_log(handle, f"🔌 Using default MCP profile: {effective_profile}")
 
         if effective_profile:
-            await send_log(f"🔌 Loading MCP profile: {effective_profile}")
+            _emit_log(handle, f"🔌 Loading MCP profile: {effective_profile}")
             mcp_client = await get_or_create_mcp_client(effective_profile)
             if mcp_client is None:
-                await manager.send_message(
+                _emit_event(
+                    handle,
                     {
                         "type": "error",
                         "message": (
@@ -338,7 +356,6 @@ async def _run_test_command(websocket: WebSocket, data: dict, config, send_log):
                             f"Check your MCP Profiles configuration."
                         ),
                     },
-                    websocket,
                 )
                 return
 
@@ -348,20 +365,8 @@ async def _run_test_command(websocket: WebSocket, data: dict, config, send_log):
             effective_mcp_url = mcp_client.base_url
 
         # MCP profile fallback for assistant/chatbot credentials.
-        #
-        # The CLI takes workspace_hash/domain/JWT via flags; the WebSocket
-        # has no flag-equivalent. We've already tried the LLM profile —
-        # if it didn't have an `assistant`/`chatbot` entry (very common —
-        # most users' `.llm_providers.yaml` only lists Claude/OpenAI
-        # providers), the merge above was a no-op and we'd otherwise crash
-        # in AssistantProvider.__init__.
-        #
-        # The selected MCP profile already encodes which workspace we're
-        # targeting, and Preset chatbot endpoints use the same JWT as the
-        # MCP server, so deriving the missing fields from the MCP profile
-        # is the correct path for the "run a chatbot eval from the UI"
-        # flow. We never overwrite an explicit suite-YAML or LLM-profile
-        # value — this is a last-resort fallback.
+        # (See task-fix-fresh-conversation history for the full rationale —
+        # condensed comment kept here.)
         if effective_provider in ("assistant", "chatbot") and mcp_client is not None:
             filled_from_mcp: list[str] = []
             ws_hash, domain = _derive_workspace_and_domain_from_mcp_url(effective_mcp_url)
@@ -383,13 +388,16 @@ async def _run_test_command(websocket: WebSocket, data: dict, config, send_log):
                         effective_provider_config[dst_key] = val
                         filled_from_mcp.append(dst_key)
             if filled_from_mcp:
-                await send_log(
+                _emit_log(
+                    handle,
                     f"🔑 Derived from MCP profile '{effective_profile}': "
                     f"{', '.join(filled_from_mcp)} "
-                    "(add an `assistant` entry to .llm_providers.yaml to override)"
+                    "(add an `assistant` entry to .llm_providers.yaml to override)",
                 )
 
-        # Create runner with streaming log callback
+        # Create runner with streaming log callback that goes through the
+        # registry. Sync callback — registry.log is non-blocking, so
+        # there's no benefit to spawning a fresh task per log line.
         runner = TestRunner(
             model=effective_model,
             provider=effective_provider,
@@ -397,7 +405,7 @@ async def _run_test_command(websocket: WebSocket, data: dict, config, send_log):
             mcp_client=mcp_client,
             verbose=True,
             hide_tool_output=False,
-            log_callback=send_log,
+            log_callback=lambda msg: _emit_log(handle, msg),
             provider_config=effective_provider_config,
             # We emit our own per-test "🧪 Running test … / 📝 Prompt / ⏱️ Timeout"
             # block below, so the runner must not also emit its own (would create
@@ -405,27 +413,27 @@ async def _run_test_command(websocket: WebSocket, data: dict, config, send_log):
             quiet_test_announcement=True,
         )
 
-        await send_log("⚙️ Initializing test runner...")
+        _emit_log(handle, "⚙️ Initializing test runner...")
         await runner.initialize()
-        await send_log("✅ Test runner ready")
+        _emit_log(handle, "✅ Test runner ready")
 
         # Run each test one at a time
         all_results = []
         for i, tc in enumerate(test_cases):
-            await manager.send_message(
+            _emit_event(
+                handle,
                 {
                     "type": "test_start",
                     "test_name": tc.name,
                     "index": i,
                     "total": len(test_cases),
                 },
-                websocket,
             )
 
-            await send_log(f"\n{'=' * 50}")
-            await send_log(f"🧪 Running test {i + 1}/{len(test_cases)}: {tc.name}")
-            await send_log(f"📝 Prompt: {tc.prompt}")
-            await send_log(f"⏱️ Timeout: {tc.timeout}s")
+            _emit_log(handle, f"\n{'=' * 50}")
+            _emit_log(handle, f"🧪 Running test {i + 1}/{len(test_cases)}: {tc.name}")
+            _emit_log(handle, f"📝 Prompt: {tc.prompt}")
+            _emit_log(handle, f"⏱️ Timeout: {tc.timeout}s")
 
             start_time = time.time()
             result = await runner.run_test(tc)
@@ -434,40 +442,41 @@ async def _run_test_command(websocket: WebSocket, data: dict, config, send_log):
             # Send logs from the result
             if hasattr(result, "logs") and result.logs:
                 for log_line in result.logs:
-                    await send_log(log_line)
+                    _emit_log(handle, log_line)
 
             # Send test result
             status = "✅ PASSED" if result.passed else "❌ FAILED"
-            await send_log(f"{status} in {elapsed:.2f}s")
+            _emit_log(handle, f"{status} in {elapsed:.2f}s")
 
             if result.tool_calls:
-                await send_log(f"🔧 Tool calls: {len(result.tool_calls)}")
+                _emit_log(handle, f"🔧 Tool calls: {len(result.tool_calls)}")
                 for tc_call in result.tool_calls:
-                    await send_log(f"   - {tc_call.get('name', 'unknown')}")
+                    _emit_log(handle, f"   - {tc_call.get('name', 'unknown')}")
 
             if result.error:
-                await send_log(f"⚠️ Error: {result.error}")
+                _emit_log(handle, f"⚠️ Error: {result.error}")
 
-            await manager.send_message(
+            _emit_event(
+                handle,
                 {
                     "type": "test_complete",
                     "test_name": tc.name,
                     "result": result.to_dict(),
                 },
-                websocket,
             )
 
             all_results.append(result)
+            handle.results.append(result.to_dict())
 
         # Send final summary
         passed = sum(1 for r in all_results if r.passed)
         failed = len(all_results) - passed
         total_cost = sum(r.cost for r in all_results)
 
-        await send_log(f"\n{'=' * 50}")
-        await send_log(f"📊 SUMMARY: {passed} passed, {failed} failed")
+        _emit_log(handle, f"\n{'=' * 50}")
+        _emit_log(handle, f"📊 SUMMARY: {passed} passed, {failed} failed")
         if total_cost > 0:
-            await send_log(f"💰 Total cost: ${total_cost:.4f}")
+            _emit_log(handle, f"💰 Total cost: ${total_cost:.4f}")
 
         results_list = [r.to_dict() for r in all_results]
         summary = {
@@ -476,18 +485,13 @@ async def _run_test_command(websocket: WebSocket, data: dict, config, send_log):
             "failed": failed,
             "total_cost": total_cost,
         }
+        handle.summary = summary
 
         # Save results to history
         try:
             from testmcpy.server.routers.results import save_test_run_to_file
             from testmcpy.server.routers.tests import _extra_tests_dirs
 
-            # Derive a stable history label. Prefer the relative path
-            # under <cwd>/tests (or any TESTMCPY_EXTRA_TESTS_DIRS root,
-            # namespaced under that root's basename) so two external
-            # suites that happen to share a YAML basename — e.g.
-            # `foo/C01.yaml` and `bar/C01.yaml` — get distinct history
-            # entries instead of colliding on `C01.yaml`.
             tests_dir = Path.cwd() / "tests"
             test_file_name = test_path.name
             try:
@@ -503,8 +507,6 @@ async def _run_test_command(websocket: WebSocket, data: dict, config, send_log):
                             )
                             break
             except OSError:
-                # resolve() failed (broken symlink, etc.) — fall back to
-                # the basename rather than crashing the save.
                 pass
 
             save_data = {
@@ -516,19 +518,35 @@ async def _run_test_command(websocket: WebSocket, data: dict, config, send_log):
                 "results": results_list,
                 "summary": summary,
             }
+            # For single-file runs, reuse the registry's run_id so the
+            # live "Reattached to run …" banner and the /reports entry
+            # show the same id. For directory sub-calls, leave run_id
+            # unset so each file's save_test_run_to_file mints a fresh
+            # id — each YAML still gets its own /reports row.
+            if handle.kind == "single":
+                save_data["run_id"] = handle.run_id
             save_result = save_test_run_to_file(save_data)
-            await send_log(f"💾 Results saved: {save_result.get('run_id')}")
+            _emit_log(handle, f"💾 Results saved: {save_result.get('run_id')}")
         except Exception as save_err:
-            await send_log(f"⚠️ Failed to save results: {save_err}")
+            _emit_log(handle, f"⚠️ Failed to save results: {save_err}")
 
-        await manager.send_message(
-            {
-                "type": "all_complete",
-                "summary": summary,
-                "results": results_list,
-            },
-            websocket,
-        )
+        # `all_complete` is a TERMINAL signal on the wire (the UI sets
+        # running=false, clears directoryRunProgress, and closes the WS).
+        # Suppress it when invoked as a sub-call from `_run_directory_command`
+        # — the batch loop emits its own single terminal all_complete after
+        # the last file. Driven by an explicit `_in_batch` flag the parent
+        # injects into `data`. (Copilot review on PR #76: without this,
+        # a directory batch appeared to finish after the FIRST file and
+        # the WS got closed mid-batch.)
+        if not data.get("_in_batch"):
+            _emit_event(
+                handle,
+                {
+                    "type": "all_complete",
+                    "summary": summary,
+                    "results": results_list,
+                },
+            )
 
     except asyncio.CancelledError:
         # Stopped by user — let the caller emit the user-facing message.
@@ -537,102 +555,385 @@ async def _run_test_command(websocket: WebSocket, data: dict, config, send_log):
         import traceback
 
         tb = traceback.format_exc()
-        try:
-            await send_log(f"❌ Error: {str(e)}")
-            await send_log(f"Traceback:\n{tb}")
-            await manager.send_message(
-                {"type": "error", "message": str(e), "traceback": tb},
-                websocket,
-            )
-        except Exception:
-            # Socket may already be closed (client disconnected mid-run)
-            pass
+        _emit_log(handle, f"❌ Error: {str(e)}")
+        _emit_log(handle, f"Traceback:\n{tb}")
+        _emit_event(handle, {"type": "error", "message": str(e), "traceback": tb})
 
 
-async def handle_test_websocket(websocket: WebSocket):
+async def _run_directory_command(handle: RunHandle, data: dict, config) -> None:
+    """Execute a 'run_directory' command — a batch of YAML files under
+    one logical batch ``run_id``.
+
+    Iterates the files sequentially within ONE task. Per-file boundaries
+    surface as ``file_start`` / ``file_complete`` events the UI uses to
+    drive its directory-progress strip; the batch as a whole emits a
+    SINGLE terminal ``all_complete`` with the aggregated summary.
+
+    Each file delegates to ``_run_test_command`` with ``_in_batch=True``,
+    which:
+    - SUPPRESSES the per-file ``all_complete`` (it would otherwise be a
+      terminal signal that closes the WS mid-batch — Copilot review on
+      PR #76); the batch loop owns the single terminal ``all_complete``.
+    - Still SAVES per-file history with a fresh per-file run_id, so each
+      YAML keeps its own row in ``/reports`` (the storage schema is
+      one-suite-per-run; aggregating into a single record would need a
+      bigger schema change and would hide per-file detail).
     """
-    Handle WebSocket for streaming test execution with real-time logs.
+    files: list[dict] = data.get("files") or []
+    if not files:
+        _emit_event(handle, {"type": "error", "message": "run_directory: no files provided"})
+        return
 
-    Message format from client:
-    {
-        "type": "run_test",
-        "test_path": "/path/to/test.yaml",
-        "test_name": "optional_specific_test",
-        "model": "claude-sonnet-4-20250514",
-        "provider": "claude-cli",
-        "profile": "mcp_profile_id"
+    # Common per-file kwargs lifted out of the batch envelope.
+    common = {
+        "model": data.get("model"),
+        "provider": data.get("provider"),
+        "profile": data.get("profile"),
+        "llm_profile": data.get("llm_profile"),
     }
 
-    Or:
-    { "type": "stop" }   # cancel the in-flight run
+    folder_label = data.get("folder") or ""
+    _emit_log(
+        handle,
+        f"📁 Directory batch: {len(files)} file(s)"
+        + (f" in {folder_label}" if folder_label else ""),
+    )
 
-    Message format to client:
-    {
-        "type": "log" | "test_start" | "test_complete" | "all_complete" | "error",
-        "message": "...",
-        "test_name": "...",
-        "result": {...}
-    }
-    """
-    await manager.connect(websocket)
-    config = get_config()
-
-    async def send_log(msg: str):
-        """Send a log message to the client (best-effort)."""
-        try:
-            await manager.send_message({"type": "log", "message": msg}, websocket)
-        except Exception:
-            # Socket closed underneath us — drop the message.
-            pass
-
-    async def _watch_for_stop():
-        """Block until the client sends a 'stop' message.
-
-        Raises WebSocketDisconnect if the client disconnects.
-        """
-        while True:
-            msg = await websocket.receive_json()
-            if msg.get("type") == "stop":
-                return
+    # Per-file run uses a temporary handle JUST to capture that file's
+    # results, but events are forwarded into the batch handle so the
+    # client sees them under the batch run_id. Aggregate after each file.
+    aggregated_results: list[dict] = []
+    aggregated_summary = {"total": 0, "passed": 0, "failed": 0, "total_cost": 0.0}
 
     try:
+        for idx, file_entry in enumerate(files):
+            test_path = file_entry.get("test_path", "")
+            file_name = file_entry.get("name") or Path(test_path).name
+            _emit_event(
+                handle,
+                {
+                    "type": "file_start",
+                    "index": idx,
+                    "total": len(files),
+                    "name": file_name,
+                    "test_path": test_path,
+                },
+            )
+            _emit_log(handle, f"\n{'#' * 50}")
+            _emit_log(handle, f"📂 File {idx + 1}/{len(files)}: {file_name}")
+            _emit_log(handle, f"{'#' * 50}")
+
+            # Delegate to the single-file runner but mark it as a
+            # sub-call so its terminal all_complete is suppressed —
+            # the batch loop owns the single terminal all_complete
+            # after the last file. Per-file save_test_run_to_file
+            # still runs so each YAML keeps its own /reports row.
+            # We snapshot `handle.results` length before/after to
+            # slice out just this file's results for the per-file
+            # `file_complete` summary.
+            file_data = {**common, **file_entry, "_in_batch": True}
+            pre_results_len = len(handle.results)
+            try:
+                await _run_test_command(handle, file_data, config)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                _emit_log(handle, f"⚠️ File {file_name} crashed: {e}")
+
+            file_results = handle.results[pre_results_len:]
+            file_passed = sum(1 for r in file_results if r.get("passed"))
+            file_failed = len(file_results) - file_passed
+            aggregated_results.extend(file_results)
+            aggregated_summary["total"] += len(file_results)
+            aggregated_summary["passed"] += file_passed
+            aggregated_summary["failed"] += file_failed
+            aggregated_summary["total_cost"] += sum(r.get("cost", 0) or 0 for r in file_results)
+
+            _emit_event(
+                handle,
+                {
+                    "type": "file_complete",
+                    "index": idx,
+                    "total": len(files),
+                    "name": file_name,
+                    "test_path": test_path,
+                    "summary": {
+                        "total": len(file_results),
+                        "passed": file_passed,
+                        "failed": file_failed,
+                    },
+                },
+            )
+
+        # Batch-level summary + all_complete.
+        handle.summary = aggregated_summary
+        _emit_log(handle, f"\n{'=' * 50}")
+        _emit_log(
+            handle,
+            f"📊 BATCH SUMMARY: {aggregated_summary['passed']} passed, "
+            f"{aggregated_summary['failed']} failed across {len(files)} file(s)",
+        )
+        _emit_event(
+            handle,
+            {
+                "type": "all_complete",
+                "summary": aggregated_summary,
+                "results": aggregated_results,
+            },
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        import traceback
+
+        tb = traceback.format_exc()
+        _emit_log(handle, f"❌ Batch error: {e}")
+        _emit_log(handle, f"Traceback:\n{tb}")
+        _emit_event(handle, {"type": "error", "message": str(e), "traceback": tb})
+
+
+async def _drain_to_websocket(handle: RunHandle, websocket: WebSocket, token: int) -> None:
+    """Pull messages off ``handle.attached_queue`` and forward them to the
+    websocket until the queue is drained AND the run is finished, OR the
+    attachment is superseded, OR the socket fails.
+
+    Returns when this attachment is done (cleanly or via supersession);
+    the caller is responsible for detaching.
+    """
+    queue = handle.attached_queue
+    if queue is None:
+        return
+    while True:
+        try:
+            msg = await asyncio.wait_for(queue.get(), timeout=1.0)
+        except asyncio.TimeoutError:
+            # No new traffic for 1s — re-check whether the run finished
+            # (and the queue is now permanently empty) so we can exit.
+            if handle.is_finished and queue.empty():
+                return
+            continue
+        # Supersession marker — exit cleanly so the new attachment owns
+        # the channel.
+        if msg.get("type") == "superseded":
+            try:
+                await manager.send_message(msg, websocket)
+            except Exception:
+                pass
+            return
+        # Sanity-check we're still the active attachment. If a newer
+        # attach quietly took over and the supersession marker is still
+        # in flight, exit on the next iteration anyway via the marker.
+        if handle.attachment_token != token:
+            return
+        try:
+            await manager.send_message(msg, websocket)
+        except Exception:
+            # Socket closed under us — caller will detach.
+            return
+
+
+async def _watch_attached_run(websocket: WebSocket, handle: RunHandle, token: int) -> None:
+    """Block until the client either disconnects, sends an inbound
+    message we care about (stop, run_test, run_directory, attach), or
+    the drain loop exits because the run finished.
+
+    Runs ``_drain_to_websocket`` and ``websocket.receive_json`` as two
+    concurrent tasks. The first to complete wins:
+    - drain done → run finished, return so the caller waits for the
+      next client message in the outer loop.
+    - receive done with ``stop`` → cancel the registered task, keep
+      draining the post-stop messages (final log + finalize) until the
+      drain task returns.
+    - receive done with ``WebSocketDisconnect`` → re-raise to the outer
+      handler so we can clean up the attachment; the run keeps going.
+    - receive done with a new ``run_test`` / ``run_directory`` /
+      ``attach`` message → cancel the current drain, return so the
+      caller handles the new command. (This is a weird case in
+      practice but the dispatcher must not deadlock.)
+    """
+    drain_task = asyncio.create_task(_drain_to_websocket(handle, websocket, token))
+    try:
         while True:
-            data = await websocket.receive_json()
-
-            if data.get("type") != "run_test":
-                continue
-
-            run_task = asyncio.create_task(_run_test_command(websocket, data, config, send_log))
-            stop_task = asyncio.create_task(_watch_for_stop())
-
+            recv_task = asyncio.create_task(websocket.receive_json())
             done, _pending = await asyncio.wait(
-                {run_task, stop_task},
+                {drain_task, recv_task},
                 return_when=asyncio.FIRST_COMPLETED,
             )
 
-            if stop_task in done:
-                # Either client sent {"type": "stop"} or disconnected.
-                stop_exc = stop_task.exception()
-                run_task.cancel()
-                try:
-                    await run_task
-                except (asyncio.CancelledError, Exception):
-                    pass
-                if stop_exc is not None:
-                    # Disconnect (or other recv failure) — propagate to outer handler.
-                    raise stop_exc
-                await send_log("🛑 Test run stopped by user")
+            if drain_task in done:
+                recv_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await recv_task
+                return
+
+            # recv finished first.
+            try:
+                msg = recv_task.result()
+            except WebSocketDisconnect:
+                # Tear down the drain and bubble the disconnect.
+                drain_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await drain_task
+                raise
+            msg_type = msg.get("type")
+            if msg_type == "stop":
+                if handle.task is not None:
+                    handle.task.cancel()
+                # Don't return yet — let the drain finish flushing the
+                # post-cancel messages (final log line + the finalize
+                # status) so the client sees a clean shutdown.
+                continue
+            # Any other message (e.g. a new run command) ends this
+            # attachment and returns to the outer dispatcher.
+            drain_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await drain_task
+            # Put the message back-ish: requeue on the websocket's
+            # receive — we can't actually requeue, so we synthesise a
+            # follow-up by returning a sentinel via a closure. Instead,
+            # raise a custom exception with the message attached.
+            raise _Reattach(msg)
+    finally:
+        if not drain_task.done():
+            drain_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await drain_task
+
+
+class _Reattach(Exception):
+    """Internal sentinel — the client sent a new run_* / attach message
+    while a prior attachment was still draining. Carries the new
+    message so the outer dispatcher can act on it."""
+
+    def __init__(self, message: dict) -> None:
+        super().__init__("client issued a new command mid-attach")
+        self.message = message
+
+
+async def handle_test_websocket(websocket: WebSocket):
+    """Multi-message WebSocket dispatcher backed by the run registry.
+
+    Accepted client messages:
+    - ``{type: "run_test", test_path, ...}`` — start a single-file run.
+      The run is registered and survives this WS disconnecting.
+    - ``{type: "run_directory", files: [...], ...}`` — start a batch
+      under one run_id.
+    - ``{type: "attach", run_id}`` — reattach to an in-flight (or recently
+      finished) run; receive a buffered replay + live stream.
+    - ``{type: "stop"}`` — cancel the currently-attached run. Works
+      whether or not this WS started the run.
+
+    Server messages: ``run_started`` (with the registry's ``run_id``),
+    ``log`` / ``log_replay``, ``test_start`` / ``test_complete``,
+    ``file_start`` / ``file_complete``, ``all_complete``, ``error``,
+    ``superseded``.
+    """
+    await manager.connect(websocket)
+    config = get_config()
+    current_handle: RunHandle | None = None
+    current_token: int | None = None
+
+    async def _spawn_run_task(handle: RunHandle, command_coro, data: dict) -> None:
+        """Wrap ``command_coro`` so the registry status is finalized when
+        it ends regardless of exit path."""
+
+        async def _run() -> None:
+            try:
+                await command_coro(handle, data, config)
+                await run_registry.finalize(
+                    handle.run_id, status="completed", summary=handle.summary
+                )
+            except asyncio.CancelledError:
+                await run_registry.finalize(handle.run_id, status="stopped", summary=handle.summary)
+                raise
+            except Exception:
+                await run_registry.finalize(handle.run_id, status="error", summary=handle.summary)
+                raise
+
+        handle.task = asyncio.create_task(_run())
+
+    async def _start_new_run(kind: str, command_coro, data: dict) -> None:
+        """Mint a handle, send run_started, attach this socket, and watch."""
+        nonlocal current_handle, current_token
+        handle = await run_registry.create_run(kind=kind, meta=dict(data))
+        await _spawn_run_task(handle, command_coro, data)
+        queue, token = await run_registry.attach(handle)
+        current_handle, current_token = handle, token
+        try:
+            await manager.send_message(
+                {"type": "run_started", "run_id": handle.run_id, "kind": kind},
+                websocket,
+            )
+        except Exception:
+            pass
+        await _watch_attached_run(websocket, handle, token)
+        await run_registry.detach(handle, token)
+        # DELIBERATELY do not cancel handle.task — disconnects keep it alive.
+
+    async def _attach_existing_run(run_id: str) -> None:
+        nonlocal current_handle, current_token
+        handle = await run_registry.get_run(run_id)
+        if handle is None:
+            await manager.send_message(
+                {"type": "error", "message": f"run_id not found: {run_id}"},
+                websocket,
+            )
+            return
+        # Replay backlog so the UI rebuilds state.
+        for replay_msg in run_registry.buffered_replay(handle):
+            try:
+                await manager.send_message(replay_msg, websocket)
+            except Exception:
+                break
+        await manager.send_message(
+            {
+                "type": "run_started",
+                "run_id": handle.run_id,
+                "kind": handle.kind,
+                "reattached": True,
+                "status": handle.status,
+            },
+            websocket,
+        )
+        queue, token = await run_registry.attach(handle)
+        current_handle, current_token = handle, token
+        await _watch_attached_run(websocket, handle, token)
+        await run_registry.detach(handle, token)
+
+    async def _dispatch(message: dict) -> None:
+        msg_type = message.get("type")
+        if msg_type == "run_test":
+            await _start_new_run("single", _run_test_command, message)
+        elif msg_type == "run_directory":
+            await _start_new_run("directory", _run_directory_command, message)
+        elif msg_type == "attach":
+            await _attach_existing_run(message.get("run_id", ""))
+        elif msg_type == "stop":
+            if current_handle is not None and current_handle.task is not None:
+                current_handle.task.cancel()
+        # Unknown types: silently drop. Future-compatible.
+
+    try:
+        pending: dict | None = None
+        while True:
+            if pending is None:
+                message = await websocket.receive_json()
             else:
-                # Run finished naturally — cancel the stop watcher so we can
-                # re-enter the outer receive loop for the next command.
-                stop_task.cancel()
-                try:
-                    await stop_task
-                except (asyncio.CancelledError, Exception):
-                    pass
+                message = pending
+                pending = None
+            try:
+                await _dispatch(message)
+            except _Reattach as carried:
+                # The previous _watch_attached_run aborted because a new
+                # command came in mid-stream. Loop back and handle it.
+                pending = carried.message
 
     except WebSocketDisconnect:
+        if current_handle is not None and current_token is not None:
+            await run_registry.detach(current_handle, current_token)
         manager.disconnect(websocket)
     except Exception as e:
         print(f"Test WebSocket error: {e}")
+        if current_handle is not None and current_token is not None:
+            await run_registry.detach(current_handle, current_token)
         manager.disconnect(websocket)

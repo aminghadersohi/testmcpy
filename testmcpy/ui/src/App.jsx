@@ -41,6 +41,7 @@ import { TestRunProvider } from './contexts/TestRunContext'
 import { ThemeProvider, useTheme } from './contexts/ThemeContext'
 import { NotificationProvider } from './components/NotificationProvider'
 import CommandPalette from './components/CommandPalette'
+import BackgroundRunsIndicator from './components/BackgroundRunsIndicator'
 
 function ThemeSwitcher({ collapsed }) {
   const { theme, setTheme } = useTheme()
@@ -483,6 +484,11 @@ function AppContent() {
               )
             })}
           </nav>
+
+          {/* Global "in-flight runs" indicator (SC-108217). Renders only
+              when /api/runs reports active runs, so it's a no-op for the
+              common case. */}
+          <BackgroundRunsIndicator showLabels={showLabels} />
 
           {/* Profile Selectors */}
           <div className="px-2 py-2 border-t border-border space-y-1.5">

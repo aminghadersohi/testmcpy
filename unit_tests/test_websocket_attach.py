@@ -331,6 +331,74 @@ async def test_directory_batch_emits_one_terminal_all_complete(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_in_batch_error_emits_file_error_not_terminal_error(monkeypatch):
+    """Pre-fix, when `_run_test_command` was invoked as `_in_batch=True`
+    inside a directory batch and the per-file MCP init crashed, it
+    emitted `{type: "error"}` — which the client treated as terminal
+    (running=false, close WS). The directory batch kept iterating on
+    the server but the user couldn't see files 2..N and couldn't stop
+    the batch (SC-108217).
+
+    The fix routes per-file errors through `_emit_run_error`, which
+    emits `file_error` when `_in_batch=True` so the batch loop and the
+    client UI both keep going.
+    """
+    handle = await run_registry.create_run(kind="directory", meta={})
+    queue, _token = await run_registry.attach(handle)
+    ws_module._emit_run_error(
+        handle,
+        {"_in_batch": True, "test_path": "/foo.yaml"},
+        "MCP connection failed",
+    )
+    msg = queue.get_nowait()
+    assert msg["type"] == "file_error", msg
+    assert msg["message"] == "MCP connection failed"
+    assert msg["test_path"] == "/foo.yaml"
+
+    # Single-file path still emits terminal `error`.
+    ws_module._emit_run_error(handle, {}, "fatal init error")
+    msg2 = queue.get_nowait()
+    assert msg2["type"] == "error"
+    assert msg2["message"] == "fatal init error"
+
+
+@pytest.mark.asyncio
+async def test_stop_emits_stopping_ack_then_all_complete_with_stopped_status(monkeypatch):
+    """SC-108217: when the client sends `{type: "stop"}`, the server now
+    emits a `stopping` ack immediately AND a terminal
+    `all_complete{status: "stopped"}` once the cancellation finalises.
+    Pre-fix the client never saw a terminal event and couldn't tell
+    whether the run actually stopped — it just had to optimistically
+    set running=false and hope.
+    """
+    command, started, finished = await _slow_run_command_factory(steps=200, step_delay=0.02)
+    monkeypatch.setattr(ws_module, "_run_test_command", command)
+
+    ws = _FakeWebSocket()
+    dispatcher = asyncio.create_task(ws_module.handle_test_websocket(ws))
+    await ws.inbound.put({"type": "run_test", "test_path": "/x.yaml"})
+    await _wait(started)
+
+    # Stop and wait for the task to terminate.
+    await ws.inbound.put({"type": "stop"})
+    await _wait(finished, timeout=2.0)
+    # Give the dispatcher a tick to drain the post-cancel events.
+    await asyncio.sleep(0.1)
+
+    stopping_events = [m for m in ws.outbound if m.get("type") == "stopping"]
+    all_completes = [m for m in ws.outbound if m.get("type") == "all_complete"]
+
+    assert len(stopping_events) == 1, ws.outbound
+    assert len(all_completes) == 1, ws.outbound
+    assert all_completes[0]["status"] == "stopped"
+    assert all_completes[0]["summary"]["status"] == "stopped"
+
+    await ws.disconnect()
+    with contextlib.suppress(asyncio.TimeoutError):
+        await asyncio.wait_for(dispatcher, timeout=1.0)
+
+
+@pytest.mark.asyncio
 async def test_attach_unknown_run_id_returns_error_and_continues():
     """Attaching to a nonexistent run_id replies with an error and the
     dispatcher stays alive for the next message — the user's WS is not

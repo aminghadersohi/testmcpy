@@ -232,6 +232,36 @@ def _emit_event(handle: RunHandle, event_msg: dict[str, Any]) -> None:
     run_registry.event(handle, event_msg)
 
 
+def _emit_run_error(
+    handle: RunHandle,
+    data: dict[str, Any],
+    message: str,
+    traceback: str | None = None,
+) -> None:
+    """Emit an error event with the right terminal vs non-terminal semantics.
+
+    - When invoked OUTSIDE a directory batch (no ``_in_batch`` flag in
+      ``data``), emit ``{type: "error"}`` — the client treats this as
+      terminal (running=false, close WS).
+    - When invoked INSIDE a directory batch (``_in_batch=True``), emit
+      ``{type: "file_error"}`` — non-terminal: the client appends to logs
+      and marks the file as failed in directoryRunProgress, but the batch
+      keeps streaming files 2..N (SC-108217).
+
+    Previously every per-file MCP-init crash terminated the whole batch
+    on the client and left the server task running invisibly.
+    """
+    payload: dict[str, Any] = {"message": message}
+    if traceback is not None:
+        payload["traceback"] = traceback
+    if data.get("_in_batch"):
+        payload["type"] = "file_error"
+        payload["test_path"] = data.get("test_path") or data.get("test_path_resolved")
+    else:
+        payload["type"] = "error"
+    _emit_event(handle, payload)
+
+
 async def _run_test_command(handle: RunHandle, data: dict, config) -> None:
     """Execute a single 'run_test' command tied to ``handle``.
 
@@ -249,10 +279,7 @@ async def _run_test_command(handle: RunHandle, data: dict, config) -> None:
     llm_profile_id = data.get("llm_profile")
 
     if not test_path.exists():
-        _emit_event(
-            handle,
-            {"type": "error", "message": f"Test file not found: {test_path}"},
-        )
+        _emit_run_error(handle, data, f"Test file not found: {test_path}")
         return
 
     _emit_log(handle, f"📁 Loading test file: {test_path}")
@@ -320,10 +347,7 @@ async def _run_test_command(handle: RunHandle, data: dict, config) -> None:
         if test_name:
             test_cases = [tc for tc in test_cases if tc.name == test_name]
             if not test_cases:
-                _emit_event(
-                    handle,
-                    {"type": "error", "message": f"Test '{test_name}' not found"},
-                )
+                _emit_run_error(handle, data, f"Test '{test_name}' not found")
                 return
 
         _emit_log(handle, f"📋 Found {len(test_cases)} test(s) to run")
@@ -347,15 +371,11 @@ async def _run_test_command(handle: RunHandle, data: dict, config) -> None:
             _emit_log(handle, f"🔌 Loading MCP profile: {effective_profile}")
             mcp_client = await get_or_create_mcp_client(effective_profile)
             if mcp_client is None:
-                _emit_event(
+                _emit_run_error(
                     handle,
-                    {
-                        "type": "error",
-                        "message": (
-                            f"MCP profile '{effective_profile}' not found. "
-                            f"Check your MCP Profiles configuration."
-                        ),
-                    },
+                    data,
+                    f"MCP profile '{effective_profile}' not found. "
+                    f"Check your MCP Profiles configuration.",
                 )
                 return
 
@@ -557,7 +577,7 @@ async def _run_test_command(handle: RunHandle, data: dict, config) -> None:
         tb = traceback.format_exc()
         _emit_log(handle, f"❌ Error: {str(e)}")
         _emit_log(handle, f"Traceback:\n{tb}")
-        _emit_event(handle, {"type": "error", "message": str(e), "traceback": tb})
+        _emit_run_error(handle, data, str(e), traceback=tb)
 
 
 async def _run_directory_command(handle: RunHandle, data: dict, config) -> None:
@@ -779,6 +799,13 @@ async def _watch_attached_run(websocket: WebSocket, handle: RunHandle, token: in
             if msg_type == "stop":
                 if handle.task is not None:
                     handle.task.cancel()
+                # Ack the stop immediately so the client can transition to
+                # a "stopping…" UI state instead of sitting on stale running
+                # state until the cancellation actually finalises. The
+                # registry-published `stopping` event is also visible to
+                # any later attachment via buffered_replay (SC-108217).
+                run_registry.event(handle, {"type": "stopping", "run_id": handle.run_id})
+                _emit_log(handle, "🛑 Stop requested — cancelling…")
                 # Don't return yet — let the drain finish flushing the
                 # post-cancel messages (final log line + the finalize
                 # status) so the client sees a clean shutdown.
@@ -844,6 +871,20 @@ async def handle_test_websocket(websocket: WebSocket):
                     handle.run_id, status="completed", summary=handle.summary
                 )
             except asyncio.CancelledError:
+                # Emit a terminal `all_complete` with status=stopped so the
+                # client recognises the cancellation as the end of the run
+                # and clears its running/stopping UI state. Without this the
+                # client just sees the queue go silent and has to infer the
+                # state via reattach/polling.
+                run_registry.event(
+                    handle,
+                    {
+                        "type": "all_complete",
+                        "status": "stopped",
+                        "summary": dict(handle.summary or {}, status="stopped"),
+                        "results": list(handle.results),
+                    },
+                )
                 await run_registry.finalize(handle.run_id, status="stopped", summary=handle.summary)
                 raise
             except Exception:
@@ -911,6 +952,11 @@ async def handle_test_websocket(websocket: WebSocket):
         elif msg_type == "stop":
             if current_handle is not None and current_handle.task is not None:
                 current_handle.task.cancel()
+                run_registry.event(
+                    current_handle,
+                    {"type": "stopping", "run_id": current_handle.run_id},
+                )
+                _emit_log(current_handle, "🛑 Stop requested — cancelling…")
         # Unknown types: silently drop. Future-compatible.
 
     try:

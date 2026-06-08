@@ -22,6 +22,11 @@ export function TestRunProvider({ children }) {
   // reload can reattach to the same run instead of orphaning it.
   // SC-108184.
   const [currentRunId, setCurrentRunId] = useState(null)
+  // Transient state between the user clicking Stop and the server's
+  // terminal `all_complete{status:"stopped"}` event landing. Lets the UI
+  // show "Stopping…" + a disabled-but-visible button rather than flipping
+  // straight to a stale "stopped" state. SC-108217.
+  const [stopping, setStopping] = useState(false)
   // Per-file progress strip for directory batches. Set by the
   // `file_start` / `file_complete` events the server emits inside a
   // run_directory task. null when no batch is running.
@@ -216,6 +221,41 @@ export function TestRunProvider({ children }) {
         )
         break
       }
+      case 'file_error': {
+        // Non-terminal per-file error inside a directory batch (SC-108217).
+        // The batch keeps streaming; we just annotate the log + mark the
+        // file as failed in the progress strip. Don't touch `running` /
+        // `running tests.status` — files 2..N are still coming.
+        setStreamingLogs(prev => [
+          ...prev,
+          `❌ File error: ${data.message}`,
+          ...(data.traceback ? [data.traceback] : []),
+        ])
+        setDirectoryRunProgress(prev =>
+          prev
+            ? {
+                ...prev,
+                results: [
+                  ...(prev.results || []),
+                  {
+                    file: prev.name,
+                    test_path: data.test_path || prev.test_path,
+                    summary: { total: 0, passed: 0, failed: 0 },
+                    error: data.message,
+                  },
+                ],
+              }
+            : prev,
+        )
+        break
+      }
+      case 'stopping': {
+        // Server acked our stop request — show transient "Stopping…"
+        // until `all_complete{status:"stopped"}` arrives.
+        setStopping(true)
+        setStreamingLogs(prev => [...prev, '🛑 Server is cancelling the run…'])
+        break
+      }
       case 'all_complete': {
         if (data.summary && data.results) {
           setTestResults({ summary: data.summary, results: data.results })
@@ -227,16 +267,21 @@ export function TestRunProvider({ children }) {
         // overwritten per-file by test_start events, leaving
         // `completed` (= total tests across files) > `total` after
         // the batch finishes (Copilot review on PR #76).
+        const wasStopped = data.status === 'stopped'
         setRunningTests(prev => ({
           ...prev,
           current: null,
           completed: data.summary?.total ?? prev.completed,
           total: data.summary?.total ?? prev.total,
-          status: 'completed',
+          status: wasStopped ? 'stopped' : 'completed',
         }))
         setRunning(false)
+        setStopping(false)
         setDirectoryRunProgress(null)
-        setStreamingLogs(prev => [...prev, '✅ All tests complete!'])
+        setStreamingLogs(prev => [
+          ...prev,
+          wasStopped ? '🛑 Run stopped' : '✅ All tests complete!',
+        ])
         if (closeOnComplete) {
           try { ws.close() } catch (e) { /* noop */ }
         }
@@ -559,26 +604,53 @@ export function TestRunProvider({ children }) {
     attachRef.current = attachToRun
   }, [attachToRun])
 
-  // Stop a running test — sends a stop message to the server and closes the socket.
-  // The server-side task will be cancelled; results received so far are preserved.
+  // Stop a running test.
+  //
+  // Pre-SC-108217 this sent `{type: "stop"}` AND immediately closed the
+  // WebSocket. The server's stop handler called `handle.task.cancel()`
+  // but the close raced with the cancellation — and worse, even when
+  // cancellation worked the client was already gone, so the user never
+  // saw the post-cancel log lines or the terminal event. They had no
+  // proof the run actually stopped.
+  //
+  // New flow: send `stop`, set `stopping=true` so the UI shows
+  // "Stopping…", DO NOT close the WS. The server emits a `stopping`
+  // ack immediately and a terminal `all_complete{status:"stopped"}`
+  // once the cancellation finalises. That terminal event closes the
+  // WS via the shared handler. If the WS is gone (rare — happens only
+  // if the network failed), fall back to a fire-and-forget POST to
+  // `/api/runs/{run_id}/stop` so a reload-or-navigate user can still
+  // kill a run they can't see.
   const stopTests = useCallback(() => {
     const ws = wsRef.current
-    if (ws) {
+    setStopping(true)
+    setStreamingLogs(prev => [...prev, '🛑 Stop requested — waiting for server…'])
+    if (ws && ws.readyState === WebSocket.OPEN) {
       try {
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ type: 'stop' }))
-        }
+        ws.send(JSON.stringify({ type: 'stop' }))
       } catch (e) {
-        // ignore — we're closing anyway
+        // Send failed — fall through to the REST fallback below.
       }
-      try { ws.close() } catch (e) { /* noop */ }
-      wsRef.current = null
+      return
     }
-    setStreamingLogs(prev => [...prev, '🛑 Stopped by user'])
-    setRunning(false)
-    setRunningTestName(null)
-    setRunningTests(prev => ({ ...prev, current: null, status: 'stopped' }))
-  }, [])
+    // No live WS — try the REST cancel endpoint.
+    if (currentRunId) {
+      fetch(`/api/runs/${encodeURIComponent(currentRunId)}/stop`, { method: 'POST' })
+        .catch(err => {
+          setStreamingLogs(prev => [
+            ...prev,
+            `⚠️ Could not reach /api/runs to stop: ${err.message || err}`,
+          ])
+        })
+    } else {
+      // Nothing we can stop — clear the local state anyway so the user
+      // isn't stuck with a stale "running" UI.
+      setStopping(false)
+      setRunning(false)
+      setRunningTestName(null)
+      setRunningTests(prev => ({ ...prev, current: null, status: 'stopped' }))
+    }
+  }, [currentRunId])
 
   // Clear logs
   const clearLogs = useCallback(() => {
@@ -615,6 +687,7 @@ export function TestRunProvider({ children }) {
     pinnedHistoryRun,
     currentRunId,
     directoryRunProgress,
+    stopping,
     // Actions
     runTests,
     runSingleTest,

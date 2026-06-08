@@ -454,6 +454,8 @@ function TestManager({ selectedProfiles = [], selectedLlmProfile = null, llmProf
     setRunningTests,
     directoryRunProgress,
     setDirectoryRunProgress,
+    currentRunId,
+    stopping,
   } = useTestRun()
 
   // Local UI state (doesn't need to persist)
@@ -1602,14 +1604,24 @@ tests:
                     )}
                     <span>{running && runAllLlmsMode ? `${runningTests.completed}/${runningTests.total}` : 'All LLMs'}</span>
                   </button>
-                  {running && !runAllLlmsMode && (
+                  {/* Stop is visible whenever:
+                      - a run is live (running=true), OR
+                      - a directory batch is in progress (the v0.7.21 batch
+                        runner sets directoryRunProgress and keeps going
+                        server-side even when a per-file error flipped
+                        running=false), OR
+                      - we're in the transient "Stopping…" state.
+                      Disabled while stopping so the user can't double-fire
+                      the stop request. SC-108217. */}
+                  {!runAllLlmsMode && (running || directoryRunProgress || stopping) && (
                     <button
                       onClick={stopTests}
-                      className="btn btn-error text-sm"
-                      title="Stop the current test run"
+                      disabled={stopping}
+                      className={`btn text-sm ${stopping ? 'btn-secondary' : 'btn-error'}`}
+                      title={stopping ? 'Server is cancelling the run…' : 'Stop the current test run'}
                     >
                       <Square size={14} fill="currentColor" />
-                      <span>Stop</span>
+                      <span>{stopping ? 'Stopping…' : 'Stop'}</span>
                     </button>
                   )}
                   {resultsHistory.length > 0 && (

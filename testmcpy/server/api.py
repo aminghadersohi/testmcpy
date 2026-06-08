@@ -35,6 +35,7 @@ from testmcpy.server.routers import llm as llm_router  # noqa: E402
 from testmcpy.server.routers import mcp_profiles as mcp_profiles_router  # noqa: E402
 from testmcpy.server.routers import metrics as metrics_router  # noqa: E402
 from testmcpy.server.routers import results as results_router  # noqa: E402
+from testmcpy.server.routers import runs as runs_router  # noqa: E402
 from testmcpy.server.routers import search as search_router  # noqa: E402
 from testmcpy.server.routers import security as security_router  # noqa: E402
 from testmcpy.server.routers import smoke_reports as smoke_reports_router  # noqa: E402
@@ -464,6 +465,7 @@ app.include_router(generation_logs_router.router)
 app.include_router(llm_router.router)
 app.include_router(mcp_profiles_router.router)
 app.include_router(results_router.router)
+app.include_router(runs_router.router)
 app.include_router(smoke_reports_router.router)
 app.include_router(test_profiles_router.router)
 app.include_router(tests_router.router)

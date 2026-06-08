@@ -7,6 +7,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.23] - 2026-06-08
+
+### Fixed
+- **Stop button vanished + run continued invisibly when a directory
+  batch's first file errored (SC-108217).** The directory runner's
+  per-file `_run_test_command` emitted `{type: "error", …}` for any
+  exception. The UI treats `error` as TERMINAL (sets `running=false`,
+  closes the WS). So when file 1's MCP init crashed, the batch kept
+  iterating files 2..N server-side but the UI thought the run was
+  dead — no Stop button, no logs, no way out other than reload-or-kill.
+  Server now distinguishes per-file errors from batch-fatal ones:
+  inside a directory batch (`_in_batch=True`), errors emit
+  `{type: "file_error"}` which the client appends to logs and marks
+  the file as failed in `directoryRunProgress.results`, while the
+  batch keeps streaming. Single-file / single-test runs still emit
+  the terminal `error` event.
+- **Stop button optimistically declared victory.** Old `stopTests`
+  sent `stop` then immediately closed the WS and set `running=false`
+  without server confirmation. New flow: send `stop`, set transient
+  `stopping=true`, DON'T close the WS. The server emits a `stopping`
+  ack immediately and a terminal `all_complete{status:"stopped"}`
+  once the cancellation finalises — only then does the client close.
+  Falls back to `POST /api/runs/{run_id}/stop` if no live WS.
+- **Stop button visibility too narrow.** Previously gated on
+  `running && !runAllLlmsMode`; now also visible when
+  `directoryRunProgress` is set (covers the file-error desync above)
+  OR when `stopping=true` (renders as a disabled "Stopping…" button).
+
+### Added
+- **Global "In-flight runs" indicator in the sidebar.** New
+  `<BackgroundRunsIndicator />` polls `GET /api/runs?active_only=true`
+  every 5s and shows a pill with the count + a popover listing each
+  run with Open / Kill buttons. Works from any page — pre-fix, runs
+  started on /tests were completely invisible from /reports etc.
+- **`GET /api/runs`** lists in-flight (or all) registry handles,
+  with a serialised view of `meta` so the UI can label them
+  meaningfully (folder name for batches, file path for singles).
+  **`GET /api/runs/{run_id}`** returns one. **`POST
+  /api/runs/{run_id}/stop`** fires the cancellation without needing
+  a WebSocket.
+- **`stopping` WebSocket event** ack'd immediately on `stop` receipt.
+- **Terminal `all_complete{status:"stopped"}`** emitted when the
+  registry finalises a cancelled run, so the client transitions out
+  of its "stopping…" transient.
+- 8 unit tests in `test_runs_router.py` (list/get/stop endpoints,
+  active-only filter, finished-noop, 404s, cancel-actually-cancels-
+  the-task). 2 new in `test_websocket_attach.py`
+  (`file_error` vs `error` gating; stop-emits-`stopping`-then-
+  terminal-`all_complete{stopped}`).
+
 ## [0.7.22] - 2026-06-08
 
 ### Added

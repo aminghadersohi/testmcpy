@@ -50,6 +50,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   re-parsing the source YAML (which may have moved or been edited).
   Old saved runs lack this field; the UI shows a graceful fallback.
 
+### Fixed
+- **MCP-profile / LLM-providers config saves crashed with 500 on
+  read-only single-file bind mounts (SC-108367 #3).** Docker
+  deployments mount `mcp_services.yaml` / `llm_providers.yaml` as
+  `:ro`. `Path.replace` requires write access to the *target* file
+  (not just parent dir), so the atomic-write step raised `EROFS`,
+  and the recovery `shutil.copy2(backup, primary)` raised `EROFS`
+  again — surfacing as a misleading "Failed to restore backup" 500
+  cascade. The previous `~/.testmcpy/` fallback (commit `f19c866`)
+  only checked CWD writability and didn't trigger here.
+  Saves now detect the single-file read-only case and write to
+  `./.testmcpy/<filename>` instead — sharing the named volume already
+  used for `storage.db`. Loads prefer that fallback when it exists,
+  so UI edits round-trip across container restarts. The backup-
+  restore-onto-primary path is skipped when falling back, eliminating
+  the "Failed to restore backup" noise. Applied to both duplicate
+  `save_mcp_yaml` copies (`server/state.py` now delegates to
+  `server/helpers/mcp_config.py`) and to `LLMProfileConfig.save`.
+  10 unit tests pin the read-only fallback + writable-primary
+  unchanged behavior + load-prefers-fallback round trip.
+
 ## [0.7.23] - 2026-06-08
 
 ### Fixed

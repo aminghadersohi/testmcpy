@@ -12,7 +12,7 @@ from fastapi import HTTPException, WebSocket
 
 from testmcpy.auth_flow_recorder import AuthFlowRecorder
 from testmcpy.config import get_config
-from testmcpy.mcp_profiles import load_profile, reload_profile_config
+from testmcpy.mcp_profiles import load_profile
 from testmcpy.src.mcp_client import MCPClient
 
 
@@ -41,24 +41,15 @@ auth_flow_recorder = AuthFlowRecorder()  # Global auth flow recorder instance
 
 
 def get_mcp_config_path() -> Path:
-    """Get path to .mcp_services.yaml file."""
-    # Look in current directory first
-    config_path = Path.cwd() / ".mcp_services.yaml"
-    if config_path.exists():
-        return config_path
+    """Get path to .mcp_services.yaml file. Prefers the writable
+    persistent fallback at ``.testmcpy/.mcp_services.yaml`` when it
+    exists (SC-108367 #3) — see ``helpers/mcp_config.py`` for the
+    single source of truth on resolution."""
+    from testmcpy.server.helpers.mcp_config import (
+        get_mcp_config_path as _shared_path,
+    )
 
-    # Check parent directories
-    current = Path.cwd()
-    for _ in range(5):
-        config_file = current / ".mcp_services.yaml"
-        if config_file.exists():
-            return config_file
-        if current.parent == current:
-            break
-        current = current.parent
-
-    # Default to current directory
-    return Path.cwd() / ".mcp_services.yaml"
+    return _shared_path()
 
 
 def load_mcp_yaml() -> dict[str, Any]:
@@ -207,88 +198,14 @@ def save_mcp_yaml(config_data: dict[str, Any]):
     Raises:
         HTTPException: If save fails with detailed error message
     """
-    import shutil
+    # Delegate to the canonical implementation in helpers/mcp_config.py
+    # so both copies share the same read-only-mount fallback behaviour
+    # (SC-108367 #3). The two duplicate save_mcp_yaml implementations
+    # in this repo are a pre-existing tech-debt item; routing this one
+    # through the helper is the smallest safe step to keep them in sync.
+    from testmcpy.server.helpers.mcp_config import save_mcp_yaml as _shared_save
 
-    config_path = get_mcp_config_path()
-    backup_path = config_path.with_suffix(".yaml.backup")
-    temp_path = config_path.with_suffix(".yaml.tmp")
-
-    try:
-        # Step 1: Validate config structure
-        validate_config(config_data)
-
-        # Step 2: Clean config (remove None values, etc.)
-        cleaned_config = clean_config_for_yaml(config_data)
-
-        # Step 3: Create backup of existing file
-        if config_path.exists():
-            try:
-                shutil.copy2(config_path, backup_path)
-            except Exception as e:
-                # Log warning but continue - backup is not critical
-                print(f"Warning: Failed to create backup: {e}")
-
-        # Step 4: Write to temporary file first (atomic operation pattern)
-        try:
-            with open(temp_path, "w", encoding="utf-8") as f:
-                yaml.dump(
-                    cleaned_config,
-                    f,
-                    default_flow_style=False,
-                    sort_keys=False,
-                    indent=2,
-                    allow_unicode=True,
-                    width=float("inf"),  # Prevent line wrapping
-                )
-        except Exception as e:
-            # Clean up temp file if write failed
-            if temp_path.exists():
-                temp_path.unlink()
-            raise ValueError(f"Failed to write YAML: {str(e)}")
-
-        # Step 5: Validate the written YAML can be read back
-        try:
-            with open(temp_path, encoding="utf-8") as f:
-                yaml.safe_load(f)
-        except Exception as e:
-            # Clean up invalid temp file
-            if temp_path.exists():
-                temp_path.unlink()
-            raise ValueError(f"Generated invalid YAML: {str(e)}")
-
-        # Step 6: Atomic rename (replaces original file)
-        temp_path.replace(config_path)
-
-        # Step 7: Reload profile config to pick up changes
-        reload_profile_config()
-
-    except ValueError as e:
-        # Validation or YAML errors - restore from backup
-        if backup_path.exists() and not config_path.exists():
-            try:
-                shutil.copy2(backup_path, config_path)
-            except Exception as restore_error:
-                print(f"Error restoring backup: {restore_error}")
-        raise HTTPException(status_code=400, detail=f"Invalid configuration: {str(e)}")
-
-    except Exception as e:
-        # Unexpected errors - try to restore from backup
-        if backup_path.exists():
-            try:
-                shutil.copy2(backup_path, config_path)
-                print(f"Restored configuration from backup after error: {e}")
-            except Exception as restore_error:
-                print(f"Failed to restore backup: {restore_error}")
-
-        raise HTTPException(status_code=500, detail=f"Failed to save configuration: {str(e)}")
-
-    finally:
-        # Clean up temporary file if it still exists
-        if temp_path.exists():
-            try:
-                temp_path.unlink()
-            except Exception as e:
-                print(f"Warning: Failed to clean up temp file: {e}")
+    _shared_save(config_data)
 
 
 def generate_profile_id(name: str, existing_ids: list[str]) -> str:

@@ -14,6 +14,42 @@ from typing import Any
 import yaml
 
 
+def _resolve_llm_providers_path() -> Path:
+    """Read path: prefer ``.testmcpy/.llm_providers.yaml`` when present
+    (writable persistent fallback for Docker ``:ro`` bind mounts),
+    else the standard CWD location. SC-108367 #3.
+    """
+    fallback = Path.cwd() / ".testmcpy" / ".llm_providers.yaml"
+    if fallback.exists():
+        return fallback
+    return Path.cwd() / ".llm_providers.yaml"
+
+
+def _resolve_writable_path(primary_path: Path) -> tuple[Path, bool]:
+    """Pick where to write a config file.
+
+    Returns ``(save_path, using_fallback)``. ``save_path`` is the primary
+    path when writable, else ``.testmcpy/<filename>`` next to the DB.
+    ``Path.replace`` requires write access to the TARGET file (not just
+    parent dir) when the target exists, which is the ``:ro`` single-file
+    bind-mount case. SC-108367 #3.
+    """
+
+    def _writable(p: Path) -> bool:
+        if not p.exists():
+            return os.access(p.parent, os.W_OK)
+        return os.access(p, os.W_OK)
+
+    if _writable(primary_path):
+        return primary_path, False
+    persistent_dir = Path.cwd() / ".testmcpy"
+    try:
+        persistent_dir.mkdir(exist_ok=True)
+    except OSError:
+        pass
+    return persistent_dir / primary_path.name, True
+
+
 def _substitute_env_vars(value: Any) -> Any:
     """
     Recursively substitute environment variables in config values.
@@ -129,8 +165,13 @@ class LLMProfileConfig:
         self._load_profiles()
 
     def _load_profiles(self):
-        """Load profiles from .llm_providers.yaml file."""
-        config_path = Path.cwd() / ".llm_providers.yaml"
+        """Load profiles from .llm_providers.yaml file.
+
+        Prefers a writable fallback at ``.testmcpy/.llm_providers.yaml``
+        when it exists (SC-108367 #3) so UI edits round-trip even when
+        the primary file is on a read-only mount.
+        """
+        config_path = _resolve_llm_providers_path()
 
         if not config_path.exists():
             return
@@ -190,8 +231,17 @@ class LLMProfileConfig:
             print(f"Warning: Failed to load LLM profiles from {config_path}: {e}")
 
     def save(self):
-        """Save profiles to .llm_providers.yaml file."""
-        config_path = Path.cwd() / ".llm_providers.yaml"
+        """Save profiles to .llm_providers.yaml file.
+
+        If the primary config path is on a read-only mount (Docker
+        `:ro` bind), falls back to ``.testmcpy/.llm_providers.yaml``
+        next to ``storage.db`` so UI edits actually persist
+        (SC-108367 #3). Backup-onto-read-only is skipped so the save
+        no longer leaves a misleading "Failed to restore backup"
+        cascade in the log.
+        """
+        primary_path = Path.cwd() / ".llm_providers.yaml"
+        save_path, using_fallback = _resolve_writable_path(primary_path)
 
         data = {
             "default": self.default_profile_id,
@@ -202,20 +252,26 @@ class LLMProfileConfig:
         for profile_id, profile in self.profiles.items():
             data["profiles"][profile_id] = profile.to_dict()
 
-        # Create backup
-        if config_path.exists():
-            backup_path = config_path.with_suffix(".yaml.backup")
+        # Backup only when we're actually replacing an existing file
+        # at the save location.
+        if save_path.exists():
+            backup_path = save_path.with_suffix(".yaml.backup")
             try:
                 import shutil
 
-                shutil.copy2(config_path, backup_path)
+                shutil.copy2(save_path, backup_path)
             except Exception as e:
                 print(f"Warning: Failed to create backup: {e}")
 
         # Write new config
         try:
-            with open(config_path, "w") as f:
+            with open(save_path, "w") as f:
                 yaml.dump(data, f, default_flow_style=False, sort_keys=False)
+            if using_fallback:
+                print(
+                    f"[testmcpy] {primary_path} is read-only; "
+                    f"persisted LLM providers config to writable fallback {save_path}"
+                )
         except Exception as e:
             raise Exception(f"Failed to save LLM profiles: {e}")
 

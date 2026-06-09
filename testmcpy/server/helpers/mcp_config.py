@@ -1,6 +1,7 @@
 """MCP configuration file helpers."""
 
 import copy
+import os
 import shutil
 from pathlib import Path
 from typing import Any
@@ -8,9 +9,81 @@ from typing import Any
 import yaml
 from fastapi import HTTPException
 
+# Persistent fallback for config files whose primary location is on a
+# read-only mount (e.g. Docker `:ro` bind mounts of mcp_services.yaml /
+# llm_providers.yaml). Mirrors the `.testmcpy/storage.db` convention
+# from `testmcpy/db.py` so a single named volume covers DB + config
+# writes. SC-108367 #3.
+_PERSISTENT_DIR_NAME = ".testmcpy"
+
+
+def _persistent_dir() -> Path:
+    """Return the writable persistent directory for config overrides,
+    creating it if missing. Lives under CWD next to ``storage.db``."""
+    d = Path.cwd() / _PERSISTENT_DIR_NAME
+    try:
+        d.mkdir(exist_ok=True)
+    except OSError:
+        # `.testmcpy/` itself is read-only (very unusual deployment).
+        # Caller will catch the eventual write error.
+        pass
+    return d
+
+
+def _is_path_writable_for_replace(path: Path) -> bool:
+    """``Path.replace`` requires write access to the TARGET file (not just
+    the parent dir) when the target already exists, because it overwrites
+    the inode. A ``:ro`` single-file bind mount has writable parent dir
+    but read-only target — that's exactly the case this guards against.
+    """
+    if not path.exists():
+        # Brand-new file — parent-dir writability is sufficient.
+        return os.access(path.parent, os.W_OK)
+    return os.access(path, os.W_OK)
+
+
+def resolve_config_save_path(primary_path: Path) -> tuple[Path, bool]:
+    """Pick where to actually write a config file.
+
+    Returns ``(save_path, using_fallback)``. ``save_path`` is either
+    ``primary_path`` itself (when writable) or the persistent fallback
+    at ``.testmcpy/<filename>`` (when the primary is on a read-only
+    mount). Callers MUST persist to ``save_path`` and skip the
+    backup-restore-onto-primary dance when ``using_fallback`` is True
+    (writing the backup to a read-only path produces the misleading
+    "Failed to restore backup" 500 cascade — SC-108367 #3).
+    """
+    if _is_path_writable_for_replace(primary_path):
+        return primary_path, False
+    fallback = _persistent_dir() / primary_path.name
+    return fallback, True
+
+
+def resolve_config_load_path(primary_path: Path) -> Path:
+    """Pick where to read a config file from.
+
+    Prefers a previous save in the persistent fallback location if one
+    exists, so UI edits round-trip across container restarts. Otherwise
+    falls back to the primary bind-mounted path. Either return value is
+    safe to pass to ``open()``; callers must still check ``.exists()``.
+    """
+    fallback = _persistent_dir() / primary_path.name
+    if fallback.exists():
+        return fallback
+    return primary_path
+
 
 def get_mcp_config_path() -> Path:
-    """Get path to .mcp_services.yaml file."""
+    """Get path to .mcp_services.yaml file.
+
+    Returns the persistent fallback (``.testmcpy/.mcp_services.yaml``)
+    when it exists from a previous save, otherwise the standard CWD or
+    ancestor lookup. SC-108367 #3.
+    """
+    fallback = _persistent_dir() / ".mcp_services.yaml"
+    if fallback.exists():
+        return fallback
+
     # Look in current directory first
     config_path = Path.cwd() / ".mcp_services.yaml"
     if config_path.exists():
@@ -147,22 +220,33 @@ def save_mcp_yaml(config_data: dict[str, Any]):
 
     Features:
     - Validates config before saving
-    - Creates backup before overwrite
+    - Creates backup before overwrite (skipped on read-only fallback path)
     - Uses atomic write (temp file + rename)
-    - Automatic rollback on failure
+    - Falls back to writable `.testmcpy/<filename>` when the primary
+      config is on a read-only mount (Docker `:ro` bind, SC-108367 #3)
+    - Automatic rollback on failure (only when writing to a writable
+      primary — restoring onto a `:ro` path is what produced the
+      misleading "Failed to restore backup" 500s)
     - Reloads profile config after save
     """
-    config_path = get_mcp_config_path()
-    backup_path = config_path.with_suffix(".yaml.backup")
-    temp_path = config_path.with_suffix(".yaml.tmp")
+    # Resolve where to actually write. If the discovered config path is
+    # on a read-only mount, switch to .testmcpy/.mcp_services.yaml.
+    primary_path = get_mcp_config_path()
+    save_path, using_fallback = resolve_config_save_path(primary_path)
+    backup_path = save_path.with_suffix(".yaml.backup")
+    temp_path = save_path.with_suffix(".yaml.tmp")
 
     try:
         validate_config(config_data)
         cleaned_config = clean_config_for_yaml(config_data)
 
-        if config_path.exists():
+        # Backup only when we'll actually be replacing an existing file
+        # at the save location. (When falling back to .testmcpy/ for
+        # the first time, there's nothing to back up; subsequent saves
+        # will find a previous fallback copy and back it up there.)
+        if save_path.exists():
             try:
-                shutil.copy2(config_path, backup_path)
+                shutil.copy2(save_path, backup_path)
             except Exception as e:
                 print(f"Warning: Failed to create backup: {e}")
 
@@ -190,24 +274,35 @@ def save_mcp_yaml(config_data: dict[str, Any]):
                 temp_path.unlink()
             raise ValueError(f"Generated invalid YAML: {str(e)}")
 
-        temp_path.replace(config_path)
+        temp_path.replace(save_path)
+        if using_fallback:
+            print(
+                f"[testmcpy] {primary_path} is read-only; "
+                f"persisted MCP config to writable fallback {save_path}"
+            )
 
         from testmcpy.mcp_profiles import reload_profile_config
 
         reload_profile_config()
 
     except ValueError as e:
-        if backup_path.exists() and not config_path.exists():
+        if backup_path.exists() and not save_path.exists():
             try:
-                shutil.copy2(backup_path, config_path)
+                shutil.copy2(backup_path, save_path)
             except Exception as restore_error:
                 print(f"Error restoring backup: {restore_error}")
         raise HTTPException(status_code=400, detail=f"Invalid configuration: {str(e)}")
 
     except Exception as e:
-        if backup_path.exists():
+        # Restore from backup ONLY when our save target is writable.
+        # On a `:ro` mount the `copy2(backup, primary)` would itself
+        # fail with EROFS and we'd log the misleading
+        # "Failed to restore backup" cascade. The fallback resolution
+        # above should mean we never hit this for the read-only case,
+        # but guard explicitly so future changes don't reintroduce it.
+        if backup_path.exists() and _is_path_writable_for_replace(save_path):
             try:
-                shutil.copy2(backup_path, config_path)
+                shutil.copy2(backup_path, save_path)
                 print(f"Restored configuration from backup after error: {e}")
             except Exception as restore_error:
                 print(f"Failed to restore backup: {restore_error}")

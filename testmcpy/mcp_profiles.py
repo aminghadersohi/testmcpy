@@ -187,6 +187,28 @@ class MCPProfileConfig:
                 return path
             return None
 
+        # Prefer the writable `.testmcpy/.mcp_services.yaml` fallback when
+        # it exists. Without this, a save on a read-only mount writes to
+        # the fallback but `_find_config_file` (used by the
+        # ``/profiles`` list endpoint via reload_profile_config() AND by
+        # runtime ``load_profile()`` test execution) keeps reading the
+        # stale read-only primary — so saved MCP edits don't appear in
+        # the list and aren't used at runtime even though the 500 is
+        # gone. SC-108367 review finding #1.
+        try:
+            from testmcpy.server.helpers.mcp_config import (
+                get_mcp_config_path as _resolved_path,
+            )
+
+            resolved = _resolved_path()
+            if resolved.exists():
+                return resolved
+        except Exception:
+            # Server helper isn't importable in some standalone contexts
+            # (CLI without fastapi installed). Fall through to the CWD
+            # check so non-server callers keep working.
+            pass
+
         # Check current directory only (same as llm_profiles)
         config_file = Path.cwd() / ".mcp_services.yaml"
         if config_file.exists():

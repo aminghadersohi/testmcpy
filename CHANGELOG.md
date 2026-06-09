@@ -7,6 +7,98 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.24] - 2026-06-09
+
+### Fixed
+- **Bulk-delete in `/reports` left the page apparently empty until a
+  manual reload (SC-108367 #1).** `loadTestRuns` fetches with
+  `limit=100`. After bulk-delete the client only filtered the deleted
+  IDs out of local state — runs beyond the 100-row window stayed
+  hidden until the user reloaded the page. Now re-fetches
+  `loadTestRuns()` + `loadFilterOptions()` after a successful delete,
+  also adds the missing `res.ok` check + a user-visible error toast on
+  failure. Same fix applied to the per-file history bulk-delete in
+  TestManager (`loadResultsHistory(testFile)` after success).
+- **Reports detail view: cost/tokens read as `$0.00` / `0` for
+  chatbot-provider runs (SC-108367 #2).** The chatbot/assistant
+  provider's endpoint doesn't surface cost or token counts. Showing
+  `$0.00` and a bare `0` icon misled users into reading "free" or
+  "broken." Both the run-level header and the per-test row now show
+  `— cost` / `— tokens` with a tooltip "Cost/Token counts not reported
+  by the chatbot/assistant provider" when `provider == 'assistant' |
+  'chatbot'` and the value is zero. Other providers still see the
+  literal value.
+- **Reports detail view: per-test score number was unlabeled
+  (SC-108367 #2).** A bare `0.50` was easy to miss as a score. Now
+  reads `score 0.50/1.00` with a tooltip "Aggregate evaluator score
+  for this test (0.00–1.00). 1.00 = all evaluators passed at 100%."
+- **Reports detail view: assistant response was collapsed by default
+  and prompt was missing entirely (SC-108367 #2).** The test's user
+  prompt was never saved in `TestResult`, and the LLM response was
+  hidden behind a click. For chatbot tests the response IS the test,
+  so it's now surfaced at the top of each expanded card alongside the
+  prompt, with Tool Calls / Evaluations / Metrics below. Empty
+  responses (e.g. guardrail refusals) get an explicit hint —
+  "Empty response. The assistant ran N tool calls but never produced
+  final text…" — instead of an empty box. Old runs missing the prompt
+  show a "(not recorded for this run)" inline hint so users know to
+  open the YAML or re-run with v0.7.24+.
+
+### Added
+- **`TestResult.prompt`** persisted by `_run_test_with_retry`, so the
+  /reports detail view can render the original prompt without
+  re-parsing the source YAML (which may have moved or been edited).
+  Old saved runs lack this field; the UI shows a graceful fallback.
+
+### Fixed
+- **MCP-profile / LLM-providers config saves crashed with 500 on
+  read-only single-file bind mounts (SC-108367 #3).** Docker
+  deployments mount `mcp_services.yaml` / `llm_providers.yaml` as
+  `:ro`. `Path.replace` requires write access to the *target* file
+  (not just parent dir), so the atomic-write step raised `EROFS`,
+  and the recovery `shutil.copy2(backup, primary)` raised `EROFS`
+  again — surfacing as a misleading "Failed to restore backup" 500
+  cascade. The previous `~/.testmcpy/` fallback (commit `f19c866`)
+  only checked CWD writability and didn't trigger here.
+  Saves now detect the single-file read-only case and write to
+  `./.testmcpy/<filename>` instead — sharing the named volume already
+  used for `storage.db`. Loads prefer that fallback when it exists,
+  so UI edits round-trip across container restarts. The backup-
+  restore-onto-primary path is skipped when falling back, eliminating
+  the "Failed to restore backup" noise. Applied to both duplicate
+  `save_mcp_yaml` copies (`server/state.py` now delegates to
+  `server/helpers/mcp_config.py`) and to `LLMProfileConfig.save`.
+  10 unit tests pin the read-only fallback + writable-primary
+  unchanged behavior + load-prefers-fallback round trip.
+- **MCP `:ro` follow-up — saved edits invisible at runtime (review
+  finding #1 on PR #79).** The PR initially fixed the 500 + the
+  silent save-doesn't-stick problem only for the two `save_mcp_yaml`
+  call sites, but `MCPProfileConfig._find_config_file` (used by
+  `GET /api/mcp/profiles` and runtime `load_profile()`) was still
+  reading the read-only primary directly. So a saved MCP edit went
+  to `.testmcpy/.mcp_services.yaml` correctly but the profiles list
+  + the runner kept using the stale config. Fixed by delegating
+  `_find_config_file` to `helpers.get_mcp_config_path()` (which
+  prefers the fallback) with a graceful fall-through for CLI
+  contexts where the server helpers aren't importable.
+- **LLM save/load resolver symmetry (review finding #5).**
+  `LLMProfileConfig.save` derived `primary_path` directly rather
+  than via the fallback-preferring resolver, so in the unusual
+  Docker-then-native transition a fallback existed but save wrote
+  to CWD. Now uses `_resolve_llm_providers_path` for both.
+- **`.testmcpy/` no longer materialised by read-side path lookups
+  (review finding #6).** Split `_persistent_dir` into a pure-path
+  read variant and a write-side `_persistent_dir_ensure` so opening
+  the Reports / Tests pages doesn't have a write side-effect.
+
+  2 added unit tests:
+  - `test_mcp_profile_config_loader_prefers_fallback` — drives the
+    full path-disagreement reproduction (read-only primary → save
+    via `save_mcp_yaml` → `MCPProfileConfig()` loads the fresh
+    profile, not the stale one).
+  - `test_load_path_resolution_does_not_create_persistent_dir` —
+    pins the no-side-effect-on-reads invariant.
+
 ## [0.7.23] - 2026-06-08
 
 ### Fixed

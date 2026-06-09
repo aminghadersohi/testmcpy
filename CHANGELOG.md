@@ -70,6 +70,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `server/helpers/mcp_config.py`) and to `LLMProfileConfig.save`.
   10 unit tests pin the read-only fallback + writable-primary
   unchanged behavior + load-prefers-fallback round trip.
+- **MCP `:ro` follow-up — saved edits invisible at runtime (review
+  finding #1 on PR #79).** The PR initially fixed the 500 + the
+  silent save-doesn't-stick problem only for the two `save_mcp_yaml`
+  call sites, but `MCPProfileConfig._find_config_file` (used by
+  `GET /api/mcp/profiles` and runtime `load_profile()`) was still
+  reading the read-only primary directly. So a saved MCP edit went
+  to `.testmcpy/.mcp_services.yaml` correctly but the profiles list
+  + the runner kept using the stale config. Fixed by delegating
+  `_find_config_file` to `helpers.get_mcp_config_path()` (which
+  prefers the fallback) with a graceful fall-through for CLI
+  contexts where the server helpers aren't importable.
+- **LLM save/load resolver symmetry (review finding #5).**
+  `LLMProfileConfig.save` derived `primary_path` directly rather
+  than via the fallback-preferring resolver, so in the unusual
+  Docker-then-native transition a fallback existed but save wrote
+  to CWD. Now uses `_resolve_llm_providers_path` for both.
+- **`.testmcpy/` no longer materialised by read-side path lookups
+  (review finding #6).** Split `_persistent_dir` into a pure-path
+  read variant and a write-side `_persistent_dir_ensure` so opening
+  the Reports / Tests pages doesn't have a write side-effect.
+
+  2 added unit tests:
+  - `test_mcp_profile_config_loader_prefers_fallback` — drives the
+    full path-disagreement reproduction (read-only primary → save
+    via `save_mcp_yaml` → `MCPProfileConfig()` loads the fresh
+    profile, not the stale one).
+  - `test_load_path_resolution_does_not_create_persistent_dir` —
+    pins the no-side-effect-on-reads invariant.
 
 ## [0.7.23] - 2026-06-08
 

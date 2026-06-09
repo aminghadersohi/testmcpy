@@ -240,7 +240,12 @@ class LLMProfileConfig:
         no longer leaves a misleading "Failed to restore backup"
         cascade in the log.
         """
-        primary_path = Path.cwd() / ".llm_providers.yaml"
+        # Resolve via the fallback-preferring loader so save and load
+        # never disagree on location, even in the unusual transition
+        # where a fallback already exists but CWD has just become
+        # writable (Docker-then-native in the same dir). SC-108367
+        # review finding #5.
+        primary_path = _resolve_llm_providers_path()
         save_path, using_fallback = _resolve_writable_path(primary_path)
 
         data = {

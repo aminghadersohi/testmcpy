@@ -255,6 +255,94 @@ class TestLlmProvidersReadOnlyFallback:
             _restore_write(primary)
 
 
+class TestMCPProfileConfigPrefersFallback:
+    """Reviewer finding #1 on PR #79: the higher-level
+    ``MCPProfileConfig._find_config_file`` was reading CWD directly,
+    ignoring the ``.testmcpy/`` fallback that ``save_mcp_yaml`` writes
+    to. Net effect: ``GET /profiles`` and runtime ``load_profile()``
+    kept reading the stale read-only primary, so saved MCP edits
+    didn't appear in the list and weren't used at runtime — even
+    though the 500 was gone. Pin the load-via-MCPProfileConfig path
+    so the regression can't sneak back."""
+
+    def test_mcp_profile_config_loader_prefers_fallback(self, chdir):
+        from testmcpy.mcp_profiles import MCPProfileConfig
+        from testmcpy.server.helpers.mcp_config import save_mcp_yaml
+
+        primary = chdir / ".mcp_services.yaml"
+        # Read-only primary holds an old profile the user wants to replace.
+        _make_readonly_file(
+            primary,
+            "default: stale\n"
+            "profiles:\n"
+            "  stale:\n"
+            "    name: Stale\n"
+            "    description: ''\n"
+            "    mcps:\n"
+            "    - name: Stale MCP\n"
+            "      mcp_url: http://stale/mcp\n"
+            "      auth: {type: none}\n",
+        )
+        try:
+            # User edits the config — save goes to .testmcpy fallback.
+            save_mcp_yaml(
+                {
+                    "default": "fresh",
+                    "profiles": {
+                        "fresh": {
+                            "name": "Fresh",
+                            "description": "",
+                            "mcps": [
+                                {
+                                    "name": "Fresh MCP",
+                                    "mcp_url": "http://fresh/mcp",
+                                    "auth": {"type": "none"},
+                                }
+                            ],
+                        }
+                    },
+                }
+            )
+
+            # `GET /profiles` (and runtime test execution) routes through
+            # MCPProfileConfig. Without the review-finding-#1 fix this
+            # loader returns the STALE profile.
+            cfg = MCPProfileConfig()
+            assert cfg.default_profile == "fresh", (
+                "MCPProfileConfig loaded the stale read-only primary instead "
+                "of the .testmcpy fallback — review finding #1 regression"
+            )
+            assert "fresh" in cfg.profiles
+            assert "stale" not in cfg.profiles
+            fresh = cfg.profiles["fresh"]
+            assert fresh.mcps[0].name == "Fresh MCP"
+            assert fresh.mcps[0].mcp_url == "http://fresh/mcp"
+        finally:
+            _restore_write(primary)
+
+
+class TestNoMkdirSideEffectOnReads:
+    """Reviewer finding #6 on PR #79: ``_persistent_dir`` was creating
+    ``.testmcpy/`` on every read just to look up a path. Reads
+    shouldn't have a write side-effect."""
+
+    def test_load_path_resolution_does_not_create_persistent_dir(self, chdir):
+        from testmcpy.server.helpers.mcp_config import (
+            get_mcp_config_path,
+            resolve_config_load_path,
+        )
+
+        # No primary, no fallback, no .testmcpy/ dir.
+        assert not (chdir / ".testmcpy").exists()
+
+        # Read-only path resolution must NOT create the dir.
+        get_mcp_config_path()
+        resolve_config_load_path(chdir / ".whatever.yaml")
+        assert not (chdir / ".testmcpy").exists(), (
+            "Pure read paths created .testmcpy/ — review finding #6"
+        )
+
+
 class TestPathResolutionHelpers:
     """Pin the smaller helper contract so future refactors that move
     the fallback dir don't silently re-introduce the EROFS regression."""

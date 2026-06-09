@@ -17,10 +17,20 @@ from fastapi import HTTPException
 _PERSISTENT_DIR_NAME = ".testmcpy"
 
 
-def _persistent_dir() -> Path:
-    """Return the writable persistent directory for config overrides,
-    creating it if missing. Lives under CWD next to ``storage.db``."""
-    d = Path.cwd() / _PERSISTENT_DIR_NAME
+def _persistent_dir_path() -> Path:
+    """Return the persistent-fallback directory PATH without touching the
+    filesystem. Read-side callers (``resolve_config_load_path``,
+    ``get_mcp_config_path``) want a path to check existence on; they
+    shouldn't have a write side-effect just for reading."""
+    return Path.cwd() / _PERSISTENT_DIR_NAME
+
+
+def _persistent_dir_ensure() -> Path:
+    """Return the persistent-fallback directory, creating it if missing.
+    Use this from WRITE paths only — reads should call
+    ``_persistent_dir_path`` to avoid a mkdir side-effect when the user
+    is just opening a config file (SC-108367 review finding #6)."""
+    d = _persistent_dir_path()
     try:
         d.mkdir(exist_ok=True)
     except OSError:
@@ -55,7 +65,8 @@ def resolve_config_save_path(primary_path: Path) -> tuple[Path, bool]:
     """
     if _is_path_writable_for_replace(primary_path):
         return primary_path, False
-    fallback = _persistent_dir() / primary_path.name
+    # Write path: ensure the fallback dir exists.
+    fallback = _persistent_dir_ensure() / primary_path.name
     return fallback, True
 
 
@@ -67,7 +78,8 @@ def resolve_config_load_path(primary_path: Path) -> Path:
     falls back to the primary bind-mounted path. Either return value is
     safe to pass to ``open()``; callers must still check ``.exists()``.
     """
-    fallback = _persistent_dir() / primary_path.name
+    # Read path: just check existence; don't materialise the dir.
+    fallback = _persistent_dir_path() / primary_path.name
     if fallback.exists():
         return fallback
     return primary_path
@@ -80,7 +92,8 @@ def get_mcp_config_path() -> Path:
     when it exists from a previous save, otherwise the standard CWD or
     ancestor lookup. SC-108367 #3.
     """
-    fallback = _persistent_dir() / ".mcp_services.yaml"
+    # Read path: don't materialise .testmcpy/ just to look for the file.
+    fallback = _persistent_dir_path() / ".mcp_services.yaml"
     if fallback.exists():
         return fallback
 

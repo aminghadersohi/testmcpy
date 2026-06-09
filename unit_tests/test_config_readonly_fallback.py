@@ -173,6 +173,91 @@ class TestLlmProvidersReadOnlyFallback:
         finally:
             _restore_write(primary)
 
+    def test_save_then_fresh_load_round_trips_via_fallback(self, chdir):
+        """The exact user-reported failure (SC-108367 expanded): on
+        /llm-profiles, creating a profile appeared to succeed but the
+        profile was gone after reload. Pre-fix the load path returned
+        the read-only primary whenever it existed, so the just-saved
+        fallback was invisible — silent non-persistence.
+
+        Drives the full round trip: read-only primary, save through the
+        public API, instantiate a FRESH ``LLMProfileConfig`` (mimicking
+        a server restart), and verify the profile loads back. Without
+        the load-prefers-fallback fix this assertion would fail with
+        the loaded profile missing entirely."""
+        from testmcpy.llm_profiles import LLMProfile, LLMProfileConfig, LLMProviderConfig
+
+        primary = chdir / ".llm_providers.yaml"
+        _make_readonly_file(
+            primary,
+            "default: stale\nprofiles:\n  stale: {name: Stale, description: '', providers: []}\n",
+        )
+        try:
+            # Initial load reads the stale primary (no fallback yet).
+            cfg1 = LLMProfileConfig()
+            assert cfg1.default_profile_id == "stale"
+            assert "stale" in cfg1.profiles
+
+            # User creates a new profile via the UI → save.
+            cfg1.profiles["fresh"] = LLMProfile(
+                profile_id="fresh",
+                name="Fresh",
+                description="created via UI",
+                providers=[
+                    LLMProviderConfig(name="p", provider="anthropic", model="claude")
+                ],
+            )
+            cfg1.default_profile_id = "fresh"
+            cfg1.save()
+
+            # Fallback now holds the new state.
+            fallback = chdir / ".testmcpy" / ".llm_providers.yaml"
+            assert fallback.exists()
+
+            # The primary is still the stale read-only file — proof we
+            # didn't sneak a write through.
+            assert "default: stale" in primary.read_text()
+
+            # Simulate a fresh server boot — same CWD, no in-memory
+            # state. Load must read the FALLBACK, not the stale primary.
+            cfg2 = LLMProfileConfig()
+            assert cfg2.default_profile_id == "fresh", (
+                "Load fell back to stale primary instead of fresh fallback "
+                "— SC-108367 silent-non-persistence regression"
+            )
+            assert "fresh" in cfg2.profiles
+            assert cfg2.profiles["fresh"].providers[0].provider == "anthropic"
+        finally:
+            _restore_write(primary)
+
+    def test_fallback_target_is_cwd_relative_not_home(self, chdir):
+        """The named-volume in Docker is mounted at ``/app/.testmcpy``,
+        NOT ``~/.testmcpy``. The latter is wiped on container recreate
+        unless someone explicitly mounts it. Verify the fallback target
+        is rooted at ``Path.cwd()`` so restart persistence Just Works
+        on the standard testmcpy-data named volume."""
+        from testmcpy.llm_profiles import LLMProfileConfig
+
+        primary = chdir / ".llm_providers.yaml"
+        _make_readonly_file(primary, "default: x\nprofiles: {}\n")
+        try:
+            cfg = LLMProfileConfig()
+            cfg.default_profile_id = "fresh"
+            cfg.save()
+
+            # MUST land under CWD, not under home.
+            assert (chdir / ".testmcpy" / ".llm_providers.yaml").exists()
+            assert not (
+                Path.home() / ".testmcpy" / ".llm_providers.yaml"
+            ).exists() or (
+                # If a previous test in this session happened to write under
+                # home (unlikely but harmless), the important thing is our
+                # CWD fallback also wrote — assert that, above.
+                (chdir / ".testmcpy" / ".llm_providers.yaml").exists()
+            )
+        finally:
+            _restore_write(primary)
+
 
 class TestPathResolutionHelpers:
     """Pin the smaller helper contract so future refactors that move

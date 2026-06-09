@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.25] - 2026-06-09
+
+### Added
+- **Optional Claude Code CLI in the Docker image (SC-108437).** New
+  build ARG `INSTALL_CLAUDE_CLI` (default `false`) when set to `true`
+  installs the [Claude Code](https://docs.claude.com/en/docs/claude-code/)
+  native binary into the image so `docker exec <container> claude …`
+  works without a per-container install that's wiped on every
+  `up --build`. Uses the native installer
+  (`https://claude.ai/install.sh`) rather than `npm install -g`
+  because the slim base has no Node.js — keeps the gated image lean.
+  The binary is symlinked to `/usr/local/bin/claude` so it's on the
+  default `docker exec` PATH. Layer is placed right after the curl
+  apt-get step so it shares the cache and isn't invalidated by source
+  changes below.
+
+  docker-compose.yml threads the ARG through from an env var so the
+  ergonomic opt-in is:
+
+  ```
+  INSTALL_CLAUDE_CLI=true docker compose up -d --build
+  docker exec <container> claude --version
+  ```
+
+  Default builds (and the published image) stay unchanged.
+
 ## [0.7.24] - 2026-06-09
 
 ### Fixed

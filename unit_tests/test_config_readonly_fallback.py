@@ -203,9 +203,7 @@ class TestLlmProvidersReadOnlyFallback:
                 profile_id="fresh",
                 name="Fresh",
                 description="created via UI",
-                providers=[
-                    LLMProviderConfig(name="p", provider="anthropic", model="claude")
-                ],
+                providers=[LLMProviderConfig(name="p", provider="anthropic", model="claude")],
             )
             cfg1.default_profile_id = "fresh"
             cfg1.save()
@@ -247,9 +245,7 @@ class TestLlmProvidersReadOnlyFallback:
 
             # MUST land under CWD, not under home.
             assert (chdir / ".testmcpy" / ".llm_providers.yaml").exists()
-            assert not (
-                Path.home() / ".testmcpy" / ".llm_providers.yaml"
-            ).exists() or (
+            assert not (Path.home() / ".testmcpy" / ".llm_providers.yaml").exists() or (
                 # If a previous test in this session happened to write under
                 # home (unlikely but harmless), the important thing is our
                 # CWD fallback also wrote — assert that, above.

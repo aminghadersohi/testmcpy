@@ -1,6 +1,13 @@
 services:
   testmcpy:
-    build: .
+    build:
+      context: .
+      # Opt in to baking the Claude Code CLI into the image with:
+      #   INSTALL_CLAUDE_CLI=true docker compose build
+      # (or `up -d --build`). Defaults to false so the published image
+      # stays lean. SC-108437.
+      args:
+        INSTALL_CLAUDE_CLI: ${INSTALL_CLAUDE_CLI:-false}
     image: testmcpy:latest
     ports:
       - "${PORT:-7100}:8000"

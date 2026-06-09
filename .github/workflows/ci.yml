@@ -73,7 +73,7 @@ jobs:
 
   docker-claude-cli:
     # Guards the opt-in path that bakes the Claude Code CLI into the
-    # image (SC-108437 review feedback). The default INSTALL_CLAUDE_CLI=false
+    # image. The default INSTALL_CLAUDE_CLI=false
     # path is exercised implicitly by any other docker user, but the
     # opt-in path only runs when someone passes the build-arg — without
     # this job, a future break in claude.ai/install.sh on the slim
@@ -99,3 +99,13 @@ jobs:
           # check on the install pipeline, not a build-perf optimisation.
       - name: Verify `claude` is on PATH inside the image
         run: docker run --rm testmcpy:claude-ci claude --version
+      - name: Verify agentic Python deps coexist (no resolver conflict)
+        # Regression guard: claude-agent-sdk and fastmcp share `mcp` as a
+        # transitive dep with non-trivial version pins. A future bump on
+        # either side can silently re-introduce the conflict we hit in
+        # fastmcp 2.12.5 + claude-agent-sdk 0.2.95 (mcp<1.17 vs mcp>=1.23).
+        # `pip check` + a real import is the simplest assertion the
+        # environment is coherent.
+        run: |
+          docker run --rm testmcpy:claude-ci pip check
+          docker run --rm testmcpy:claude-ci python -c "import claude_agent_sdk, fastmcp, mcp; print('agentic deps OK')"

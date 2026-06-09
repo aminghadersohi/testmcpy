@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.26] - 2026-06-09
+
+### Fixed
+- **Docker server image can't run Claude Agent SDK (agentic) tests
+  out of the box** (follow-up to v0.7.25's CLI-bake work). Two
+  coupled issues:
+
+  1. **Missing dependency.** The Dockerfile installs only
+     `pip install .[server]`, but `claude-agent-sdk` lived only in
+     the `sdk` and `all` extras. The server's test runner
+     (`testmcpy/src/test_runner.py`) imports `claude_agent_sdk` for
+     any test using the Claude SDK provider, so the published image
+     crashed with `ModuleNotFoundError: No module named
+     'claude_agent_sdk'` (raised as a `ValueError` from
+     `testmcpy/src/llm_integration.py:1421`). The SDK is now part of
+     the `server` extra so `pip install testmcpy[server]` (and the
+     Docker image) include it. Anyone running the server can run
+     agentic tests without a separate install.
+
+  2. **Version conflict between `fastmcp` and `claude-agent-sdk`.**
+     `fastmcp 2.12.5` pinned `mcp<1.17.0`, while
+     `claude-agent-sdk 0.2.x` requires `mcp>=1.23`. Installing both
+     produced a `pip` resolver warning and a fragile environment.
+     Bumped `fastmcp>=2.14.5,<3.0.0` (first 2.x line that allows
+     `mcp>=1.24`), tightened `claude-agent-sdk>=0.2.0,<1.0.0`. The
+     two pins are now co-locked — a clean `pip install` produces a
+     conflict-free environment.
+
+  The Claude Code CLI binary (which the SDK shells out to at
+  runtime) is still gated behind `INSTALL_CLAUDE_CLI` from v0.7.25
+  — the SDK Python package and the CLI binary are reconciled as one
+  story: SDK always installed, CLI build-arg opt-in. Without the
+  CLI, agentic tests fail with `claude-agent-sdk`'s own clean
+  `CLINotFoundError` (not the previous `ModuleNotFoundError`); with
+  it, agentic tests run end-to-end.
+
+  CI now runs `pip check` + `python -c "import claude_agent_sdk,
+  fastmcp, mcp"` inside the built image so a future version bump
+  that re-introduces the resolver conflict is caught.
+
 ## [0.7.25] - 2026-06-09
 
 ### Added

@@ -15,11 +15,23 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/*
 
 # Optionally bake the Claude Code CLI into the image so `docker exec
-# <container> claude` works without a per-container install (SC-108437).
+# <container> claude` works without a per-container install.
+#
+# Agentic-path overview (read this before changing anything below):
+#   - The Python SDK (`claude-agent-sdk` package) is in the `server`
+#     extra (pyproject.toml) — so it's ALWAYS installed in this image
+#     by the `pip install .[server]` step below. That alone lets the
+#     UI's "agentic" tests pass the initial import and reach the SDK.
+#   - The Claude Code CLI binary is gated on INSTALL_CLAUDE_CLI=true
+#     (this layer). The SDK shells out to the binary at runtime, so
+#     fully end-to-end agentic test execution still requires this ARG.
+#     Without it, agentic tests fail with claude_agent_sdk's own
+#     CLINotFoundError — a clean, locatable error, not a missing
+#     module — and other test types are unaffected.
 #
 # Gated behind two build ARGs so the default published image stays
-# lean — the CLI is only useful for users who want in-container agent
-# workflows. Opt in with:
+# lean — the CLI binary is heavy and only useful for users who want
+# in-container agent workflows. Opt in with:
 #
 #     docker compose build --build-arg INSTALL_CLAUDE_CLI=true
 #

@@ -70,3 +70,32 @@ jobs:
       - name: Test UI
         run: cd testmcpy/ui && npm test
         continue-on-error: true
+
+  docker-claude-cli:
+    # Guards the opt-in path that bakes the Claude Code CLI into the
+    # image (SC-108437 review feedback). The default INSTALL_CLAUDE_CLI=false
+    # path is exercised implicitly by any other docker user, but the
+    # opt-in path only runs when someone passes the build-arg — without
+    # this job, a future break in claude.ai/install.sh on the slim
+    # base (e.g. a changed binary drop location) would never be caught
+    # by CI. The Dockerfile's trailing `claude --version` is a real
+    # smoke check, so the build itself failing IS the assertion.
+    name: Docker build (Claude CLI opt-in)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Build with INSTALL_CLAUDE_CLI=true
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: testmcpy:claude-ci
+          build-args: |
+            INSTALL_CLAUDE_CLI=true
+          # No layer cache export — this job is a periodic correctness
+          # check on the install pipeline, not a build-perf optimisation.
+      - name: Verify `claude` is on PATH inside the image
+        run: docker run --rm testmcpy:claude-ci claude --version

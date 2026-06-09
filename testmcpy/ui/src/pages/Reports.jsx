@@ -292,10 +292,10 @@ function RerunModal({ result, onClose }) {
 }
 
 // Per-test expandable card
-function TestResultCard({ result }) {
+function TestResultCard({ result, providerHint }) {
   const [expanded, setExpanded] = useState(!result.passed)
   const [showRerun, setShowRerun] = useState(false)
-  const passRate = result.score !== undefined ? result.score : (result.passed ? 1.0 : 0.0)
+  const score = result.score !== undefined ? result.score : (result.passed ? 1.0 : 0.0)
   const toolCalls = result.tool_calls || []
   const evaluations = result.evaluations || []
   const evalsPassed = evaluations.filter(e => e.passed).length
@@ -306,6 +306,15 @@ function TestResultCard({ result }) {
 
   // Find prompt from result - it may be in different places depending on data shape
   const prompt = result.prompt || result.test_prompt || null
+
+  // The chatbot/assistant provider's endpoint doesn't return cost or
+  // token counts. Showing "$0.00" / "0 tokens" reads as "the run was
+  // free" which misleads users (SC-108367 #2). Treat these as
+  // "not tracked" and render an em-dash with a tooltip instead.
+  const isChatbotProvider = providerHint === 'assistant' || providerHint === 'chatbot'
+  const costNotTracked = isChatbotProvider && (!result.cost || result.cost === 0)
+  const tokensNotTracked = isChatbotProvider && !tokenUsage
+  const hasResponse = !!(result.response || result.llm_response)
 
   return (
     <div className={`border rounded-lg overflow-hidden ${result.passed ? 'border-border' : 'border-error/50 bg-error/5'}`}>
@@ -331,10 +340,25 @@ function TestResultCard({ result }) {
           )}
         </div>
         <div className="flex items-center gap-3 text-xs text-text-tertiary flex-shrink-0 ml-2">
-          <span className="font-mono">{passRate.toFixed(2)}</span>
-          {result.cost > 0 && <span className="font-mono">{formatCost(result.cost)}</span>}
-          {tokenUsage && <span className="font-mono">{formatTokens(tokenUsage)}</span>}
-          <span>{formatDuration(result.duration)}</span>
+          <span
+            className="font-mono"
+            title="Aggregate evaluator score for this test (0.00–1.00). 1.00 = all evaluators passed at 100%."
+          >
+            <span className="text-text-disabled">score </span>
+            {score.toFixed(2)}
+            <span className="text-text-disabled">/1.00</span>
+          </span>
+          {result.cost > 0 ? (
+            <span className="font-mono" title="Estimated LLM call cost">{formatCost(result.cost)}</span>
+          ) : costNotTracked ? (
+            <span className="font-mono text-text-disabled" title="Cost not reported by the chatbot/assistant provider">— cost</span>
+          ) : null}
+          {tokenUsage ? (
+            <span className="font-mono" title="Total tokens (input + output)">{formatTokens(tokenUsage)}</span>
+          ) : tokensNotTracked ? (
+            <span className="font-mono text-text-disabled" title="Token counts not reported by the chatbot/assistant provider">— tokens</span>
+          ) : null}
+          <span title="Wall-clock duration of the test (excluding wait times)">{formatDuration(result.duration)}</span>
           <button
             onClick={(e) => { e.stopPropagation(); setShowRerun(true) }}
             className="px-2 py-0.5 rounded bg-primary/10 text-primary hover:bg-primary/20 transition-colors text-[10px] font-medium"
@@ -349,11 +373,56 @@ function TestResultCard({ result }) {
       {/* Expanded content */}
       {expanded && (
         <div className="border-t border-border bg-surface-elevated px-4 py-3 space-y-4">
-          {/* Prompt */}
-          {prompt && (
+          {/* Prompt — surfaced at the top so users can see what the
+              test actually asked for at a glance. Missing for old runs
+              saved before SC-108367 — show a "(not recorded)" hint then
+              rather than silently omitting the section so users know
+              what they're missing. */}
+          <div>
+            <p className="text-xs font-semibold text-primary uppercase tracking-wide mb-1 flex items-center gap-1.5">
+              <MessageSquare size={12} />
+              User Prompt
+            </p>
+            {prompt ? (
+              <p className="text-sm text-text-primary bg-surface p-3 rounded border border-primary/30 whitespace-pre-wrap">
+                {prompt}
+              </p>
+            ) : (
+              <p className="text-xs italic text-text-disabled bg-surface p-2 rounded border border-border">
+                Prompt not recorded for this run. Open <span className="font-mono">{result.test_name}</span> in the
+                test YAML to see what was asked, or re-run the test with v0.7.24+ to capture it.
+              </p>
+            )}
+          </div>
+
+          {/* Assistant Response — the most relevant signal for chatbot
+              tests. Default-OPEN so users don't have to click. */}
+          {hasResponse ? (
+            <CollapsibleSection
+              title="Assistant Response"
+              icon={MessageSquare}
+              defaultOpen={true}
+            >
+              <div className="prose prose-sm dark:prose-invert max-w-none p-3 bg-surface rounded-lg border border-success/30 max-h-96 overflow-y-auto">
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                  {typeof (result.response || result.llm_response) === 'string'
+                    ? (result.response || result.llm_response)
+                    : JSON.stringify((result.response || result.llm_response), null, 2)}
+                </ReactMarkdown>
+              </div>
+            </CollapsibleSection>
+          ) : (
             <div>
-              <p className="text-xs font-semibold text-text-secondary uppercase tracking-wide mb-1">Prompt</p>
-              <p className="text-sm text-text-primary bg-surface p-2 rounded border border-border">{prompt}</p>
+              <p className="text-xs font-semibold text-text-secondary uppercase tracking-wide mb-1 flex items-center gap-1.5">
+                <MessageSquare size={12} />
+                Assistant Response
+              </p>
+              <p className="text-xs italic text-text-disabled bg-surface p-2 rounded border border-warning/30">
+                Empty response.
+                {toolCalls.length > 0
+                  ? ` The assistant ran ${toolCalls.length} tool call${toolCalls.length === 1 ? '' : 's'} but never produced final text — see tool calls below.`
+                  : ' The assistant produced no text and made no tool calls — likely a guardrail refusal or backend error.'}
+              </p>
             </div>
           )}
 
@@ -405,22 +474,9 @@ function TestResultCard({ result }) {
             </CollapsibleSection>
           )}
 
-          {/* LLM Response */}
-          {(result.response || result.llm_response) && (
-            <CollapsibleSection
-              title="LLM Response"
-              icon={MessageSquare}
-              defaultOpen={false}
-            >
-              <div className="prose prose-sm dark:prose-invert max-w-none p-3 bg-surface rounded-lg border border-border max-h-96 overflow-y-auto">
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                  {typeof (result.response || result.llm_response) === 'string'
-                    ? (result.response || result.llm_response)
-                    : JSON.stringify((result.response || result.llm_response), null, 2)}
-                </ReactMarkdown>
-              </div>
-            </CollapsibleSection>
-          )}
+          {/* (Assistant Response section moved above the tool calls
+              so the "what did the model say" answer is the FIRST thing
+              the user sees after the prompt.) */}
 
           {/* Evaluations */}
           {evaluations.length > 0 && (
@@ -1021,21 +1077,66 @@ function Reports() {
             <span className="text-text-tertiary">{meta.provider}</span>
           </div>
           <div className="flex items-center gap-4 flex-wrap">
-            <span className={`text-sm font-semibold ${meta.failed === 0 ? 'text-success' : 'text-error'}`}>
+            <span
+              className={`text-sm font-semibold ${meta.failed === 0 ? 'text-success' : 'text-error'}`}
+              title="Tests that passed all their evaluators"
+            >
               {meta.passed}/{meta.total_tests} passed
             </span>
-            <span className={`text-sm font-bold ${rateColor}`}>
+            <span
+              className={`text-sm font-bold ${rateColor}`}
+              title="Pass rate across all tests in this run"
+            >
               {rate.toFixed(0)}%
             </span>
-            <span className="text-sm text-text-secondary font-mono flex items-center gap-1">
-              <DollarSign size={14} className="text-text-tertiary" />
-              {formatCost(meta.total_cost)}
-            </span>
-            <span className="text-sm text-text-secondary font-mono flex items-center gap-1">
-              <Hash size={14} className="text-text-tertiary" />
-              {formatTokens(meta.total_tokens)}
-            </span>
-            <span className="text-sm text-text-secondary font-mono flex items-center gap-1">
+            {(() => {
+              // chatbot/assistant provider doesn't report cost/tokens — show
+              // "—" with a tooltip rather than a misleading "$0.00" / "0".
+              // SC-108367 #2.
+              const isChatbotProvider = meta.provider === 'assistant' || meta.provider === 'chatbot'
+              const costNotTracked = isChatbotProvider && (!meta.total_cost || meta.total_cost === 0)
+              const tokensNotTracked = isChatbotProvider && (!meta.total_tokens || meta.total_tokens === 0)
+              return (
+                <>
+                  {costNotTracked ? (
+                    <span
+                      className="text-sm text-text-disabled font-mono flex items-center gap-1"
+                      title="Cost not reported by the chatbot/assistant provider"
+                    >
+                      <DollarSign size={14} />— cost
+                    </span>
+                  ) : (
+                    <span
+                      className="text-sm text-text-secondary font-mono flex items-center gap-1"
+                      title="Total LLM cost (sum of per-test costs)"
+                    >
+                      <DollarSign size={14} className="text-text-tertiary" />
+                      {formatCost(meta.total_cost)}
+                    </span>
+                  )}
+                  {tokensNotTracked ? (
+                    <span
+                      className="text-sm text-text-disabled font-mono flex items-center gap-1"
+                      title="Token counts not reported by the chatbot/assistant provider"
+                    >
+                      <Hash size={14} />— tokens
+                    </span>
+                  ) : (
+                    <span
+                      className="text-sm text-text-secondary font-mono flex items-center gap-1"
+                      title="Total tokens (input + output)"
+                    >
+                      <Hash size={14} className="text-text-tertiary" />
+                      {formatTokens(meta.total_tokens)}
+                    </span>
+                  )}
+                </>
+              )
+            })()}
+            <span
+              className="text-sm text-text-secondary font-mono flex items-center gap-1"
+              title="Total wall-clock duration of the run"
+            >
               <Clock size={14} className="text-text-tertiary" />
               {formatDuration(meta.total_duration)}
             </span>
@@ -1109,7 +1210,7 @@ function Reports() {
           </h3>
           <div className="space-y-2">
             {results.map((result, idx) => (
-              <TestResultCard key={idx} result={result} />
+              <TestResultCard key={idx} result={result} providerHint={meta.provider} />
             ))}
           </div>
         </div>

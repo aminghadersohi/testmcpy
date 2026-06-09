@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.7.24] - 2026-06-08
+## [0.7.24] - 2026-06-09
 
 ### Fixed
 - **Bulk-delete in `/reports` left the page apparently empty until a
@@ -19,6 +19,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   also adds the missing `res.ok` check + a user-visible error toast on
   failure. Same fix applied to the per-file history bulk-delete in
   TestManager (`loadResultsHistory(testFile)` after success).
+- **Reports detail view: cost/tokens read as `$0.00` / `0` for
+  chatbot-provider runs (SC-108367 #2).** The chatbot/assistant
+  provider's endpoint doesn't surface cost or token counts. Showing
+  `$0.00` and a bare `0` icon misled users into reading "free" or
+  "broken." Both the run-level header and the per-test row now show
+  `— cost` / `— tokens` with a tooltip "Cost/Token counts not reported
+  by the chatbot/assistant provider" when `provider == 'assistant' |
+  'chatbot'` and the value is zero. Other providers still see the
+  literal value.
+- **Reports detail view: per-test score number was unlabeled
+  (SC-108367 #2).** A bare `0.50` was easy to miss as a score. Now
+  reads `score 0.50/1.00` with a tooltip "Aggregate evaluator score
+  for this test (0.00–1.00). 1.00 = all evaluators passed at 100%."
+- **Reports detail view: assistant response was collapsed by default
+  and prompt was missing entirely (SC-108367 #2).** The test's user
+  prompt was never saved in `TestResult`, and the LLM response was
+  hidden behind a click. For chatbot tests the response IS the test,
+  so it's now surfaced at the top of each expanded card alongside the
+  prompt, with Tool Calls / Evaluations / Metrics below. Empty
+  responses (e.g. guardrail refusals) get an explicit hint —
+  "Empty response. The assistant ran N tool calls but never produced
+  final text…" — instead of an empty box. Old runs missing the prompt
+  show a "(not recorded for this run)" inline hint so users know to
+  open the YAML or re-run with v0.7.24+.
+
+### Added
+- **`TestResult.prompt`** persisted by `_run_test_with_retry`, so the
+  /reports detail view can render the original prompt without
+  re-parsing the source YAML (which may have moved or been edited).
+  Old saved runs lack this field; the UI shows a graceful fallback.
 
 ## [0.7.23] - 2026-06-08
 

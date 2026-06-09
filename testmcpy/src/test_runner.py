@@ -210,6 +210,11 @@ class TestResult:
     score: float
     duration: float
     reason: str | None = None
+    # Original user prompt that drove this test. Persisted so the /reports
+    # detail view can render it without re-parsing the source YAML; the
+    # YAML may have moved or been edited by the time a user looks at an
+    # old run. SC-108367 #2.
+    prompt: str | None = None
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
     tool_results: list[dict[str, Any]] = field(default_factory=list)
     response: str | None = None
@@ -1467,9 +1472,18 @@ class TestRunner:
                 await asyncio.sleep(retry_wait)
                 continue
             else:
+                # Attach the original prompt so the /reports detail view can
+                # show it without re-parsing the YAML (which may have moved
+                # or been edited by the time the user opens the report).
+                # SC-108367 #2.
+                if result.prompt is None:
+                    result.prompt = test_case.prompt
                 # Test passed or non-rate-limit failure or out of retries
                 return result
 
+        # Same prompt attachment on the exhausted-retries fall-through path.
+        if result.prompt is None:
+            result.prompt = test_case.prompt
         return result
 
     def _create_evaluator(self, eval_config: dict[str, Any]) -> BaseEvaluator:

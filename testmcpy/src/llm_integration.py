@@ -3,6 +3,7 @@ LLM integration module for supporting multiple model providers.
 """
 
 import asyncio
+import functools
 import json
 import logging
 import os
@@ -3806,7 +3807,7 @@ _GEMINI_SDK_MODEL_MAP: dict[str, str] = {
     "gemini-sdk": "gemini-2.5-flash",
     "gemini-sdk-flash": "gemini-2.5-flash",
     "gemini-sdk-pro": "gemini-2.5-pro",
-    "gemini-sdk-flash-8b": "gemini-2.5-flash-8b",
+    "gemini-sdk-flash-8b": "gemini-1.5-flash-8b",
     "gemini-sdk-2.0-flash": "gemini-2.0-flash",
 }
 
@@ -3982,12 +3983,17 @@ class GeminiSDKProvider(LLMProvider):
 
         start_time = time.time()
 
-        # Subclass Gemini to inject our explicit API key — the documented way to
-        # customise the underlying genai.Client without environment variables.
+        # Subclass Gemini to inject our explicit API key — the documented ADK
+        # pattern (see google_llm.Gemini.api_client docstring: "subclass Gemini
+        # and override the api_client property"). We cache the client on the
+        # instance to avoid re-instantiating it on every attribute access.
         api_key_capture = self.api_key
 
         class _GeminiWithKey(Gemini):
-            @property  # @property avoids asyncio cached_property lock contention
+            # Tracks google_llm.Gemini.api_client (cached_property on base).
+            # Using functools.cached_property here keeps cost parity with the
+            # base class while injecting our explicit key.
+            @functools.cached_property  # type: ignore[misc]
             def api_client(self):
                 from google.genai import Client  # noqa: PLC0415
 
@@ -3997,8 +4003,8 @@ class GeminiSDKProvider(LLMProvider):
         if self._mcp_headers:
             params["headers"] = self._mcp_headers
 
+        mcp_toolset = McpToolset(connection_params=StreamableHTTPConnectionParams(**params))
         try:
-            mcp_toolset = McpToolset(connection_params=StreamableHTTPConnectionParams(**params))
             agent = Agent(
                 name="testmcpy-gemini-agent",
                 model=_GeminiWithKey(model=self.model),
@@ -4006,11 +4012,17 @@ class GeminiSDKProvider(LLMProvider):
                 tools=[mcp_toolset],
             )
             session_service = InMemorySessionService()
+            # Create the session explicitly so the runner can find it.
+            # (InMemorySessionService does not auto-create on first run_async call.)
+            session = await session_service.create_session(
+                app_name="testmcpy",
+                user_id="testmcpy",
+                session_id=uuid.uuid4().hex,
+            )
             runner = Runner(
                 agent=agent,
                 app_name="testmcpy",
                 session_service=session_service,
-                auto_create_session=True,
             )
             new_message = genai_types.Content(
                 role="user",
@@ -4019,11 +4031,12 @@ class GeminiSDKProvider(LLMProvider):
 
             tool_calls: list[dict[str, Any]] = []
             response_parts: list[str] = []
+            last_usage: Any = None
 
             async with asyncio.timeout(timeout):
                 async for event in runner.run_async(
                     user_id="testmcpy",
-                    session_id=uuid.uuid4().hex,
+                    session_id=session.id,
                     new_message=new_message,
                 ):
                     # Collect tool calls from function-call events.
@@ -4039,11 +4052,26 @@ class GeminiSDKProvider(LLMProvider):
                         for part in event.content.parts or []:
                             if getattr(part, "text", None):
                                 response_parts.append(part.text)
+                    # Accumulate token usage from the last event that carries it.
+                    if event.usage_metadata is not None:
+                        last_usage = event.usage_metadata
+
+            token_usage = None
+            if last_usage is not None:
+                prompt_tokens = getattr(last_usage, "prompt_token_count", None)
+                completion_tokens = getattr(last_usage, "candidates_token_count", None)
+                if prompt_tokens is not None:
+                    token_usage = {
+                        "prompt": prompt_tokens,
+                        "completion": completion_tokens or 0,
+                        "total": getattr(last_usage, "total_token_count", None)
+                        or (prompt_tokens + (completion_tokens or 0)),
+                    }
 
             return LLMResult(
                 response=" ".join(response_parts),
                 tool_calls=tool_calls,
-                token_usage=None,
+                token_usage=token_usage,
                 cost=0.0,
                 duration=time.time() - start_time,
                 raw_response={"parts": response_parts},
@@ -4058,12 +4086,15 @@ class GeminiSDKProvider(LLMProvider):
         except Exception as e:
             # generate_with_tools must never raise — the eval harness expects an
             # LLMResult so the test run keeps going and records a clean failure.
-            _gemini_sdk_logger.warning("[GeminiSDK] generate_with_tools failed: %s", e)
+            # Log at exception level so the traceback is visible in server logs.
+            _gemini_sdk_logger.exception("[GeminiSDK] generate_with_tools failed: %s", e)
             return LLMResult(
                 response=f"Error: {e}",
                 tool_calls=[],
                 duration=time.time() - start_time,
             )
+        finally:
+            await mcp_toolset.close()
 
     async def close(self) -> None:
         """No persistent connections to close (MCP session is per-request)."""

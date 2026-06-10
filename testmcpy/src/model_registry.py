@@ -846,9 +846,9 @@ GEMINI_SDK_MODELS: list[ModelInfo] = [
     ),
     ModelInfo(
         id="gemini-sdk-flash-8b",
-        name="Gemini SDK 2.5 Flash-8B",
+        name="Gemini SDK 1.5 Flash-8B",
         provider=Provider.GEMINI_SDK,
-        description="Gemini 2.5 Flash-8B via Google ADK — ultrafast, lowest cost",
+        description="Gemini 1.5 Flash-8B via Google ADK — ultrafast, lowest cost",
         context_window=1_000_000,
         max_output_tokens=65_536,
         input_price_per_1m=0.037,

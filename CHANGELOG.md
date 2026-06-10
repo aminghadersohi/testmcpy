@@ -35,17 +35,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
      two pins are now co-locked — a clean `pip install` produces a
      conflict-free environment.
 
-  The Claude Code CLI binary (which the SDK shells out to at
-  runtime) is still gated behind `INSTALL_CLAUDE_CLI` from v0.7.25
-  — the SDK Python package and the CLI binary are reconciled as one
-  story: SDK always installed, CLI build-arg opt-in. Without the
-  CLI, agentic tests fail with `claude-agent-sdk`'s own clean
-  `CLINotFoundError` (not the previous `ModuleNotFoundError`); with
-  it, agentic tests run end-to-end.
+  As a bonus, `claude-agent-sdk` 0.2.x's wheel already bundles a
+  platform-appropriate `claude` CLI binary at
+  `claude_agent_sdk/_bundled/claude` (~250 MB on linux x86_64), and
+  the SDK's CLI lookup finds the bundled copy before falling back
+  to PATH. So agentic tests run end-to-end on the default image —
+  no `INSTALL_CLAUDE_CLI=true` required. The v0.7.25 build-arg
+  remains, repositioned as the separate "I want
+  `docker exec <container> claude`" / "I want a specific Claude
+  Code version that differs from what the SDK bundles" use case.
 
-  CI now runs `pip check` + `python -c "import claude_agent_sdk,
-  fastmcp, mcp"` inside the built image so a future version bump
-  that re-introduces the resolver conflict is caught.
+  CI now runs `pip check`, `import claude_agent_sdk, fastmcp, mcp`,
+  AND drives the SDK's own CLI-lookup + a `--version` invocation
+  through the located binary, so a future SDK wheel that fails to
+  bundle the binary, a resolver conflict, or a binary that can't
+  link on `python:3.11-slim`'s libc all fail CI rather than ship.
 
 ## [0.7.25] - 2026-06-09
 

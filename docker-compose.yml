@@ -2,20 +2,19 @@ services:
   testmcpy:
     build:
       context: .
-      # Agentic tests (Claude Agent SDK provider) need two things:
-      #   - the Python SDK package — INSTALLED BY DEFAULT here via
-      #     pyproject.toml's `server` extra, so `import claude_agent_sdk`
-      #     just works
-      #   - the Claude Code CLI binary — opt-in via INSTALL_CLAUDE_CLI
-      #     because it's heavy and only useful for in-container agent
-      #     workflows. Without it, agentic tests fail with a clear
-      #     CLINotFoundError from the SDK; other test types still run.
+      # Agentic tests (Claude Agent SDK provider) work OUT OF THE BOX
+      # on the default image: pyproject.toml's `server` extra pulls in
+      # `claude-agent-sdk`, whose wheel already bundles a platform-
+      # appropriate `claude` CLI binary at
+      # `claude_agent_sdk/_bundled/claude`. The SDK looks there first
+      # before falling back to PATH, so no separate CLI install is
+      # required for tests to run end-to-end.
       #
-      # Enable end-to-end agentic tests with:
-      #   INSTALL_CLAUDE_CLI=true docker compose build
-      # (or `up -d --build`). Optionally pin a specific Claude Code
-      # version for reproducibility (install.sh otherwise tracks
-      # `latest`):
+      # INSTALL_CLAUDE_CLI=true is for the SEPARATE use case of
+      # `docker exec <container> claude` direct CLI use, or for
+      # pinning a specific Claude Code version that differs from
+      # whatever the SDK currently bundles. Optionally pair with
+      # CLAUDE_CLI_VERSION (install.sh otherwise tracks `latest`):
       #   CLAUDE_CLI_VERSION=2.1.170 INSTALL_CLAUDE_CLI=true \
       #       docker compose build
       args:

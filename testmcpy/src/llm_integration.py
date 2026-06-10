@@ -10,7 +10,6 @@ import os
 import re
 import subprocess
 import time
-import urllib.parse
 import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -1356,6 +1355,412 @@ class BedrockProvider(LLMProvider):
             await self.client.close()
 
 
+# ---------------------------------------------------------------------------
+# Shared base class for SDK-backed LLM providers (Claude, Codex, Gemini, ...).
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class SDKRunResult:
+    """Intermediate result from a vendor SDK agent run.
+
+    Subclasses of :class:`BaseSDKProvider` populate this in their ``_run_agent``
+    implementation; the base class then normalises it into :class:`LLMResult`.
+
+    The fields named in the harness contract MUST be populated correctly:
+
+    - ``tool_results``: every native tool execution by the vendor SDK must be
+      reflected here (paired with the corresponding ``tool_calls`` entry).
+      If left empty when ``tool_calls`` is non-empty, ``test_runner.py`` will
+      re-execute every call against MCP — catastrophic for state-mutating tools.
+    - ``token_usage``: must use the repo-standard
+      ``{"prompt", "completion", "total"}`` keys (other providers consume them).
+    - ``cost``: only set when the SDK reports its own per-call price
+      (Claude does, Codex/Gemini do not). When ``None`` the base estimates
+      cost from the model registry's per-1M pricing.
+    """
+
+    response_text: str = ""
+    tool_calls: list[dict[str, Any]] = field(default_factory=list)
+    tool_results: list[MCPToolResult] = field(default_factory=list)
+    token_usage: dict[str, int] | None = None
+    cost: float | None = None
+    thinking: str | None = None
+    raw_response: Any | None = None
+    logs: list[str] = field(default_factory=list)
+
+
+class BaseSDKProvider(LLMProvider, ABC):
+    """Common base for SDK-backed providers (Claude, Codex, Gemini, ...).
+
+    Centralises the parts of an SDK-backed provider that have repeatedly
+    drifted between implementations and produced real correctness bugs:
+
+    1. **tool_results contract** — when the vendor SDK executes MCP tools
+       natively, :class:`LLMResult.tool_results` must be populated. Otherwise
+       ``test_runner.py`` will re-execute each call against MCP, which is
+       catastrophic for state-mutating tools (create/update/delete).
+       ``generate_with_tools`` emits a loud warning when this is violated.
+    2. **token_usage shape** — ``{"prompt", "completion", "total"}`` is the
+       repo-wide convention; subclasses normalise vendor counts into this
+       shape inside ``_run_agent``.
+    3. **cost** — taken from the SDK when reported (Claude), otherwise
+       estimated from :mod:`testmcpy.src.model_registry`. Subclasses must
+       set ``SDKRunResult.cost`` only when the SDK reports it directly.
+    4. **MCP cleanup** — each subclass closes its vendor MCP transport
+       inside ``_run_agent`` (typically in a ``finally``); this base class
+       does not own the transport handle.
+    5. **Error scope** — :class:`asyncio.TimeoutError` and every type listed
+       in ``_vendor_expected_errors()`` are converted to a clean error
+       :class:`LLMResult`. Any other exception propagates so programming
+       defects (bad SDK kwargs, AttributeError, etc.) surface as a real
+       failure instead of being recorded as a silent 0-score result.
+    6. **Auth / token resolution** — Bearer/JWT/OAuth/oauth_auto_discover
+       is resolved here so a fix in one place covers every SDK provider
+       (the previous hand-rolled cache paths in Codex/Gemini never matched
+       what ``fastmcp.FileTokenStorage`` actually writes).
+    """
+
+    # Subclasses override (optional) — used as the logger suffix.
+    LOGGER_NAME: str = ""
+
+    def __init__(
+        self,
+        model: str,
+        mcp_url: str | None = None,
+        auth: dict[str, Any] | None = None,
+    ):
+        self.model = model
+        config = get_config()
+        if mcp_url is None:
+            mcp_url = config.get_mcp_url()
+        self.mcp_url = mcp_url
+        if auth is None:
+            default_mcp = config.get_default_mcp_server()
+            if default_mcp and default_mcp.auth:
+                auth = default_mcp.auth.to_dict()
+        self.auth_config = auth
+        self._mcp_headers: dict[str, str] = {}
+        self._logger = logging.getLogger(__name__ + "." + (self.LOGGER_NAME or type(self).__name__))
+
+    # ---- Hooks the subclass must implement --------------------------------
+
+    @abstractmethod
+    def _check_sdk_installed(self) -> None:
+        """Raise :class:`ValueError` with an install hint if the vendor SDK
+        package can't be imported. Called by :meth:`initialize` before
+        credential checks."""
+
+    @abstractmethod
+    async def _validate_credentials(self) -> None:
+        """Raise :class:`ValueError` if vendor credentials are missing or
+        invalid. Providers that authenticate via subscription (e.g. Claude
+        Code) may make this a no-op."""
+
+    @abstractmethod
+    async def _run_agent(
+        self,
+        prompt: str,
+        timeout: float,
+        messages: list[dict[str, Any]] | None,
+    ) -> SDKRunResult:
+        """Vendor-specific agent execution. Returns a normalised
+        :class:`SDKRunResult` which the base class then converts to
+        :class:`LLMResult`.
+
+        Implementation contract:
+
+        - **MUST** populate ``tool_results`` whenever the SDK executes tools
+          natively (otherwise the harness will double-execute every call).
+        - **MUST** normalise ``token_usage`` to the
+          ``{"prompt", "completion", "total"}`` shape.
+        - **MUST** clean up its own MCP transport (typically in a
+          ``finally`` block inside this method).
+        - **MAY** raise :class:`asyncio.TimeoutError` to signal a wall-clock
+          timeout — the base wraps the call with :func:`asyncio.wait_for`.
+        - **MAY** raise any error class declared in
+          :meth:`_vendor_expected_errors`; everything else propagates.
+        """
+
+    @classmethod
+    def _vendor_expected_errors(cls) -> tuple[type[BaseException], ...]:
+        """Tuple of exception types treated as expected runtime failures by
+        :meth:`generate_with_tools` — they convert to an error
+        :class:`LLMResult`. Everything else (programming errors, unexpected
+        states) propagates. Defaults to common network errors; subclasses
+        extend with vendor-specific types (e.g. ``ProcessError``,
+        ``openai.APIError``)."""
+        return (ConnectionError, OSError)
+
+    # ---- Template methods provided by the base ---------------------------
+
+    async def initialize(self) -> None:
+        """Validate the SDK is installed, validate credentials, and resolve
+        the MCP Bearer token. Subclasses may extend (e.g. to additionally
+        build a vendor-specific MCP config dict) but should call
+        ``await super().initialize()``."""
+        self._check_sdk_installed()
+        await self._validate_credentials()
+        token = await self._resolve_mcp_bearer_token()
+        if token:
+            self._mcp_headers = {"Authorization": f"Bearer {token}"}
+            self._logger.info("MCP server configured with auth token")
+        else:
+            self._logger.info("MCP server configured without auth")
+        self._logger.info("MCP server ready: %s", self.mcp_url)
+
+    async def generate_with_tools(
+        self,
+        prompt: str,
+        tools: list[dict[str, Any]],
+        timeout: float = 120.0,
+        messages: list[dict[str, Any]] | None = None,
+    ) -> LLMResult:
+        """Template method: dispatch to :meth:`_run_agent`, normalise the
+        result, enforce the harness contract.
+
+        Subclasses normally do **not** override this — implement
+        :meth:`_run_agent` instead.
+        """
+        start_time = time.time()
+        try:
+            sdk_result = await asyncio.wait_for(
+                self._run_agent(prompt, timeout, messages),
+                timeout=timeout,
+            )
+        except asyncio.TimeoutError:
+            self._logger.warning("SDK query timed out after %.0fs", timeout)
+            return LLMResult(
+                response=f"Error: SDK query timed out after {timeout}s",
+                tool_calls=[],
+                duration=time.time() - start_time,
+            )
+        except self._vendor_expected_errors() as e:
+            self._logger.warning(
+                "expected runtime error in _run_agent: %s: %s", type(e).__name__, e
+            )
+            return LLMResult(
+                response=f"Error: {e}",
+                tool_calls=[],
+                duration=time.time() - start_time,
+            )
+        # Intentionally no broad `except Exception`: programming defects
+        # (wrong vendor kwargs, AttributeError on event shape, etc.) MUST
+        # propagate as real test failures rather than be recorded as a
+        # silent 0-score LLMResult — see PR #82/#84 review comments.
+
+        self._warn_if_tool_results_missing(sdk_result)
+
+        cost = sdk_result.cost
+        if not cost:  # None or 0.0 — estimate from registry
+            cost = self._estimate_cost_from_registry(sdk_result.token_usage)
+
+        duration = time.time() - start_time
+        return LLMResult(
+            response=sdk_result.response_text,
+            tool_calls=sdk_result.tool_calls,
+            tool_results=sdk_result.tool_results,
+            thinking=sdk_result.thinking,
+            token_usage=sdk_result.token_usage,
+            cost=cost or 0.0,
+            duration=duration,
+            tti_ms=int(duration * 1000),
+            raw_response=sdk_result.raw_response,
+            logs=sdk_result.logs,
+        )
+
+    async def close(self) -> None:
+        """No persistent connections — MCP session is per-request for SDK
+        providers. Subclasses may override if they hold long-lived state."""
+
+    # ---- Helpers used by the template method -----------------------------
+
+    def _warn_if_tool_results_missing(self, sdk_result: SDKRunResult) -> None:
+        """Loud warning when ``tool_calls`` is populated but ``tool_results``
+        is empty — the harness will then re-execute every call against MCP
+        (see ``test_runner.py:598``). This is catastrophic for state-mutating
+        tools, so we surface it at WARNING level rather than letting it
+        silently corrupt eval scores."""
+        if sdk_result.tool_calls and not sdk_result.tool_results:
+            self._logger.warning(
+                "Contract violation: %d tool_calls but 0 tool_results — "
+                "test_runner will RE-EXECUTE these calls against MCP, which "
+                "is unsafe for state-mutating tools. %s._run_agent must "
+                "populate tool_results when the SDK executes tools natively.",
+                len(sdk_result.tool_calls),
+                type(self).__name__,
+            )
+
+    def _estimate_cost_from_registry(self, token_usage: dict[str, int] | None) -> float:
+        """Estimate USD cost from ``token_usage`` and ``model_registry``
+        per-1M prices. Subclasses can store a friendly registry id
+        (e.g. ``"codex-o3"``) in ``self._registry_model_id`` separate from
+        the vendor-facing ``self.model`` (``"o3"``); both are tried."""
+        if not token_usage:
+            return 0.0
+        from .model_registry import get_model  # noqa: PLC0415
+
+        registry_id = getattr(self, "_registry_model_id", None) or self.model
+        model_info = get_model(registry_id) or get_model(self.model)
+        if not model_info:
+            return 0.0
+        return (
+            token_usage.get("prompt", 0) * model_info.input_price_per_1m / 1_000_000
+            + token_usage.get("completion", 0) * model_info.output_price_per_1m / 1_000_000
+        )
+
+    # ---- Shared auth/token resolution ------------------------------------
+
+    async def _resolve_mcp_bearer_token(self) -> str | None:
+        """Dispatch by ``auth_config["type"]`` and return a Bearer token
+        suitable for the ``Authorization`` header on MCP requests, or
+        ``None`` when no auth is configured."""
+        if not self.auth_config:
+            return None
+        auth_type = self.auth_config.get("type", "")
+        if auth_type == "bearer":
+            return self.auth_config.get("token", "") or None
+        if auth_type == "jwt":
+            return await self._fetch_jwt_token()
+        if auth_type == "oauth":
+            if self.auth_config.get("oauth_auto_discover"):
+                token = await self._read_cached_oauth_token()
+                if not token:
+                    raise ValueError(
+                        f"No usable cached OAuth token for {self.mcp_url}. "
+                        "Authenticate the MCP profile first (open it on the "
+                        "MCP Profiles page or run a smoke test to trigger "
+                        "the OAuth flow), then re-run the test."
+                    )
+                return token
+            return await self._fetch_oauth_token()
+        return None
+
+    async def _fetch_jwt_token(self) -> str | None:
+        """Fetch a JWT bearer token from the configured API endpoint.
+
+        Sends ``{"name": api_token, "secret": api_secret}`` (the Preset
+        chatbot convention). Accepts both response shapes seen in the wild:
+        ``{"payload": {"access_token": "..."}}`` (Preset chatbot) and a
+        flat ``{"access_token": "..."}`` (generic). This unifies what was
+        previously two divergent implementations across SDK providers.
+        """
+        if not self.auth_config:
+            return None
+        api_url = self.auth_config.get("api_url", "")
+        api_token = self.auth_config.get("api_token", "")
+        api_secret = self.auth_config.get("api_secret", "")
+        if not all([api_url, api_token, api_secret]):
+            self._logger.warning("JWT auth config incomplete")
+            return None
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.post(
+                    api_url,
+                    headers={
+                        "Content-Type": "application/json",
+                        "Accept": "application/json",
+                    },
+                    json={"name": api_token, "secret": api_secret},
+                    timeout=30.0,
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                token = (
+                    data.get("payload", {}).get("access_token")
+                    or data.get("access_token")
+                    or data.get("token")
+                    or None
+                )
+                if token:
+                    self._logger.info("JWT token fetched (length: %d)", len(token))
+                return token
+        except (httpx.HTTPStatusError, httpx.ConnectError, httpx.TimeoutException) as e:
+            self._logger.warning("Failed to fetch JWT token: %s", e)
+            return None
+
+    async def _fetch_oauth_token(self) -> str | None:
+        """Fetch an OAuth token via the ``client_credentials`` grant."""
+        if not self.auth_config:
+            return None
+        token_url = self.auth_config.get("token_url", "")
+        client_id = self.auth_config.get("client_id", "")
+        client_secret = self.auth_config.get("client_secret", "")
+        if not all([token_url, client_id, client_secret]):
+            self._logger.warning("OAuth client_credentials config incomplete")
+            return None
+        scopes = self.auth_config.get("scopes", [])
+        data: dict[str, Any] = {
+            "grant_type": "client_credentials",
+            "client_id": client_id,
+            "client_secret": client_secret,
+        }
+        if scopes:
+            data["scope"] = " ".join(scopes)
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.post(token_url, data=data, timeout=30.0)
+                resp.raise_for_status()
+                token = resp.json().get("access_token") or None
+                if token:
+                    self._logger.info("OAuth token fetched (length: %d)", len(token))
+                return token
+        except (httpx.HTTPStatusError, httpx.ConnectError, httpx.TimeoutException) as e:
+            self._logger.warning("Failed to fetch OAuth token: %s", e)
+            return None
+
+    async def _read_cached_oauth_token(self) -> str | None:
+        """Reuse the access token that fastmcp's OAuth flow already cached.
+
+        Uses :class:`fastmcp.client.auth.oauth.FileTokenStorage` — the actual
+        public API. The previous hand-rolled cache paths in CodexSDKProvider
+        and GeminiSDKProvider (``~/.fastmcp/oauth-mcp-client-cache/{url-encoded
+        mcp_url}.json``) did NOT match what fastmcp actually writes (it keys
+        storage by server base URL via ``TokenStorageAdapter``). Centralising
+        here fixes that latent bug for both.
+
+        Returns ``None`` when there is no cached token or the cached payload
+        is malformed/expired — callers expecting auth then surface a clear
+        re-authentication error instead of silently going un-authenticated.
+        """
+        try:
+            from urllib.parse import urlparse  # noqa: PLC0415
+
+            from fastmcp.client.auth.oauth import FileTokenStorage  # noqa: PLC0415
+        except ImportError as e:
+            self._logger.warning("fastmcp not available for cached-token lookup: %s", e)
+            return None
+        parsed = urlparse(self.mcp_url)
+        server_base_url = f"{parsed.scheme}://{parsed.netloc}"
+        try:
+            storage = FileTokenStorage(server_url=server_base_url)
+            oauth_token = await storage.get_tokens()
+        except (OSError, ValueError) as e:
+            self._logger.warning("Failed to read cached OAuth token for %s: %s", server_base_url, e)
+            return None
+        if oauth_token is None:
+            self._logger.warning(
+                "No cached OAuth token for %s — authenticate the MCP profile "
+                "(MCP Profiles page or smoke test) and re-run.",
+                server_base_url,
+            )
+            return None
+        access_token = getattr(oauth_token, "access_token", None)
+        if not access_token:
+            self._logger.warning(
+                "Cached OAuth payload for %s is missing access_token — "
+                "authenticate the MCP profile again to refresh it.",
+                server_base_url,
+            )
+            return None
+        self._logger.info(
+            "Reusing cached OAuth token for %s (length: %d)",
+            server_base_url,
+            len(access_token),
+        )
+        return access_token
+
+
 _claude_sdk_logger = logging.getLogger(__name__ + ".ClaudeSDKProvider")
 
 
@@ -1383,16 +1788,19 @@ def _looks_like_error_payload(content: Any) -> bool:
     return any(marker in text for marker in _ERROR_PAYLOAD_MARKERS)
 
 
-class ClaudeSDKProvider(LLMProvider):
+class ClaudeSDKProvider(BaseSDKProvider):
     """Claude Agent SDK provider with native MCP integration.
 
     Uses the claude-agent-sdk Python package (wraps Claude Code CLI internally).
     The SDK handles MCP tool discovery natively via McpHttpServerConfig —
     no need for our own ToolDiscoveryService.
 
-    Supports JWT, OAuth, and Bearer auth for MCP servers.
-    Uses Claude Code subscription (no API credits) by clearing ANTHROPIC_API_KEY from env.
+    Supports JWT, OAuth, and Bearer auth for MCP servers via
+    :class:`BaseSDKProvider`. Uses Claude Code subscription (no API credits)
+    by clearing ANTHROPIC_API_KEY from env.
     """
+
+    LOGGER_NAME = "ClaudeSDKProvider"
 
     def __init__(
         self,
@@ -1401,25 +1809,15 @@ class ClaudeSDKProvider(LLMProvider):
         auth: dict[str, Any] | None = None,
         log_callback=None,
     ):
-        self.model = model
+        super().__init__(model=model, mcp_url=mcp_url, auth=auth)
         self.log_callback = log_callback
-        config = get_config()
-
-        # Use MCP_URL and auth from default profile if not provided
-        if mcp_url is None:
-            mcp_url = config.get_mcp_url()
-        self.mcp_url = mcp_url
-
-        if auth is None:
-            default_mcp = config.get_default_mcp_server()
-            if default_mcp and default_mcp.auth:
-                auth = default_mcp.auth.to_dict()
-        self.auth_config = auth
-
+        # The Claude SDK consumes an MCP server config dict shaped like
+        # {"type": "http", "url": ..., "headers": {...}} — built in initialize().
         self._mcp_server_config: dict[str, Any] | None = None
 
-    async def initialize(self):
-        """Initialize Claude SDK provider — build MCP server config with auth."""
+    # ---- BaseSDKProvider hooks ------------------------------------------
+
+    def _check_sdk_installed(self) -> None:
         try:
             from claude_agent_sdk import CLINotFoundError  # noqa: F401
         except ImportError:
@@ -1427,199 +1825,67 @@ class ClaudeSDKProvider(LLMProvider):
                 "claude-agent-sdk package not installed. Install with: pip install claude-agent-sdk"
             )
 
-        # Configure HTTP MCP server
-        from claude_agent_sdk.types import McpHttpServerConfig
+    async def _validate_credentials(self) -> None:
+        # ClaudeSDKProvider uses the Claude Code subscription (and explicitly
+        # clears ANTHROPIC_API_KEY in _run_agent's env), so no upfront API
+        # credentials are required here.
+        return None
+
+    @classmethod
+    def _vendor_expected_errors(cls) -> tuple[type[BaseException], ...]:
+        # claude-agent-sdk's own CLI/process/connection errors plus the
+        # serialization-quirk errors that the previous implementation caught
+        # at the generate_with_tools boundary. Preserves observable behavior.
+        # Imports are deferred so the module loads without the SDK installed.
+        try:
+            from claude_agent_sdk import (  # noqa: PLC0415
+                CLIConnectionError,
+                CLINotFoundError,
+                ProcessError,
+            )
+        except ImportError:
+            return (
+                ConnectionError,
+                OSError,
+                KeyError,
+                ValueError,
+                TypeError,
+                json.JSONDecodeError,
+            )
+        return (
+            CLINotFoundError,
+            ProcessError,
+            CLIConnectionError,
+            ConnectionError,
+            OSError,
+            KeyError,
+            ValueError,
+            TypeError,
+            json.JSONDecodeError,
+        )
+
+    async def initialize(self) -> None:
+        """Extend :meth:`BaseSDKProvider.initialize` to also build the SDK's
+        ``McpHttpServerConfig`` dict shaped like
+        ``{"type": "http", "url": ..., "headers": {...}}``."""
+        await super().initialize()
+
+        from claude_agent_sdk.types import McpHttpServerConfig  # noqa: PLC0415
 
         server_config: McpHttpServerConfig = {"type": "http", "url": self.mcp_url}
-
-        # Fetch auth token based on auth config type
-        token = None
-        if self.auth_config:
-            auth_type = self.auth_config.get("type", "")
-            if auth_type == "jwt":
-                token = await self._fetch_jwt_token()
-            elif auth_type == "bearer":
-                token = self.auth_config.get("token", "")
-            elif auth_type == "oauth":
-                # oauth_auto_discover (the fastmcp browser flow) caches its
-                # access_token to ~/.fastmcp/oauth-mcp-client-cache/. The
-                # client_credentials grant in _fetch_oauth_token doesn't apply
-                # here — most servers don't accept it. Reuse the cached token
-                # so the SDK doesn't kick off its own claude.ai/oauth flow.
-                if self.auth_config.get("oauth_auto_discover"):
-                    token = await self._read_cached_oauth_token()
-                    # Fail fast: without a cached token the SDK would silently
-                    # register the MCP without auth and bounce the user to its
-                    # own claude.ai/oauth flow — exactly the bug this branch
-                    # exists to prevent.
-                    if not token:
-                        raise ValueError(
-                            f"No usable cached OAuth token for {self.mcp_url}. "
-                            "Authenticate the MCP profile first (open it on the "
-                            "MCP Profiles page or run a smoke test to trigger "
-                            "the OAuth flow), then re-run the test."
-                        )
-                else:
-                    token = await self._fetch_oauth_token()
-
-        if token:
-            server_config["headers"] = {"Authorization": f"Bearer {token}"}
-            _claude_sdk_logger.info("[ClaudeSDK] MCP server configured with auth token")
-        else:
-            _claude_sdk_logger.info("[ClaudeSDK] MCP server configured without auth")
-
+        if self._mcp_headers:
+            server_config["headers"] = dict(self._mcp_headers)
         self._mcp_server_config = server_config
-        _claude_sdk_logger.info("[ClaudeSDK] MCP server ready: %s", self.mcp_url)
 
-    async def _fetch_jwt_token(self) -> str | None:
-        """Fetch JWT token from API."""
-        if not self.auth_config:
-            return None
-
-        api_url = self.auth_config.get("api_url", "")
-        api_token = self.auth_config.get("api_token", "")
-        api_secret = self.auth_config.get("api_secret", "")
-
-        if not all([api_url, api_token, api_secret]):
-            _claude_sdk_logger.warning("[ClaudeSDK] JWT auth config incomplete")
-            return None
-
-        _claude_sdk_logger.info("[ClaudeSDK] Fetching JWT token from: %s", api_url)
-        async with httpx.AsyncClient() as client:
-            try:
-                response = await client.post(
-                    api_url,
-                    headers={
-                        "Content-Type": "application/json",
-                        "Accept": "application/json",
-                    },
-                    json={"name": api_token, "secret": api_secret},
-                    timeout=30.0,
-                )
-                response.raise_for_status()
-                data = response.json()
-                token = data.get("payload", {}).get("access_token", "")
-                if token:
-                    _claude_sdk_logger.info(
-                        "[ClaudeSDK] JWT token fetched (length: %d)", len(token)
-                    )
-                return token
-            except (httpx.HTTPStatusError, httpx.ConnectError, httpx.TimeoutException) as e:
-                _claude_sdk_logger.warning("[ClaudeSDK] Failed to fetch JWT token: %s", e)
-                return None
-
-    async def _fetch_oauth_token(self) -> str | None:
-        """Fetch OAuth token using client credentials."""
-        if not self.auth_config:
-            return None
-
-        token_url = self.auth_config.get("token_url", "")
-        client_id = self.auth_config.get("client_id", "")
-        client_secret = self.auth_config.get("client_secret", "")
-
-        if not all([token_url, client_id, client_secret]):
-            _claude_sdk_logger.warning("[ClaudeSDK] OAuth auth config incomplete")
-            return None
-
-        _claude_sdk_logger.info("[ClaudeSDK] Fetching OAuth token from: %s", token_url)
-        async with httpx.AsyncClient() as client:
-            try:
-                response = await client.post(
-                    token_url,
-                    data={
-                        "grant_type": "client_credentials",
-                        "client_id": client_id,
-                        "client_secret": client_secret,
-                    },
-                    timeout=30.0,
-                )
-                response.raise_for_status()
-                data = response.json()
-                token = data.get("access_token", "")
-                if token:
-                    _claude_sdk_logger.info(
-                        "[ClaudeSDK] OAuth token fetched (length: %d)", len(token)
-                    )
-                return token
-            except (httpx.HTTPStatusError, httpx.ConnectError, httpx.TimeoutException) as e:
-                _claude_sdk_logger.warning("[ClaudeSDK] Failed to fetch OAuth token: %s", e)
-                return None
-
-    async def _read_cached_oauth_token(self) -> str | None:
-        """Reuse the access token fastmcp's OAuth flow already cached.
-
-        When the MCP profile uses oauth_auto_discover, MCPClient.initialize()
-        runs fastmcp's browser OAuth flow and stores the resulting tokens at
-        ~/.fastmcp/oauth-mcp-client-cache/<host>_tokens.json. We need that
-        same token here so the SDK's separate MCP connection authenticates
-        without triggering a second OAuth flow against claude.ai/oauth.
-
-        Returns None if there is no cached token or it is expired —
-        FileTokenStorage.get_tokens() handles the expiration check. In that
-        case the user needs to (re-)authenticate the MCP profile (e.g. via
-        the MCP Profiles page) before re-running the test.
-        """
-        try:
-            from urllib.parse import urlparse
-
-            from fastmcp.client.auth.oauth import FileTokenStorage
-        except ImportError as e:
-            _claude_sdk_logger.warning(
-                "[ClaudeSDK] fastmcp not available for cached-token lookup: %s", e
-            )
-            return None
-
-        parsed = urlparse(self.mcp_url)
-        server_base_url = f"{parsed.scheme}://{parsed.netloc}"
-
-        try:
-            storage = FileTokenStorage(server_url=server_base_url)
-            oauth_token = await storage.get_tokens()
-        except (OSError, ValueError) as e:
-            _claude_sdk_logger.warning(
-                "[ClaudeSDK] Failed to read cached OAuth token for %s: %s",
-                server_base_url,
-                e,
-            )
-            return None
-
-        if oauth_token is None:
-            _claude_sdk_logger.warning(
-                "[ClaudeSDK] No cached OAuth token for %s — authenticate the "
-                "MCP profile first (e.g. open it on the MCP Profiles page or "
-                "run a smoke test) and re-run the test.",
-                server_base_url,
-            )
-            return None
-
-        access_token = getattr(oauth_token, "access_token", None)
-        if not access_token:
-            # Cache file exists but the payload is malformed or missing the
-            # access_token field. Surface this so it's not silently swallowed
-            # — the caller will then raise with re-auth instructions.
-            _claude_sdk_logger.warning(
-                "[ClaudeSDK] Cached OAuth payload for %s is missing access_token "
-                "— authenticate the MCP profile again to refresh it.",
-                server_base_url,
-            )
-            return None
-
-        _claude_sdk_logger.info(
-            "[ClaudeSDK] Reusing cached OAuth token for %s (length: %d)",
-            server_base_url,
-            len(access_token),
-        )
-        return access_token
-
-    async def generate_with_tools(
+    async def _run_agent(
         self,
         prompt: str,
-        tools: list[dict[str, Any]],
-        timeout: float = 120.0,
-        messages: list[dict[str, Any]] | None = None,
-    ) -> LLMResult:
-        """Generate response using Claude Agent SDK."""
-        start_time = time.time()
+        timeout: float,
+        messages: list[dict[str, Any]] | None,
+    ) -> SDKRunResult:
+        """Execute the Claude Agent SDK query loop and return a normalised
+        :class:`SDKRunResult` for :class:`BaseSDKProvider` to convert into
+        :class:`LLMResult`."""
         logs: list[str] = []
 
         def log(msg: str):
@@ -1947,14 +2213,17 @@ class ClaudeSDKProvider(LLMProvider):
 
                 log(f"[ClaudeSDK] Completed: {message_count} messages, {len(response_text)} chars")
 
+            # The base wraps _run_agent in asyncio.wait_for; we still run our
+            # OWN wait_for here because we want to translate a wall-clock
+            # timeout into a clean Error response that includes the partial
+            # logs (the base swallows logs on timeout because it has no
+            # SDKRunResult yet).
             try:
                 await asyncio.wait_for(execute_query(), timeout=timeout)
             except asyncio.TimeoutError:
                 log(f"[ClaudeSDK] TIMEOUT after {timeout}s")
-                return LLMResult(
-                    response=f"Error: SDK query timed out after {timeout}s",
-                    tool_calls=[],
-                    duration=time.time() - start_time,
+                return SDKRunResult(
+                    response_text=f"Error: SDK query timed out after {timeout}s",
                     logs=logs,
                 )
 
@@ -1976,8 +2245,6 @@ class ClaudeSDKProvider(LLMProvider):
                     )
                     mcp_tool_results.append(mcp_result)
 
-            duration = time.time() - start_time
-
             # If we aborted via the retry budget, surface that in the
             # response so evaluators see a clear, actionable error
             # rather than an empty / partial response.
@@ -1998,69 +2265,44 @@ class ClaudeSDKProvider(LLMProvider):
                 + (" [retry budget aborted]" if retry_budget_aborted else "")
             )
 
-            # Estimate cost from tokens if SDK didn't provide it (subscription billing)
-            if cost == 0.0 and token_usage:
-                from .model_registry import get_model
-
-                model_info = get_model(self.model)
-                if model_info:
-                    cost = (
-                        token_usage.get("prompt", 0) * model_info.input_price_per_1m / 1_000_000
-                        + token_usage.get("completion", 0)
-                        * model_info.output_price_per_1m
-                        / 1_000_000
-                    )
-                    log(f"[ClaudeSDK] Estimated cost from token counts: ${cost:.4f}")
-
-            return LLMResult(
-                response=response_text,
+            return SDKRunResult(
+                response_text=response_text,
                 tool_calls=tool_calls,
                 tool_results=mcp_tool_results,
                 thinking=thinking_text if thinking_text else None,
                 token_usage=token_usage,
-                cost=cost,
-                duration=duration,
-                tti_ms=int(duration * 1000),
+                cost=cost if cost else None,  # base estimates from registry if None/0
                 raw_response={"events": raw_events} if raw_events else None,
                 logs=logs,
             )
 
         except CLINotFoundError:
             log("[ClaudeSDK] Claude CLI not found — install @anthropic-ai/claude-code")
-            return LLMResult(
-                response="Error: Claude CLI not found. Install with: npm install -g @anthropic-ai/claude-code",
-                tool_calls=[],
-                duration=time.time() - start_time,
+            return SDKRunResult(
+                response_text=(
+                    "Error: Claude CLI not found. "
+                    "Install with: npm install -g @anthropic-ai/claude-code"
+                ),
                 logs=logs,
             )
         except ProcessError as e:
             log(f"[ClaudeSDK] Process error: {e}")
-            return LLMResult(
-                response=f"Error: Claude CLI process failed: {e}",
-                tool_calls=[],
-                duration=time.time() - start_time,
+            return SDKRunResult(
+                response_text=f"Error: Claude CLI process failed: {e}",
                 logs=logs,
             )
         except CLIConnectionError as e:
             log(f"[ClaudeSDK] Connection error: {e}")
-            return LLMResult(
-                response=f"Error: Claude CLI connection failed: {e}",
-                tool_calls=[],
-                duration=time.time() - start_time,
+            return SDKRunResult(
+                response_text=f"Error: Claude CLI connection failed: {e}",
                 logs=logs,
             )
         except (KeyError, ValueError, TypeError, json.JSONDecodeError) as e:
             log(f"[ClaudeSDK] Unexpected error: {type(e).__name__}: {e}")
-            return LLMResult(
-                response=f"Error: {type(e).__name__}: {e}",
-                tool_calls=[],
-                duration=time.time() - start_time,
+            return SDKRunResult(
+                response_text=f"Error: {type(e).__name__}: {e}",
                 logs=logs,
             )
-
-    async def close(self):
-        """No-op — SDK manages its own cleanup."""
-        pass
 
 
 _assistant_logger = logging.getLogger(__name__ + ".AssistantProvider")
@@ -3310,7 +3552,7 @@ _CODEX_SYSTEM_PROMPT = (
 )
 
 
-class CodexSDKProvider(LLMProvider):
+class CodexSDKProvider(BaseSDKProvider):
     """OpenAI Agents SDK provider with native MCP integration.
 
     Uses the openai-agents Python package (analogous to ClaudeSDKProvider).
@@ -3321,10 +3563,12 @@ class CodexSDKProvider(LLMProvider):
     LLM profile in ``.llm_providers.yaml``) or left None to fall back to the
     stored Codex CLI API key (``OPENAI_API_KEY`` field in ``~/.codex/auth.json``).
 
-    MCP server auth (bearer / jwt / oauth) follows the same pattern as
-    ClaudeSDKProvider: a Bearer token is resolved from the auth config and
-    forwarded as an ``Authorization`` header on every MCP request.
+    MCP server auth (bearer / jwt / oauth) is resolved by
+    :class:`BaseSDKProvider` — including ``oauth_auto_discover`` via the
+    proper :class:`fastmcp.client.auth.oauth.FileTokenStorage` API.
     """
+
+    LOGGER_NAME = "CodexSDKProvider"
 
     def __init__(
         self,
@@ -3333,79 +3577,56 @@ class CodexSDKProvider(LLMProvider):
         auth: dict[str, Any] | None = None,
         openai_api_key: str | None = None,
     ):
-        self.model = _CODEX_MODEL_MAP.get(model, model)
+        # Keep the unmapped id (e.g. "codex-o3") for model_registry cost
+        # estimation; pass the vendor id (e.g. "o3") to the base for self.model.
+        self._registry_model_id = model
+        super().__init__(
+            model=_CODEX_MODEL_MAP.get(model, model),
+            mcp_url=mcp_url,
+            auth=auth,
+        )
         self.openai_api_key = openai_api_key or ""
-        config = get_config()
 
-        if mcp_url is None:
-            mcp_url = config.get_mcp_url()
-        self.mcp_url = mcp_url
+    # ---- BaseSDKProvider hooks ------------------------------------------
 
-        if auth is None:
-            default_mcp = config.get_default_mcp_server()
-            if default_mcp and default_mcp.auth:
-                auth = default_mcp.auth.to_dict()
-        self.auth_config = auth
-
-        self._mcp_headers: dict[str, str] = {}
-
-    async def initialize(self) -> None:
-        """Validate openai-agents is installed, resolve API key, and build MCP auth."""
+    def _check_sdk_installed(self) -> None:
         try:
-            from agents import Agent, Runner  # noqa: F401
+            from agents import Agent, Runner  # noqa: F401, PLC0415
         except ImportError:
             raise ValueError(
                 "openai-agents package not installed. Install with: pip install openai-agents"
             )
 
-        # Resolve OpenAI API key: explicit > env > Codex CLI OAuth cache
+    async def _validate_credentials(self) -> None:
+        # Constructor arg → cached Codex CLI key in ~/.codex/auth.json.
         if not self.openai_api_key:
-            self.openai_api_key = self._read_cached_codex_token()
+            self.openai_api_key = self._read_cached_codex_token() or ""
         if not self.openai_api_key:
             raise ValueError(
-                "No OpenAI API key. Supply api_key in the LLM profile "
-                "(.llm_providers.yaml) or configure the Codex CLI with an API key "
-                "so it is stored in ~/.codex/auth.json."
+                "No OpenAI api_key. Supply api_key in the LLM profile "
+                "(.llm_providers.yaml) or configure the Codex CLI with an "
+                "API key so it is stored in ~/.codex/auth.json."
             )
 
-        # Resolve MCP Bearer token from auth config
-        token: str | None = None
-        if self.auth_config:
-            auth_type = self.auth_config.get("type", "")
-            if auth_type == "jwt":
-                token = await self._fetch_jwt_token()
-            elif auth_type == "bearer":
-                token = self.auth_config.get("token", "")
-            elif auth_type == "oauth":
-                if self.auth_config.get("oauth_auto_discover"):
-                    token = await self._read_cached_oauth_token()
-                    if not token:
-                        raise ValueError(
-                            f"No usable cached OAuth token for {self.mcp_url}. "
-                            "Authenticate the MCP profile first, then re-run the test."
-                        )
-                else:
-                    token = await self._fetch_oauth_token()
-
-        if token:
-            self._mcp_headers = {"Authorization": f"Bearer {token}"}
-            _codex_sdk_logger.info("[CodexSDK] MCP server configured with auth token")
-        else:
-            _codex_sdk_logger.info("[CodexSDK] MCP server configured without auth")
-
-        _codex_sdk_logger.info("[CodexSDK] MCP server ready: %s", self.mcp_url)
+    @classmethod
+    def _vendor_expected_errors(cls) -> tuple[type[BaseException], ...]:
+        return (
+            ConnectionError,
+            OSError,
+            TimeoutError,
+            httpx.HTTPError,
+        )
 
     def _read_cached_codex_token(self) -> str | None:
-        """Read the stored OpenAI API key from ~/.codex/auth.json.
+        """Read the stored OpenAI API key from ``~/.codex/auth.json``.
 
-        The Codex CLI persists credentials as:
-          {"OPENAI_API_KEY": "sk-...", "tokens": {"access_token": "...", ...}}
-
+        The Codex CLI persists credentials as
+        ``{"OPENAI_API_KEY": "sk-...", "tokens": {"access_token": "...", ...}}``.
         The top-level ``OPENAI_API_KEY`` is an OpenAI Platform key usable with
-        api.openai.com.  The nested OAuth ``access_token`` is a ChatGPT-backend
+        api.openai.com; the nested OAuth ``access_token`` is a ChatGPT-backend
         token and does NOT work with the Platform API — don't read it here.
-        Returns None when the key is absent or null (e.g. after a pure OAuth
-        login where no API key was configured).
+        Returns ``None`` when the key is absent or null (e.g. after a pure
+        OAuth login where no API key was configured).
         """
         auth_path = Path.home() / ".codex" / "auth.json"
         if not auth_path.exists():
@@ -3415,179 +3636,116 @@ class CodexSDKProvider(LLMProvider):
             api_key = data.get("OPENAI_API_KEY")
             return api_key if isinstance(api_key, str) and api_key else None
         except (json.JSONDecodeError, OSError) as e:
-            _codex_sdk_logger.warning("[CodexSDK] Could not read %s: %s", auth_path, e)
+            self._logger.warning("Could not read %s: %s", auth_path, e)
             return None
 
-    async def _fetch_jwt_token(self) -> str | None:
-        """Fetch JWT bearer token from the configured API endpoint."""
-        if not self.auth_config:
-            return None
-        api_url = self.auth_config.get("api_url", "")
-        api_token = self.auth_config.get("api_token", "")
-        api_secret = self.auth_config.get("api_secret", "")
-        if not all([api_url, api_token, api_secret]):
-            _codex_sdk_logger.warning("[CodexSDK] JWT auth config incomplete")
-            return None
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(
-                api_url,
-                json={"token": api_token, "secret": api_secret},
-                timeout=30,
-            )
-            resp.raise_for_status()
-            return resp.json().get("access_token") or resp.json().get("token")
-
-    async def _fetch_oauth_token(self) -> str | None:
-        """Fetch OAuth token via client_credentials grant."""
-        if not self.auth_config:
-            return None
-        client_id = self.auth_config.get("client_id", "")
-        client_secret = self.auth_config.get("client_secret", "")
-        token_url = self.auth_config.get("token_url", "")
-        if not all([client_id, client_secret, token_url]):
-            _codex_sdk_logger.warning("[CodexSDK] OAuth client_credentials config incomplete")
-            return None
-        scopes = self.auth_config.get("scopes", [])
-        data: dict[str, Any] = {
-            "grant_type": "client_credentials",
-            "client_id": client_id,
-            "client_secret": client_secret,
-        }
-        if scopes:
-            data["scope"] = " ".join(scopes)
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(token_url, data=data, timeout=30)
-            resp.raise_for_status()
-            return resp.json().get("access_token")
-
-    async def _read_cached_oauth_token(self) -> str | None:
-        """Read cached fastmcp OAuth token from ~/.fastmcp/oauth-mcp-client-cache/."""
-        # Reuse the same logic as ClaudeSDKProvider — both read from fastmcp's token cache
-        # when oauth_auto_discover is True.
-        cache_dir = Path.home() / ".fastmcp" / "oauth-mcp-client-cache"
-        if not cache_dir.exists():
-            return None
-        try:
-            server_key = urllib.parse.quote(self.mcp_url, safe="")
-            token_file = cache_dir / f"{server_key}.json"
-            if not token_file.exists():
-                # Try without trailing slash variant
-                alt_url = self.mcp_url.rstrip("/")
-                token_file = cache_dir / f"{urllib.parse.quote(alt_url, safe='')}.json"
-            if not token_file.exists():
-                return None
-            data = json.loads(token_file.read_text())
-            return data.get("access_token")
-        except (json.JSONDecodeError, OSError) as e:
-            _codex_sdk_logger.warning("[CodexSDK] Could not read cached OAuth token: %s", e)
-            return None
-
-    async def generate_with_tools(
+    async def _run_agent(
         self,
         prompt: str,
-        tools: list[dict[str, Any]],
-        timeout: float = 120.0,
-        messages: list[dict[str, Any]] | None = None,
-    ) -> LLMResult:
-        """Generate a response using openai-agents with native MCP tool access."""
+        timeout: float,
+        messages: list[dict[str, Any]] | None,
+    ) -> SDKRunResult:
         # openai-agents is an optional dependency; initialize() has already
-        # validated it is installed, so these deferred imports are safe here.
+        # validated it is installed, so these deferred imports are safe.
         from agents import Agent, Runner  # noqa: PLC0415
+        from agents.items import ToolCallItem, ToolCallOutputItem  # noqa: PLC0415
         from agents.mcp import MCPServerStreamableHttp  # noqa: PLC0415
         from agents.models.openai_provider import OpenAIProvider as OAIProvider  # noqa: PLC0415
         from agents.run_config import RunConfig  # noqa: PLC0415
-
-        start_time = time.time()
 
         params: dict[str, Any] = {"url": self.mcp_url}
         if self._mcp_headers:
             params["headers"] = self._mcp_headers
 
-        try:
-            async with MCPServerStreamableHttp(
-                params=params,
-                cache_tools_list=True,
-                name="testmcpy-mcp",
-            ) as mcp_server:
-                agent = Agent(
-                    name="testmcpy-codex-agent",
-                    model=self.model,
-                    instructions=_CODEX_SYSTEM_PROMPT,
-                    mcp_servers=[mcp_server],
+        async with MCPServerStreamableHttp(
+            params=params,
+            cache_tools_list=True,
+            name="testmcpy-mcp",
+        ) as mcp_server:
+            agent = Agent(
+                name="testmcpy-codex-agent",
+                model=self.model,
+                instructions=_CODEX_SYSTEM_PROMPT,
+                mcp_servers=[mcp_server],
+            )
+            run_config = RunConfig(
+                model_provider=OAIProvider(api_key=self.openai_api_key),
+            )
+            # Note: the base wraps this _run_agent in asyncio.wait_for, so
+            # we do NOT additionally wrap Runner.run with wait_for. (Doubling
+            # up was the source of asyncio.timeout 3.10-incompat bugs in
+            # earlier revisions.)
+            result = await Runner.run(agent, prompt, run_config=run_config, max_turns=25)
+
+        response_text = str(result.final_output) if result.final_output is not None else ""
+
+        # Extract tool calls AND tool results from the run's item trace.
+        # ToolCallItem.arguments lives on raw_item; ToolCallOutputItem.output
+        # is the executed result. Correlate by call_id so test_runner.py
+        # does NOT re-execute these calls. (Drift fix flagged in PR #84 review.)
+        tool_calls: list[dict[str, Any]] = []
+        tool_outputs_by_call_id: dict[str, ToolCallOutputItem] = {}
+        for item in result.new_items:
+            if isinstance(item, ToolCallItem) and item.tool_name:
+                raw = item.raw_item
+                raw_args = (
+                    raw.get("arguments")
+                    if isinstance(raw, dict)
+                    else getattr(raw, "arguments", None)
+                ) or "{}"
+                try:
+                    args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+                except json.JSONDecodeError:
+                    args = {}
+                tool_calls.append(
+                    {
+                        "id": item.call_id or "",
+                        "name": item.tool_name,
+                        "arguments": args,
+                    }
                 )
-                run_config = RunConfig(
-                    model_provider=OAIProvider(api_key=self.openai_api_key),
+            elif isinstance(item, ToolCallOutputItem):
+                call_id = item.call_id
+                if call_id:
+                    tool_outputs_by_call_id[call_id] = item
+
+        # Build MCPToolResult objects matching the call ids; harness keys on
+        # llm_result.tool_results to skip re-execution.
+        mcp_tool_results: list[MCPToolResult] = []
+        for tc in tool_calls:
+            output_item = tool_outputs_by_call_id.get(tc["id"])
+            if output_item is not None:
+                mcp_tool_results.append(
+                    MCPToolResult(
+                        tool_call_id=tc["id"],
+                        tool_name=tc["name"],
+                        content=output_item.output,
+                        is_error=False,
+                    )
                 )
-                result = await asyncio.wait_for(
-                    Runner.run(agent, prompt, run_config=run_config, max_turns=25),
-                    timeout=timeout,
-                )
 
-            response_text = str(result.final_output) if result.final_output is not None else ""
+        # Normalise token usage to {prompt, completion, total}.
+        usage = getattr(getattr(result, "context_wrapper", None), "usage", None)
+        input_tokens = getattr(usage, "input_tokens", None)
+        output_tokens = getattr(usage, "output_tokens", None)
+        token_usage = (
+            {
+                "prompt": input_tokens or 0,
+                "completion": output_tokens or 0,
+                "total": (input_tokens or 0) + (output_tokens or 0),
+            }
+            if input_tokens is not None
+            else None
+        )
 
-            # Extract tool calls from the run's item trace.
-            from agents.items import ToolCallItem  # noqa: PLC0415
-
-            tool_calls: list[dict[str, Any]] = []
-            for item in result.new_items:
-                if isinstance(item, ToolCallItem) and item.tool_name:
-                    # ToolCallItem has no .arguments attribute; arguments live on
-                    # the raw_item (e.g. ResponseFunctionToolCall.arguments).
-                    raw = item.raw_item
-                    raw_args = (
-                        raw.get("arguments")
-                        if isinstance(raw, dict)
-                        else getattr(raw, "arguments", None)
-                    ) or "{}"
-                    try:
-                        args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
-                    except json.JSONDecodeError:
-                        args = {}
-                    tool_calls.append({"name": item.tool_name, "arguments": args})
-
-            # Extract token usage when available; use the same key names as
-            # every other provider (prompt / completion / total).
-            usage = getattr(getattr(result, "context_wrapper", None), "usage", None)
-            input_tokens = getattr(usage, "input_tokens", None)
-            output_tokens = getattr(usage, "output_tokens", None)
-            token_usage = (
-                {
-                    "prompt": input_tokens,
-                    "completion": output_tokens,
-                    "total": (input_tokens or 0) + (output_tokens or 0),
-                }
-                if input_tokens is not None
-                else None
-            )
-
-            return LLMResult(
-                response=response_text,
-                tool_calls=tool_calls,
-                token_usage=token_usage,
-                cost=0.0,
-                duration=time.time() - start_time,
-                raw_response={"final_output": response_text},
-            )
-
-        except asyncio.TimeoutError:
-            return LLMResult(
-                response=f"Error: Codex SDK timed out after {timeout}s",
-                tool_calls=[],
-                duration=time.time() - start_time,
-            )
-        except Exception as e:  # openai.APIError, agents errors, MCP/httpx errors
-            # generate_with_tools must never raise — the eval harness expects an
-            # LLMResult even on auth/rate-limit/connection failures so the test
-            # run keeps going and records a clean failure result.
-            _codex_sdk_logger.warning("[CodexSDK] generate_with_tools failed: %s", e)
-            return LLMResult(
-                response=f"Error: {e}",
-                tool_calls=[],
-                duration=time.time() - start_time,
-            )
-
-    async def close(self) -> None:
-        """No persistent connections to close (MCP session is per-request)."""
+        return SDKRunResult(
+            response_text=response_text,
+            tool_calls=tool_calls,
+            tool_results=mcp_tool_results,
+            token_usage=token_usage,
+            cost=None,  # let the base estimate from registry pricing
+            raw_response={"final_output": response_text},
+        )
 
 
 class GeminiCLIProvider(LLMProvider):
@@ -3824,14 +3982,19 @@ _GEMINI_SDK_SYSTEM_PROMPT = (
 )
 
 
-class GeminiSDKProvider(LLMProvider):
+class GeminiSDKProvider(BaseSDKProvider):
     """Google ADK provider with native MCP integration.
 
-    Uses the google-adk Python package (analogous to ClaudeSDKProvider/CodexSDKProvider).
-    ``api_key`` must be supplied via the constructor (resolved from .llm_providers.yaml).
-    MCP via McpToolset + StreamableHTTPConnectionParams; same bearer/jwt/oauth auth
-    pattern as ClaudeSDKProvider.
+    Uses the google-adk Python package (analogous to ClaudeSDKProvider/
+    CodexSDKProvider). ``api_key`` must be supplied via the constructor
+    (resolved from ``.llm_providers.yaml``).
+
+    MCP server auth (bearer / jwt / oauth) is resolved by
+    :class:`BaseSDKProvider` — including ``oauth_auto_discover`` via the
+    proper :class:`fastmcp.client.auth.oauth.FileTokenStorage` API.
     """
+
+    LOGGER_NAME = "GeminiSDKProvider"
 
     def __init__(
         self,
@@ -3840,141 +4003,59 @@ class GeminiSDKProvider(LLMProvider):
         auth: dict[str, Any] | None = None,
         api_key: str | None = None,
     ):
-        self._registry_model_id = model  # kept for cost estimation via model_registry
-        self.model = _GEMINI_SDK_MODEL_MAP.get(model, model)
+        # Keep the unmapped id (e.g. "gemini-sdk-flash") for model_registry
+        # cost estimation; pass the vendor id (e.g. "gemini-2.5-flash") to
+        # the base for self.model.
+        self._registry_model_id = model
+        super().__init__(
+            model=_GEMINI_SDK_MODEL_MAP.get(model, model),
+            mcp_url=mcp_url,
+            auth=auth,
+        )
         self.api_key = api_key or ""
-        config = get_config()
 
-        if mcp_url is None:
-            mcp_url = config.get_mcp_url()
-        self.mcp_url = mcp_url
+    # ---- BaseSDKProvider hooks ------------------------------------------
 
-        if auth is None:
-            default_mcp = config.get_default_mcp_server()
-            if default_mcp and default_mcp.auth:
-                auth = default_mcp.auth.to_dict()
-        self.auth_config = auth
-
-        self._mcp_headers: dict[str, str] = {}
-
-    async def initialize(self) -> None:
-        """Validate google-adk is installed, check api_key, and build MCP auth."""
+    def _check_sdk_installed(self) -> None:
+        # Import the root package only — the deeper imports in _run_agent
+        # are guarded by initialize() having completed first. Importing only
+        # the root also keeps unit-test fixtures simple (a single
+        # ``sys.modules["google.adk"]`` stub is enough).
         try:
-            # Import the root package only — keeps unit-test fixtures simple
-            # (a single sys.modules["google.adk"] stub is enough). The deeper
-            # imports are guarded by initialize() having completed first.
-            import google.adk  # noqa: F401
+            import google.adk  # noqa: F401, PLC0415
         except ImportError:
             raise ValueError(
                 "google-adk package not installed. Install with: pip install google-adk"
             )
 
+    async def _validate_credentials(self) -> None:
         if not self.api_key:
             raise ValueError(
-                "No Google API key. Supply api_key in the LLM profile (.llm_providers.yaml)."
+                "No Google api_key. Supply api_key in the LLM profile (.llm_providers.yaml)."
             )
 
-        # Resolve MCP Bearer token from auth config (same pattern as ClaudeSDKProvider).
-        token: str | None = None
-        if self.auth_config:
-            auth_type = self.auth_config.get("type", "")
-            if auth_type == "bearer":
-                token = self.auth_config.get("token", "")
-            elif auth_type == "jwt":
-                token = await self._fetch_jwt_token()
-            elif auth_type == "oauth":
-                if self.auth_config.get("oauth_auto_discover"):
-                    token = await self._read_cached_oauth_token()
-                    if not token:
-                        raise ValueError(
-                            f"No usable cached OAuth token for {self.mcp_url}. "
-                            "Authenticate the MCP profile first, then re-run the test."
-                        )
-                else:
-                    token = await self._fetch_oauth_token()
+    @classmethod
+    def _vendor_expected_errors(cls) -> tuple[type[BaseException], ...]:
+        return (
+            ConnectionError,
+            OSError,
+            TimeoutError,
+            httpx.HTTPError,
+        )
 
-        if token:
-            self._mcp_headers = {"Authorization": f"Bearer {token}"}
-            _gemini_sdk_logger.info("[GeminiSDK] MCP server configured with auth token")
-        else:
-            _gemini_sdk_logger.info("[GeminiSDK] MCP server configured without auth")
-
-        _gemini_sdk_logger.info("[GeminiSDK] MCP server ready: %s", self.mcp_url)
-
-    async def _fetch_jwt_token(self) -> str | None:
-        """Fetch JWT bearer token from the configured API endpoint."""
-        if not self.auth_config:
-            return None
-        api_url = self.auth_config.get("api_url", "")
-        api_token = self.auth_config.get("api_token", "")
-        api_secret = self.auth_config.get("api_secret", "")
-        if not all([api_url, api_token, api_secret]):
-            _gemini_sdk_logger.warning("[GeminiSDK] JWT auth config incomplete")
-            return None
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(
-                api_url,
-                json={"token": api_token, "secret": api_secret},
-                timeout=30,
-            )
-            resp.raise_for_status()
-            return resp.json().get("access_token") or resp.json().get("token")
-
-    async def _fetch_oauth_token(self) -> str | None:
-        """Fetch OAuth token via client_credentials grant."""
-        if not self.auth_config:
-            return None
-        client_id = self.auth_config.get("client_id", "")
-        client_secret = self.auth_config.get("client_secret", "")
-        token_url = self.auth_config.get("token_url", "")
-        if not all([client_id, client_secret, token_url]):
-            _gemini_sdk_logger.warning("[GeminiSDK] OAuth client_credentials config incomplete")
-            return None
-        scopes = self.auth_config.get("scopes", [])
-        data: dict[str, Any] = {
-            "grant_type": "client_credentials",
-            "client_id": client_id,
-            "client_secret": client_secret,
-        }
-        if scopes:
-            data["scope"] = " ".join(scopes)
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(token_url, data=data, timeout=30)
-            resp.raise_for_status()
-            return resp.json().get("access_token")
-
-    async def _read_cached_oauth_token(self) -> str | None:
-        """Read cached fastmcp OAuth token from ~/.fastmcp/oauth-mcp-client-cache/."""
-        cache_dir = Path.home() / ".fastmcp" / "oauth-mcp-client-cache"
-        if not cache_dir.exists():
-            return None
-        try:
-            server_key = urllib.parse.quote(self.mcp_url, safe="")
-            token_file = cache_dir / f"{server_key}.json"
-            if not token_file.exists():
-                alt_url = self.mcp_url.rstrip("/")
-                token_file = cache_dir / f"{urllib.parse.quote(alt_url, safe='')}.json"
-            if not token_file.exists():
-                return None
-            data = json.loads(token_file.read_text())
-            return data.get("access_token")
-        except (json.JSONDecodeError, OSError) as e:
-            _gemini_sdk_logger.warning("[GeminiSDK] Could not read cached OAuth token: %s", e)
-            return None
-
-    async def generate_with_tools(
+    async def _run_agent(
         self,
         prompt: str,
-        tools: list[dict[str, Any]],
-        timeout: float = 120.0,
-        messages: list[dict[str, Any]] | None = None,
-    ) -> LLMResult:
-        """Generate a response using google-adk with native MCP tool access."""
-        # google-adk is an optional dependency; initialize() has already validated it.
-        # NOTE: import LlmAgent (the underlying class) rather than the ``Agent``
-        # re-export from ``google.adk`` so unit tests can patch this name
-        # reliably (the re-export captures the original class at google.adk
-        # import time and is not affected by patches on the source module).
+        timeout: float,
+        messages: list[dict[str, Any]] | None,
+    ) -> SDKRunResult:
+        # google-adk is an optional dependency; initialize() has already
+        # validated it is installed, so these deferred imports are safe.
+        # NOTE: we import LlmAgent (the underlying class) rather than the
+        # ``Agent`` re-export from ``google.adk`` so unit tests can patch
+        # this name reliably (the re-export captures the original class at
+        # google.adk import time and is not affected by patches on the
+        # source module).
         from google.adk.agents.llm_agent import LlmAgent  # noqa: PLC0415
         from google.adk.models.google_llm import Gemini  # noqa: PLC0415
         from google.adk.runners import Runner  # noqa: PLC0415
@@ -3987,18 +4068,14 @@ class GeminiSDKProvider(LLMProvider):
         from google.adk.tools.mcp_tool.mcp_toolset import McpToolset  # noqa: PLC0415
         from google.genai import types as genai_types  # noqa: PLC0415
 
-        start_time = time.time()
-
         # Subclass Gemini to inject our explicit API key — the documented ADK
         # pattern (see google_llm.Gemini.api_client docstring: "subclass Gemini
-        # and override the api_client property"). We cache the client on the
-        # instance to avoid re-instantiating it on every attribute access.
+        # and override the api_client property"). functools.cached_property
+        # avoids re-instantiating the genai.Client on every attribute access.
         api_key_capture = self.api_key
 
         class _GeminiWithKey(Gemini):
             # Tracks google_llm.Gemini.api_client (cached_property on base).
-            # Using functools.cached_property here keeps cost parity with the
-            # base class while injecting our explicit key.
             @functools.cached_property  # type: ignore[misc]
             def api_client(self):
                 from google.genai import Client  # noqa: PLC0415
@@ -4018,8 +4095,8 @@ class GeminiSDKProvider(LLMProvider):
                 tools=[mcp_toolset],
             )
             session_service = InMemorySessionService()
-            # Create the session explicitly — InMemorySessionService does not
-            # auto-create on first run_async call.
+            # InMemorySessionService does not auto-create on first run_async,
+            # so we create the session explicitly first.
             session = await session_service.create_session(
                 app_name="testmcpy",
                 user_id="testmcpy",
@@ -4039,56 +4116,50 @@ class GeminiSDKProvider(LLMProvider):
             # Indexed by function name for response correlation.
             func_responses_by_name: dict[str, Any] = {}
             response_parts: list[str] = []
-            # Accumulate usage across all model-response events (each tool round
-            # trip can produce one; the final synthesis produces another).
+            # Accumulate usage across all model-response events (each tool
+            # round-trip can produce one; the final synthesis produces
+            # another).
             total_prompt_tokens = 0
             total_completion_tokens = 0
             total_tokens = 0
             has_usage = False
 
-            async def _collect_events() -> None:
-                # += rebinds the outer names — nonlocal required.
-                nonlocal has_usage, total_prompt_tokens, total_completion_tokens, total_tokens
-                async for event in runner.run_async(
-                    user_id="testmcpy",
-                    session_id=session.id,
-                    new_message=new_message,
-                ):
-                    # Collect function calls made by the model.
-                    for fc in event.get_function_calls():
-                        tool_calls.append(
-                            {
-                                "name": fc.name,
-                                "arguments": dict(fc.args) if fc.args else {},
-                            }
-                        )
-                    # Collect function responses (already executed by McpToolset)
-                    # so test_runner.py does not re-execute them.
-                    for fr in event.get_function_responses():
-                        func_responses_by_name[fr.name] = fr
-                    # Collect final response text.
-                    if event.is_final_response() and event.content:
-                        for part in event.content.parts or []:
-                            if getattr(part, "text", None):
-                                response_parts.append(part.text)
-                    # Sum usage across every model-response event.
-                    if event.usage_metadata is not None:
-                        has_usage = True
-                        total_prompt_tokens += (
-                            getattr(event.usage_metadata, "prompt_token_count", 0) or 0
-                        )
-                        total_completion_tokens += (
-                            getattr(event.usage_metadata, "candidates_token_count", 0) or 0
-                        )
-                        total_tokens += getattr(event.usage_metadata, "total_token_count", 0) or 0
-
-            # asyncio.wait_for works across Python 3.10+ (asyncio.timeout
-            # was only added in 3.11).
-            await asyncio.wait_for(_collect_events(), timeout=timeout)
+            async for event in runner.run_async(
+                user_id="testmcpy",
+                session_id=session.id,
+                new_message=new_message,
+            ):
+                # Collect function calls made by the model.
+                for fc in event.get_function_calls():
+                    tool_calls.append(
+                        {
+                            "name": fc.name,
+                            "arguments": dict(fc.args) if fc.args else {},
+                        }
+                    )
+                # Collect function responses (already executed by McpToolset)
+                # so test_runner.py does not re-execute them.
+                for fr in event.get_function_responses():
+                    func_responses_by_name[fr.name] = fr
+                # Collect final response text.
+                if event.is_final_response() and event.content:
+                    for part in event.content.parts or []:
+                        if getattr(part, "text", None):
+                            response_parts.append(part.text)
+                # Sum usage across every model-response event.
+                if event.usage_metadata is not None:
+                    has_usage = True
+                    total_prompt_tokens += (
+                        getattr(event.usage_metadata, "prompt_token_count", 0) or 0
+                    )
+                    total_completion_tokens += (
+                        getattr(event.usage_metadata, "candidates_token_count", 0) or 0
+                    )
+                    total_tokens += getattr(event.usage_metadata, "total_token_count", 0) or 0
 
             # Build MCPToolResult objects from ADK function responses so
             # test_runner knows these calls are already executed.
-            mcp_tool_results = []
+            mcp_tool_results: list[MCPToolResult] = []
             for tc in tool_calls:
                 fr = func_responses_by_name.get(tc["name"])
                 if fr is not None:
@@ -4111,62 +4182,21 @@ class GeminiSDKProvider(LLMProvider):
                 else None
             )
 
-            # Estimate cost from token counts using registry pricing.
-            cost = 0.0
-            if token_usage:
-                from .model_registry import get_model  # noqa: PLC0415
-
-                model_info = get_model(self._registry_model_id) or get_model(self.model)
-                if model_info:
-                    cost = (
-                        token_usage["prompt"] * model_info.input_price_per_1m / 1_000_000
-                        + token_usage["completion"] * model_info.output_price_per_1m / 1_000_000
-                    )
-
-            return LLMResult(
-                response=" ".join(response_parts),
+            return SDKRunResult(
+                response_text=" ".join(response_parts),
                 tool_calls=tool_calls,
                 tool_results=mcp_tool_results,
                 token_usage=token_usage,
-                cost=cost,
-                duration=time.time() - start_time,
+                cost=None,  # let the base estimate from registry pricing
                 raw_response={"parts": response_parts},
             )
-
-        except asyncio.TimeoutError:
-            return LLMResult(
-                response=f"Error: GeminiSDK timed out after {timeout}s",
-                tool_calls=[],
-                duration=time.time() - start_time,
-            )
-        except (ConnectionError, TimeoutError, OSError) as e:
-            # Expected network/MCP errors — surface cleanly without traceback.
-            _gemini_sdk_logger.warning("[GeminiSDK] connection error: %s", e)
-            return LLMResult(
-                response=f"Error: {e}",
-                tool_calls=[],
-                duration=time.time() - start_time,
-            )
-        except Exception as e:
-            # Unexpected errors (SDK bugs, event-shape regressions, etc.) — log
-            # with full traceback so they surface in server logs rather than
-            # vanishing as silent 0-score eval failures.
-            _gemini_sdk_logger.exception("[GeminiSDK] generate_with_tools failed: %s", e)
-            return LLMResult(
-                response=f"Error: {e}",
-                tool_calls=[],
-                duration=time.time() - start_time,
-            )
         finally:
-            # Guard cleanup separately so a close() error does not suppress the
-            # LLMResult already returned above.
+            # Guard cleanup separately so a close() error does not suppress
+            # the SDKRunResult / exception already in flight.
             try:
                 await mcp_toolset.close()
             except Exception:
-                _gemini_sdk_logger.debug("[GeminiSDK] mcp_toolset.close() raised", exc_info=True)
-
-    async def close(self) -> None:
-        """No persistent connections to close (MCP session is per-request)."""
+                self._logger.debug("mcp_toolset.close() raised", exc_info=True)
 
 
 def create_llm_provider(provider: str, model: str, **kwargs) -> LLMProvider:

@@ -4039,7 +4039,7 @@ class GeminiSDKProvider(LLMProvider):
             total_tokens = 0
             has_usage = False
 
-            async with asyncio.timeout(timeout):
+            async def _collect_events() -> None:
                 async for event in runner.run_async(
                     user_id="testmcpy",
                     session_id=session.id,
@@ -4072,6 +4072,10 @@ class GeminiSDKProvider(LLMProvider):
                             getattr(event.usage_metadata, "candidates_token_count", 0) or 0
                         )
                         total_tokens += getattr(event.usage_metadata, "total_token_count", 0) or 0
+
+            # asyncio.wait_for works across Python 3.10+ (asyncio.timeout
+            # was only added in 3.11).
+            await asyncio.wait_for(_collect_events(), timeout=timeout)
 
             # Build MCPToolResult objects from ADK function responses so
             # test_runner knows these calls are already executed.

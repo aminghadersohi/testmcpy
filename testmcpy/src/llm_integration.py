@@ -103,6 +103,26 @@ class LLMProvider(ABC):
         pass
 
 
+def _estimate_cost_from_registry(
+    model: str,
+    prompt_tokens: int,
+    completion_tokens: int,
+    fallback_input_per_1m: float,
+    fallback_output_per_1m: float,
+) -> float:
+    """Estimate cost in USD from model-registry pricing.
+
+    Falls back to the caller-supplied per-1M rates when the model is not in
+    the registry, so unknown/custom models keep their previous estimates.
+    """
+    from .model_registry import get_model  # noqa: PLC0415
+
+    info = get_model(model)
+    in_rate = info.input_price_per_1m if info else fallback_input_per_1m
+    out_rate = info.output_price_per_1m if info else fallback_output_per_1m
+    return (prompt_tokens * in_rate + completion_tokens * out_rate) / 1_000_000
+
+
 class OllamaProvider(LLMProvider):
     """Ollama provider for local models."""
 
@@ -481,8 +501,13 @@ class OpenAIProvider(LLMProvider):
                 "total": usage.get("total_tokens", 0),
             }
 
-            # Estimate cost (GPT-4 pricing as example)
-            cost = (token_usage["prompt"] * 0.03 + token_usage["completion"] * 0.06) / 1000
+            cost = _estimate_cost_from_registry(
+                self.model,
+                token_usage["prompt"],
+                token_usage["completion"],
+                fallback_input_per_1m=30.0,
+                fallback_output_per_1m=60.0,
+            )
 
             duration = time.time() - start_time
             tti_ms = int(duration * 1000)  # Non-streaming: TTI = total duration
@@ -609,8 +634,14 @@ class OpenRouterProvider(OpenAIProvider):
             if "usage" in result and "cost" in result["usage"]:
                 cost = float(result["usage"]["cost"])
             else:
-                # Fallback estimate
-                cost = (token_usage["prompt"] * 0.03 + token_usage["completion"] * 0.06) / 1000
+                # Fallback estimate when OpenRouter omits usage cost
+                cost = _estimate_cost_from_registry(
+                    self.model,
+                    token_usage["prompt"],
+                    token_usage["completion"],
+                    fallback_input_per_1m=30.0,
+                    fallback_output_per_1m=60.0,
+                )
 
             duration = time.time() - start_time
             tti_ms = int(duration * 1000)
@@ -1080,8 +1111,13 @@ class AnthropicProvider(LLMProvider):
                 "cache_read": usage.get("cache_read_input_tokens", 0),
             }
 
-            # Estimate cost (Claude pricing)
-            cost = (token_usage["prompt"] * 0.003 + token_usage["completion"] * 0.015) / 1000
+            cost = _estimate_cost_from_registry(
+                self.model,
+                token_usage["prompt"],
+                token_usage["completion"],
+                fallback_input_per_1m=3.0,
+                fallback_output_per_1m=15.0,
+            )
 
             duration = time.time() - start_time
             # For non-streaming, TTI equals total duration (response arrives all at once)
@@ -1133,6 +1169,16 @@ class AnthropicProvider(LLMProvider):
 
 
 _bedrock_logger = logging.getLogger(__name__ + ".BedrockProvider")
+
+
+def _normalize_bedrock_model_id(model: str) -> str:
+    """Map a Bedrock model id to its model-registry equivalent.
+
+    e.g. ``us.anthropic.claude-sonnet-4-20250514-v1:0`` → ``claude-sonnet-4-20250514``.
+    """
+    normalized = re.sub(r"^(us|eu|apac)\.", "", model)
+    normalized = re.sub(r"^anthropic\.", "", normalized)
+    return re.sub(r"-v\d+(:\d+)?$", "", normalized)
 
 
 class BedrockProvider(LLMProvider):
@@ -1310,8 +1356,13 @@ class BedrockProvider(LLMProvider):
                 "total": usage.input_tokens + usage.output_tokens,
             }
 
-            # Bedrock pricing (Sonnet 4.5: $3/$15 per 1M tokens)
-            cost = (token_usage["prompt"] * 0.003 + token_usage["completion"] * 0.015) / 1000
+            cost = _estimate_cost_from_registry(
+                _normalize_bedrock_model_id(self.model),
+                token_usage["prompt"],
+                token_usage["completion"],
+                fallback_input_per_1m=3.0,
+                fallback_output_per_1m=15.0,
+            )
 
             duration = time.time() - start_time
             tti_ms = int(duration * 1000)
@@ -3319,8 +3370,13 @@ class GeminiProvider(LLMProvider):
                 "total": usage_metadata.get("totalTokenCount", 0),
             }
 
-            # Estimate cost (Gemini Pro pricing)
-            cost = (token_usage["prompt"] * 0.00025 + token_usage["completion"] * 0.0005) / 1000
+            cost = _estimate_cost_from_registry(
+                self.model,
+                token_usage["prompt"],
+                token_usage["completion"],
+                fallback_input_per_1m=0.25,
+                fallback_output_per_1m=0.50,
+            )
 
             duration = time.time() - start_time
             tti_ms = int(duration * 1000)  # Non-streaming: TTI = total duration

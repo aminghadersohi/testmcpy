@@ -35,6 +35,7 @@ import { useEditorTheme } from '../hooks/useEditorTheme'
 import StreamingLogViewer from '../components/StreamingLogViewer'
 import EditorStatusBar from '../components/EditorStatusBar'
 import EditorTabStrip from '../components/EditorTabStrip'
+import { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts'
 
 // Parse top-level `provider:` and `model:` declarations from a YAML test
 // suite. These are the suite-level overrides that run.py / websocket.py
@@ -487,8 +488,10 @@ function TestManager({ selectedProfiles = [], selectedLlmProfile = null, llmProf
   // directoryRunProgress moved to TestRunContext (SC-108184) so a reload
   // mid-batch can reattach via the persisted currentRunId.
   const [resultsHistory, setResultsHistory] = useState([])
-  const [showHistory, setShowHistory] = useState(false)
   const [selectedHistoryRun, setSelectedHistoryRun] = useState(null)
+  const [expandedRunId, setExpandedRunId] = useState(null)
+  const [expandedRunDetails, setExpandedRunDetails] = useState({})
+  const [loadingRunId, setLoadingRunId] = useState(null)
   const [historyFilterQuery, setHistoryFilterQuery] = useState('')
   const [historyProviderFilter, setHistoryProviderFilter] = useState(null) // null = all
   const [historyFailedOnly, setHistoryFailedOnly] = useState(false)
@@ -771,6 +774,58 @@ function TestManager({ selectedProfiles = [], selectedLlmProfile = null, llmProf
       (a, b) => new Date(a.timestamp) - new Date(b.timestamp),
     )
   }, [filteredHistory])
+
+  // Dashboard metrics computed from history — no extra API call needed
+  const dashboardData = useMemo(() => {
+    if (!resultsHistory.length) return { chartData: [], stats: null, modelBreakdown: [] }
+    const chrono = [...resultsHistory].sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp))
+    const last20 = chrono.slice(-20)
+    const chartData = last20.map(r => ({
+      date: r.timestamp ? r.timestamp.slice(5, 10) : '',
+      pass_rate: Math.round((r.pass_rate ?? 0) * 100),
+      cost: parseFloat((r.total_cost ?? 0).toFixed(4)),
+      duration: parseFloat((r.total_duration ?? 0).toFixed(1)),
+    }))
+    const n = resultsHistory.length
+    const avgPassRate = Math.round(resultsHistory.reduce((s, r) => s + (r.pass_rate ?? 0), 0) / n * 100)
+    const avgCost = resultsHistory.reduce((s, r) => s + (r.total_cost ?? 0), 0) / n
+    const modelMap = {}
+    for (const r of resultsHistory) {
+      const key = `${r.provider}||${r.model}`
+      if (!modelMap[key]) modelMap[key] = { provider: r.provider, model: r.model, runs: 0, totalPass: 0, totalCost: 0 }
+      modelMap[key].runs++
+      modelMap[key].totalPass += (r.pass_rate ?? 0)
+      modelMap[key].totalCost += (r.total_cost ?? 0)
+    }
+    const modelBreakdown = Object.values(modelMap).map(m => ({
+      provider: m.provider,
+      model: m.model,
+      runs: m.runs,
+      avgPassRate: Math.round(m.totalPass / m.runs * 100),
+      avgCost: m.totalCost / m.runs,
+    })).sort((a, b) => b.runs - a.runs)
+    return { chartData, stats: { totalRuns: n, avgPassRate, avgCost }, modelBreakdown }
+  }, [resultsHistory])
+
+  // Expand a history row inline, fetching full run details on demand
+  const expandRunDetails = async (runId) => {
+    if (expandedRunId === runId) { setExpandedRunId(null); return }
+    setExpandedRunId(runId)
+    if (!expandedRunDetails[runId]) {
+      setLoadingRunId(runId)
+      try {
+        const res = await fetch(`/api/results/run/${encodeURIComponent(runId)}`)
+        if (res.ok) {
+          const data = await res.json()
+          setExpandedRunDetails(prev => ({ ...prev, [runId]: data }))
+        }
+      } catch (e) {
+        console.error('Failed to load run details', e)
+      } finally {
+        setLoadingRunId(null)
+      }
+    }
+  }
 
   const toggleHistorySort = (key) => {
     setHistorySort((prev) =>
@@ -1202,6 +1257,15 @@ tests:
     )
   }
 
+  // Auto-switch to dashboard when a new file is selected (not mid-run)
+  useEffect(() => {
+    if (selectedFile && !running) {
+      setBottomPanelTab('dashboard')
+      setExpandedRunId(null)
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedFile?.relative_path, selectedFile?.filename])
+
   // Switch to results tab when tests complete
   useEffect(() => {
     if (runningTests.status === 'completed' && testResults) {
@@ -1624,17 +1688,6 @@ tests:
                       <span>{stopping ? 'Stopping…' : 'Stop'}</span>
                     </button>
                   )}
-                  {resultsHistory.length > 0 && (
-                    <button
-                      onClick={() => setShowHistory(!showHistory)}
-                      className={`btn ${showHistory ? 'btn-primary' : 'btn-ghost'} text-sm`}
-                      title="View test run history"
-                    >
-                      <History size={14} />
-                      <span>History</span>
-                      <span className="px-1.5 py-0.5 rounded bg-surface text-[10px]">{resultsHistory.length}</span>
-                    </button>
-                  )}
                 </div>
 
                 {selectedLlmProfile && llmProfiles.length > 0 && (() => {
@@ -1738,8 +1791,8 @@ tests:
                 />
               </div>
 
-              {/* Bottom Panel - Resizable via drag handle */}
-              {(running || streamingLogs.length > 0 || testResults || pinnedHistoryRun) && (
+              {/* Bottom Panel - always visible when a file is open */}
+              {(running || streamingLogs.length > 0 || testResults || pinnedHistoryRun || resultsHistory.length > 0 || true) && (
                 <>
                 {/* Drag handle */}
                 <div
@@ -1789,9 +1842,39 @@ tests:
                         </button>
                       )
                     })()}
+                    {/* Dashboard Tab */}
+                    <button
+                      className={`px-3 py-2 text-xs font-medium flex items-center gap-2 border-b-2 transition-colors ${
+                        bottomPanelTab === 'dashboard'
+                          ? 'border-primary text-primary'
+                          : 'border-transparent text-text-tertiary hover:text-text-secondary'
+                      }`}
+                      onClick={() => setBottomPanelTab('dashboard')}
+                    >
+                      <TrendingUp size={12} />
+                      <span>Dashboard</span>
+                      {resultsHistory.length > 0 && (
+                        <span className="px-1.5 py-0.5 rounded bg-surface text-[10px]">{resultsHistory.length}</span>
+                      )}
+                    </button>
+                    {/* History Tab */}
+                    <button
+                      className={`px-3 py-2 text-xs font-medium flex items-center gap-2 border-b-2 transition-colors ${
+                        bottomPanelTab === 'history'
+                          ? 'border-primary text-primary'
+                          : 'border-transparent text-text-tertiary hover:text-text-secondary'
+                      }`}
+                      onClick={() => setBottomPanelTab('history')}
+                    >
+                      <History size={12} />
+                      <span>History</span>
+                      {resultsHistory.length > 0 && (
+                        <span className="px-1.5 py-0.5 rounded bg-surface text-[10px]">{resultsHistory.length}</span>
+                      )}
+                    </button>
                     {/* Spacer */}
                     <div className="flex-1" />
-                    {/* Clear/Close buttons */}
+                    {/* Clear logs button */}
                     {bottomPanelTab === 'logs' && !running && streamingLogs.length > 0 && (
                       <button
                         onClick={clearLogs}
@@ -1800,112 +1883,363 @@ tests:
                         Clear
                       </button>
                     )}
-                    <button
-                      onClick={() => { clearResults(); setPinnedHistoryRun(null); setBottomPanelTab('logs'); }}
-                      className="p-1.5 text-text-tertiary hover:text-text-primary hover:bg-surface-hover rounded transition-colors"
-                      title="Close panel"
-                    >
-                      <X size={14} />
-                    </button>
                   </div>
 
                   {/* Panel Content */}
                   <div className="flex-1 overflow-hidden">
-                    {/* Show content based on selected tab */}
-                    {bottomPanelTab === 'results' && (pinnedHistoryRun || testResults) ? (
-                      /* Results Content */
-                      (() => {
-                        const displayResults = pinnedHistoryRun || testResults
-                        return (
-                      <div className="h-full flex flex-col">
-                        {/* Pinned-history banner — only shown when viewing a historical run */}
-                        {pinnedHistoryRun && (
-                          <div className="px-4 py-2 flex items-center gap-3 text-xs bg-primary/10 border-b border-primary/20">
-                            <History size={12} className="text-primary flex-shrink-0" />
-                            <span className="text-text-secondary">
-                              Viewing historical run from{' '}
-                              <span className="text-text-primary font-medium">
-                                {pinnedHistoryRun.metadata?.timestamp
-                                  ? new Date(pinnedHistoryRun.metadata.timestamp).toLocaleString()
-                                  : 'unknown date'}
-                              </span>
-                              {pinnedHistoryRun.metadata?.provider && (
-                                <> · <span className="text-text-tertiary">{pinnedHistoryRun.metadata.provider}</span></>
-                              )}
-                              {pinnedHistoryRun.metadata?.model && (
-                                <> · <span className="text-text-tertiary font-mono">{pinnedHistoryRun.metadata.model}</span></>
-                              )}
-                            </span>
-                            <span className="flex-1" />
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setPinnedHistoryRun(null)
-                                // If there's no live testResults to fall back
-                                // to, the Results tab disappears — bounce to
-                                // Logs so we don't leave the panel orphaned
-                                // with no tab highlighted.
-                                if (!testResults) setBottomPanelTab('logs')
-                              }}
-                              className="px-2 py-0.5 rounded text-[11px] text-primary hover:bg-primary/20 transition"
-                            >
-                              Unpin
-                            </button>
+                    {/* Dashboard Tab */}
+                    {bottomPanelTab === 'dashboard' && (
+                      <div className="h-full overflow-auto p-4">
+                        {!dashboardData.stats ? (
+                          <div className="flex items-center justify-center h-full text-text-tertiary text-sm">
+                            No run history yet — run this test file to see insights here.
+                          </div>
+                        ) : (
+                          <div className="space-y-4">
+                            {/* Stats row */}
+                            <div className="grid grid-cols-3 gap-3">
+                              <div className="bg-surface-elevated rounded-lg p-3 border border-border">
+                                <div className="text-xs text-text-tertiary mb-1">Total Runs</div>
+                                <div className="text-xl font-bold text-text-primary">{dashboardData.stats.totalRuns}</div>
+                              </div>
+                              <div className="bg-surface-elevated rounded-lg p-3 border border-border">
+                                <div className="text-xs text-text-tertiary mb-1">Avg Pass Rate</div>
+                                <div className={`text-xl font-bold ${dashboardData.stats.avgPassRate >= 80 ? 'text-green-400' : dashboardData.stats.avgPassRate >= 50 ? 'text-yellow-400' : 'text-red-400'}`}>
+                                  {dashboardData.stats.avgPassRate}%
+                                </div>
+                              </div>
+                              <div className="bg-surface-elevated rounded-lg p-3 border border-border">
+                                <div className="text-xs text-text-tertiary mb-1">Avg Cost/Run</div>
+                                <div className="text-xl font-bold text-text-primary font-mono">${dashboardData.stats.avgCost.toFixed(4)}</div>
+                              </div>
+                            </div>
+
+                            {/* Pass Rate chart */}
+                            <div className="bg-surface-elevated rounded-lg p-3 border border-border">
+                              <div className="text-xs font-medium text-text-secondary mb-2">Pass Rate Over Time (last 20 runs)</div>
+                              <ResponsiveContainer width="100%" height={120}>
+                                <LineChart data={dashboardData.chartData} margin={{ top: 4, right: 8, left: -20, bottom: 0 }}>
+                                  <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" />
+                                  <XAxis dataKey="date" tick={{ fontSize: 10 }} stroke="rgba(255,255,255,0.2)" />
+                                  <YAxis domain={[0, 100]} tick={{ fontSize: 10 }} stroke="rgba(255,255,255,0.2)" />
+                                  <Tooltip
+                                    contentStyle={{ background: '#1e1e2e', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 6, fontSize: 11 }}
+                                    formatter={(v) => [`${v}%`, 'Pass Rate']}
+                                  />
+                                  <Line type="monotone" dataKey="pass_rate" stroke="#4ade80" strokeWidth={2} dot={{ r: 3, fill: '#4ade80' }} />
+                                </LineChart>
+                              </ResponsiveContainer>
+                            </div>
+
+                            {/* Cost + Duration charts */}
+                            <div className="grid grid-cols-2 gap-3">
+                              <div className="bg-surface-elevated rounded-lg p-3 border border-border">
+                                <div className="text-xs font-medium text-text-secondary mb-2">Cost per Run ($)</div>
+                                <ResponsiveContainer width="100%" height={90}>
+                                  <BarChart data={dashboardData.chartData} margin={{ top: 2, right: 4, left: -24, bottom: 0 }}>
+                                    <XAxis dataKey="date" tick={{ fontSize: 9 }} stroke="rgba(255,255,255,0.2)" />
+                                    <YAxis tick={{ fontSize: 9 }} stroke="rgba(255,255,255,0.2)" />
+                                    <Tooltip contentStyle={{ background: '#1e1e2e', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 6, fontSize: 11 }} formatter={(v) => [`$${v}`, 'Cost']} />
+                                    <Bar dataKey="cost" fill="#60a5fa" radius={[2, 2, 0, 0]} />
+                                  </BarChart>
+                                </ResponsiveContainer>
+                              </div>
+                              <div className="bg-surface-elevated rounded-lg p-3 border border-border">
+                                <div className="text-xs font-medium text-text-secondary mb-2">Duration per Run (s)</div>
+                                <ResponsiveContainer width="100%" height={90}>
+                                  <BarChart data={dashboardData.chartData} margin={{ top: 2, right: 4, left: -24, bottom: 0 }}>
+                                    <XAxis dataKey="date" tick={{ fontSize: 9 }} stroke="rgba(255,255,255,0.2)" />
+                                    <YAxis tick={{ fontSize: 9 }} stroke="rgba(255,255,255,0.2)" />
+                                    <Tooltip contentStyle={{ background: '#1e1e2e', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 6, fontSize: 11 }} formatter={(v) => [`${v}s`, 'Duration']} />
+                                    <Bar dataKey="duration" fill="#f59e0b" radius={[2, 2, 0, 0]} />
+                                  </BarChart>
+                                </ResponsiveContainer>
+                              </div>
+                            </div>
+
+                            {/* Model breakdown */}
+                            {dashboardData.modelBreakdown.length > 0 && (
+                              <div className="bg-surface-elevated rounded-lg border border-border overflow-hidden">
+                                <div className="px-3 py-2 text-xs font-medium text-text-secondary border-b border-border">Model Breakdown</div>
+                                <table className="w-full text-xs">
+                                  <thead>
+                                    <tr className="border-b border-border">
+                                      <th className="text-left py-1.5 px-3 text-text-tertiary font-medium">Provider</th>
+                                      <th className="text-left py-1.5 px-3 text-text-tertiary font-medium">Model</th>
+                                      <th className="text-center py-1.5 px-3 text-text-tertiary font-medium">Runs</th>
+                                      <th className="text-center py-1.5 px-3 text-text-tertiary font-medium">Avg Pass</th>
+                                      <th className="text-right py-1.5 px-3 text-text-tertiary font-medium">Avg Cost</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {dashboardData.modelBreakdown.map((m, i) => (
+                                      <tr key={i} className="border-b border-border/30 hover:bg-surface-hover">
+                                        <td className="py-1.5 px-3"><span className="px-1.5 py-0.5 rounded text-[10px] bg-blue-500/20 text-blue-400">{m.provider}</span></td>
+                                        <td className="py-1.5 px-3 font-mono text-text-secondary truncate max-w-[140px]" title={m.model}>{m.model?.split('-').slice(-2).join('-') || m.model}</td>
+                                        <td className="py-1.5 px-3 text-center text-text-secondary">{m.runs}</td>
+                                        <td className="py-1.5 px-3 text-center">
+                                          <span className={`font-semibold ${m.avgPassRate >= 80 ? 'text-green-400' : m.avgPassRate >= 50 ? 'text-yellow-400' : 'text-red-400'}`}>{m.avgPassRate}%</span>
+                                        </td>
+                                        <td className="py-1.5 px-3 text-right font-mono text-text-tertiary">${m.avgCost.toFixed(4)}</td>
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                              </div>
+                            )}
                           </div>
                         )}
-                        {/* Results Summary Bar */}
-                        <div className="px-4 py-2 bg-surface-elevated/50 flex items-center gap-6 text-xs border-b border-border/50">
-                          <div className="flex items-center gap-2">
-                            <div className="w-2 h-2 rounded-full bg-green-500"></div>
-                            <span className="text-text-tertiary">Passed:</span>
-                            <span className="font-semibold text-green-400">{displayResults.summary.passed}</span>
+                      </div>
+                    )}
+
+                    {/* History Tab */}
+                    {bottomPanelTab === 'history' && (
+                      <div className="h-full flex flex-col overflow-hidden">
+                        {resultsHistory.length === 0 ? (
+                          <div className="flex items-center justify-center h-full text-text-tertiary text-sm">
+                            No run history yet for this test file.
                           </div>
-                          <div className="flex items-center gap-2">
-                            <div className="w-2 h-2 rounded-full bg-red-500"></div>
-                            <span className="text-text-tertiary">Failed:</span>
-                            <span className="font-semibold text-red-400">{displayResults.summary.failed}</span>
-                          </div>
-                          {/* Live and historical responses use different cost field
-                              names. Live: summary.total_cost. Historical (from
-                              /api/results/run/{id}): summary.total_cost_usd or
-                              metadata.total_cost — see server/routers/results.py. */}
-                          {(() => {
-                            const cost =
-                              displayResults.summary?.total_cost ??
-                              displayResults.summary?.total_cost_usd ??
-                              displayResults.metadata?.total_cost ??
-                              0
-                            return cost > 0 ? (
-                              <div className="flex items-center gap-2">
-                                <span className="text-text-tertiary">Cost:</span>
-                                <span className="font-mono text-text-secondary">${cost.toFixed(4)}</span>
-                              </div>
-                            ) : null
-                          })()}
-                        </div>
-                        {/* Results List */}
-                        <div className="flex-1 overflow-auto p-3">
-                          {displayResults.results && displayResults.results.length > 0 ? (
-                            <div className="space-y-2">
-                              {displayResults.results.map((result, idx) => (
-                                <TestResultPanel
-                                  key={idx}
-                                  result={result}
-                                  initialExpanded={!result.passed}
+                        ) : (
+                          <>
+                            {/* Filter row */}
+                            <div className="flex-shrink-0 flex items-center gap-2 px-3 py-1.5 bg-surface border-b border-border">
+                              <div className="relative flex-1 max-w-sm">
+                                <Search size={12} className="absolute left-2 top-1/2 -translate-y-1/2 text-text-disabled pointer-events-none" />
+                                <input
+                                  type="text"
+                                  value={historyFilterQuery}
+                                  onChange={(e) => setHistoryFilterQuery(e.target.value)}
+                                  placeholder="Filter runs (provider, model, run id)…"
+                                  className="w-full pl-7 pr-2 py-1 text-xs rounded bg-surface-elevated border border-border focus:border-primary focus:outline-none text-text-primary placeholder:text-text-disabled"
                                 />
+                              </div>
+                              {historyProviders.length > 1 && historyProviders.map((p) => (
+                                <button key={p} type="button" onClick={() => setHistoryProviderFilter((cur) => (cur === p ? null : p))}
+                                  className={`px-1.5 py-0.5 rounded text-[10px] transition ${historyProviderFilter === p ? 'bg-primary/20 text-primary border border-primary/40' : 'bg-surface-elevated text-text-tertiary border border-border hover:text-text-secondary'}`}>
+                                  {p}
+                                </button>
                               ))}
+                              <label className="inline-flex items-center gap-1.5 text-[11px] text-text-tertiary cursor-pointer select-none">
+                                <input type="checkbox" checked={historyFailedOnly} onChange={(e) => setHistoryFailedOnly(e.target.checked)} className="accent-primary" />
+                                Failed only
+                              </label>
+                              <span className="text-[10px] text-text-disabled">{filteredHistory.length} / {resultsHistory.length}</span>
+                              {historySelectMode && selectedRunIds.size > 0 && (
+                                <button
+                                  onClick={async () => {
+                                    if (!confirm(`Delete ${selectedRunIds.size} run${selectedRunIds.size > 1 ? 's' : ''}?`)) return
+                                    const ids = Array.from(selectedRunIds)
+                                    try {
+                                      const res = await fetch('/api/results/runs/bulk-delete', {
+                                        method: 'POST',
+                                        headers: { 'Content-Type': 'application/json' },
+                                        body: JSON.stringify({ run_ids: ids }),
+                                      })
+                                      if (!res.ok) { alert('Delete failed'); return }
+                                      const { run_ids: deletedIds } = await res.json()
+                                      const deletedSet = new Set(deletedIds)
+                                      if (pinnedHistoryRun?.metadata?.run_id && deletedSet.has(pinnedHistoryRun.metadata.run_id)) setPinnedHistoryRun(null)
+                                      setSelectedRunIds(new Set())
+                                      setHistorySelectMode(false)
+                                      const testFile = selectedFile?.relative_path || selectedFile?.filename
+                                      if (testFile) loadResultsHistory(testFile)
+                                    } catch (e) { alert('Failed to delete selected runs') }
+                                  }}
+                                  className="px-2 py-1 text-xs rounded bg-error/20 text-error hover:bg-error/30 transition-colors"
+                                >
+                                  Delete {selectedRunIds.size}
+                                </button>
+                              )}
+                              <button
+                                onClick={() => { setHistorySelectMode(prev => !prev); setSelectedRunIds(new Set()) }}
+                                className={`px-2 py-1 text-xs rounded transition-colors ${historySelectMode ? 'bg-primary/20 text-primary' : 'bg-surface text-text-tertiary hover:text-text-primary hover:bg-surface-hover'}`}
+                              >
+                                {historySelectMode ? 'Cancel' : 'Select'}
+                              </button>
                             </div>
-                          ) : (
-                            <div className="text-center py-4 text-text-tertiary text-sm">
-                              No test results available
+
+                            {/* Run list with expandable details */}
+                            <div className="flex-1 overflow-auto">
+                              <table className="w-full text-xs">
+                                <thead className="sticky top-0 bg-surface-elevated z-10">
+                                  <tr className="border-b border-border">
+                                    {historySelectMode && (
+                                      <th className="py-2 px-3">
+                                        <input type="checkbox" className="accent-primary"
+                                          checked={filteredHistory.length > 0 && filteredHistory.every(r => selectedRunIds.has(r.run_id))}
+                                          onChange={(e) => { if (e.target.checked) { setSelectedRunIds(new Set(filteredHistory.map(r => r.run_id))) } else { setSelectedRunIds(new Set()) } }}
+                                        />
+                                      </th>
+                                    )}
+                                    <SortableTH sortKey="timestamp" align="left" sort={historySort} onSort={toggleHistorySort}>Date</SortableTH>
+                                    <th className="text-left py-2 px-3 text-text-tertiary font-medium">Provider</th>
+                                    <th className="text-left py-2 px-3 text-text-tertiary font-medium">Model</th>
+                                    <SortableTH sortKey="pass" align="center" sort={historySort} onSort={toggleHistorySort}>Pass</SortableTH>
+                                    <SortableTH sortKey="cost" align="right" sort={historySort} onSort={toggleHistorySort}>Cost</SortableTH>
+                                    <SortableTH sortKey="duration" align="right" sort={historySort} onSort={toggleHistorySort}>Time</SortableTH>
+                                    <th className="py-2 px-3 w-6" />
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {filteredHistory.map((run, idx) => {
+                                    const isPinned = pinnedHistoryRun?.metadata?.run_id === run.run_id
+                                    const isSelected = selectedRunIds.has(run.run_id)
+                                    const isExpanded = expandedRunId === run.run_id
+                                    const isLoading = loadingRunId === run.run_id
+                                    const details = expandedRunDetails[run.run_id]
+                                    return (
+                                      <React.Fragment key={run.run_id || idx}>
+                                        <tr
+                                          className={`border-b border-border/30 cursor-pointer transition-colors ${isSelected ? 'bg-primary/10' : isPinned ? 'bg-primary/15' : isExpanded ? 'bg-surface-elevated' : 'hover:bg-surface-hover'}`}
+                                          onClick={() => {
+                                            if (historySelectMode) {
+                                              setSelectedRunIds(prev => { const n = new Set(prev); n.has(run.run_id) ? n.delete(run.run_id) : n.add(run.run_id); return n })
+                                            } else {
+                                              expandRunDetails(run.run_id)
+                                            }
+                                          }}
+                                        >
+                                          {historySelectMode && (
+                                            <td className="py-2 px-3" onClick={e => e.stopPropagation()}>
+                                              <input type="checkbox" className="accent-primary" checked={isSelected}
+                                                onChange={() => setSelectedRunIds(prev => { const n = new Set(prev); n.has(run.run_id) ? n.delete(run.run_id) : n.add(run.run_id); return n })}
+                                              />
+                                            </td>
+                                          )}
+                                          <td className="py-2 px-3 text-text-secondary">
+                                            {new Date(run.timestamp).toLocaleDateString()} {new Date(run.timestamp).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
+                                          </td>
+                                          <td className="py-2 px-3">
+                                            <span className="px-1.5 py-0.5 rounded text-[10px] bg-blue-500/20 text-blue-400">{run.provider}</span>
+                                          </td>
+                                          <td className="py-2 px-3 text-text-secondary font-mono truncate max-w-[120px]" title={run.model}>
+                                            {run.model?.split('-').slice(-2).join('-') || run.model}
+                                          </td>
+                                          <td className="py-2 px-3 text-center">
+                                            <span className={`font-semibold ${run.pass_rate === 1 ? 'text-green-400' : run.pass_rate >= 0.5 ? 'text-yellow-400' : 'text-red-400'}`}>
+                                              {run.passed}/{run.total}
+                                            </span>
+                                          </td>
+                                          <td className="py-2 px-3 text-right text-text-tertiary font-mono">${run.total_cost?.toFixed(4) || '0.00'}</td>
+                                          <td className="py-2 px-3 text-right text-text-tertiary">{run.total_duration?.toFixed(1)}s</td>
+                                          <td className="py-2 px-3 text-center text-text-disabled">
+                                            {isLoading ? <Loader2 size={12} className="animate-spin inline" /> : isExpanded ? <ChevronUp size={12} className="inline text-primary" /> : <ChevronDown size={12} className="inline" />}
+                                          </td>
+                                        </tr>
+                                        {/* Expanded run details */}
+                                        {isExpanded && (
+                                          <tr className="border-b border-border/30">
+                                            <td colSpan={historySelectMode ? 8 : 7} className="p-0">
+                                              <div className="bg-surface-elevated/40 border-l-2 border-primary px-4 py-3">
+                                                {isLoading ? (
+                                                  <div className="flex items-center gap-2 text-text-tertiary text-xs py-2">
+                                                    <Loader2 size={14} className="animate-spin" /> Loading run details…
+                                                  </div>
+                                                ) : details ? (
+                                                  <div>
+                                                    {/* Summary strip */}
+                                                    <div className="flex items-center gap-4 text-xs text-text-tertiary mb-3 pb-2 border-b border-border/50">
+                                                      <span className="font-medium text-text-secondary">{new Date(run.timestamp).toLocaleString()}</span>
+                                                      <span><span className="text-green-400 font-semibold">{details.summary?.passed ?? run.passed}</span> passed</span>
+                                                      <span><span className="text-red-400 font-semibold">{details.summary?.failed ?? (run.total - run.passed)}</span> failed</span>
+                                                      {(() => {
+                                                        const cost = details.summary?.total_cost ?? details.summary?.total_cost_usd ?? details.metadata?.total_cost ?? 0
+                                                        return cost > 0 ? <span className="font-mono">${cost.toFixed(4)}</span> : null
+                                                      })()}
+                                                      <button
+                                                        type="button"
+                                                        onClick={(e) => { e.stopPropagation(); pinHistoryRun(run.run_id); setBottomPanelTab('results') }}
+                                                        className="ml-auto px-2 py-0.5 rounded text-[11px] text-primary hover:bg-primary/20 border border-primary/30 transition"
+                                                      >
+                                                        View in Results tab →
+                                                      </button>
+                                                    </div>
+                                                    {/* TestResultPanel cards */}
+                                                    <div className="space-y-2">
+                                                      {details.results?.map((result, i) => (
+                                                        <TestResultPanel key={i} result={result} initialExpanded={!result.passed} />
+                                                      ))}
+                                                    </div>
+                                                  </div>
+                                                ) : (
+                                                  <div className="text-xs text-text-tertiary py-2">Failed to load run details.</div>
+                                                )}
+                                              </div>
+                                            </td>
+                                          </tr>
+                                        )}
+                                      </React.Fragment>
+                                    )
+                                  })}
+                                </tbody>
+                              </table>
+                            </div>
+                          </>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Results Tab */}
+                    {bottomPanelTab === 'results' && (pinnedHistoryRun || testResults) && (() => {
+                      const displayResults = pinnedHistoryRun || testResults
+                      return (
+                        <div className="h-full flex flex-col">
+                          {pinnedHistoryRun && (
+                            <div className="px-4 py-2 flex items-center gap-3 text-xs bg-primary/10 border-b border-primary/20">
+                              <History size={12} className="text-primary flex-shrink-0" />
+                              <span className="text-text-secondary">
+                                Viewing historical run from{' '}
+                                <span className="text-text-primary font-medium">
+                                  {pinnedHistoryRun.metadata?.timestamp ? new Date(pinnedHistoryRun.metadata.timestamp).toLocaleString() : 'unknown date'}
+                                </span>
+                                {pinnedHistoryRun.metadata?.provider && <> · <span className="text-text-tertiary">{pinnedHistoryRun.metadata.provider}</span></>}
+                                {pinnedHistoryRun.metadata?.model && <> · <span className="text-text-tertiary font-mono">{pinnedHistoryRun.metadata.model}</span></>}
+                              </span>
+                              <span className="flex-1" />
+                              <button type="button" onClick={() => { setPinnedHistoryRun(null); if (!testResults) setBottomPanelTab('dashboard') }}
+                                className="px-2 py-0.5 rounded text-[11px] text-primary hover:bg-primary/20 transition">Unpin</button>
                             </div>
                           )}
+                          <div className="px-4 py-2 bg-surface-elevated/50 flex items-center gap-6 text-xs border-b border-border/50">
+                            <div className="flex items-center gap-2">
+                              <div className="w-2 h-2 rounded-full bg-green-500" />
+                              <span className="text-text-tertiary">Passed:</span>
+                              <span className="font-semibold text-green-400">{displayResults.summary.passed}</span>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <div className="w-2 h-2 rounded-full bg-red-500" />
+                              <span className="text-text-tertiary">Failed:</span>
+                              <span className="font-semibold text-red-400">{displayResults.summary.failed}</span>
+                            </div>
+                            {(() => {
+                              const cost = displayResults.summary?.total_cost ?? displayResults.summary?.total_cost_usd ?? displayResults.metadata?.total_cost ?? 0
+                              return cost > 0 ? <div className="flex items-center gap-2"><span className="text-text-tertiary">Cost:</span><span className="font-mono text-text-secondary">${cost.toFixed(4)}</span></div> : null
+                            })()}
+                          </div>
+                          <div className="flex-1 overflow-auto p-3">
+                            {displayResults.results?.length > 0 ? (
+                              <div className="space-y-2">
+                                {displayResults.results.map((result, idx) => (
+                                  <TestResultPanel key={idx} result={result} initialExpanded={!result.passed} />
+                                ))}
+                              </div>
+                            ) : (
+                              <div className="text-center py-4 text-text-tertiary text-sm">No test results available</div>
+                            )}
+                          </div>
                         </div>
+                      )
+                    })()}
+
+                    {/* Results Tab — empty state */}
+                    {bottomPanelTab === 'results' && !pinnedHistoryRun && !testResults && (
+                      <div className="flex items-center justify-center h-full text-text-tertiary text-sm">
+                        Run tests to see results here, or click a row in the History tab.
                       </div>
-                        )
-                      })()
-                    ) : (
-                      /* Logs Content */
+                    )}
+
+                    {/* Logs Tab */}
+                    {bottomPanelTab === 'logs' && (
                       <StreamingLogViewer logs={streamingLogs} running={running} />
                     )}
                   </div>
@@ -1925,328 +2259,6 @@ tests:
                 </div>
               )}
 
-              {/* History Panel */}
-              {showHistory && resultsHistory.length > 0 && (
-                <div className="h-[320px] flex-shrink-0 border-t border-border overflow-hidden flex flex-col bg-surface">
-                  <div className="px-4 py-2 border-b border-border bg-surface-elevated flex items-center justify-between">
-                    <div className="flex items-center gap-3">
-                      <History size={14} className="text-primary" />
-                      <h3 className="font-medium text-sm text-text-primary">Run History</h3>
-                      <span className="px-2 py-0.5 text-xs rounded bg-surface text-text-tertiary">
-                        {resultsHistory.length} run{resultsHistory.length !== 1 ? 's' : ''}
-                      </span>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      {historySelectMode && selectedRunIds.size > 0 && (
-                        <button
-                          onClick={async () => {
-                            if (!confirm(`Delete ${selectedRunIds.size} run${selectedRunIds.size > 1 ? 's' : ''}?`)) return
-                            const ids = Array.from(selectedRunIds)
-                            try {
-                              const res = await fetch('/api/results/runs/bulk-delete', {
-                                method: 'POST',
-                                headers: { 'Content-Type': 'application/json' },
-                                body: JSON.stringify({ run_ids: ids }),
-                              })
-                              if (!res.ok) {
-                                const err = await res.json().catch(() => ({}))
-                                alert(`Delete failed: ${err.detail || res.statusText}`)
-                                return
-                              }
-                              const { run_ids: deletedIds } = await res.json()
-                              const deletedSet = new Set(deletedIds)
-                              if (selectedHistoryRun && deletedSet.has(selectedHistoryRun.run_id)) {
-                                setSelectedHistoryRun(null)
-                              }
-                              if (pinnedHistoryRun?.metadata?.run_id && deletedSet.has(pinnedHistoryRun.metadata.run_id)) {
-                                setPinnedHistoryRun(null)
-                              }
-                              setSelectedRunIds(new Set())
-                              setHistorySelectMode(false)
-                              // Re-fetch instead of just filtering locally
-                              // (SC-108367 #1). For consistency with the
-                              // /reports bulk-delete fix — the per-file
-                              // history endpoint is smaller so the
-                              // limit-window edge case is unlikely here,
-                              // but a fresh fetch also picks up any
-                              // concurrent writes the user can't see.
-                              const testFile = selectedFile?.relative_path || selectedFile?.filename
-                              if (testFile) loadResultsHistory(testFile)
-                            } catch (error) {
-                              console.error('Bulk delete failed:', error)
-                              alert('Failed to delete selected runs')
-                            }
-                          }}
-                          className="px-2 py-1 text-xs rounded bg-error/20 text-error hover:bg-error/30 transition-colors"
-                        >
-                          Delete {selectedRunIds.size}
-                        </button>
-                      )}
-                      <button
-                        onClick={() => {
-                          setHistorySelectMode(prev => !prev)
-                          setSelectedRunIds(new Set())
-                        }}
-                        className={`px-2 py-1 text-xs rounded transition-colors ${historySelectMode ? 'bg-primary/20 text-primary' : 'bg-surface text-text-tertiary hover:text-text-primary hover:bg-surface-hover'}`}
-                      >
-                        {historySelectMode ? 'Cancel' : 'Select'}
-                      </button>
-                      <button
-                        onClick={() => setShowHistory(false)}
-                        className="p-1.5 hover:bg-surface-hover rounded text-text-tertiary hover:text-text-primary transition-colors"
-                      >
-                        <X size={14} />
-                      </button>
-                    </div>
-                  </div>
-
-                  {/* Filter row */}
-                  <div className="flex-shrink-0 flex items-center gap-2 px-3 py-1.5 bg-surface border-b border-border">
-                    <div className="relative flex-1 max-w-sm">
-                      <Search
-                        size={12}
-                        className="absolute left-2 top-1/2 -translate-y-1/2 text-text-disabled pointer-events-none"
-                      />
-                      <input
-                        type="text"
-                        value={historyFilterQuery}
-                        onChange={(e) => setHistoryFilterQuery(e.target.value)}
-                        placeholder="Filter runs (provider, model, run id)…"
-                        className="w-full pl-7 pr-2 py-1 text-xs rounded bg-surface-elevated border border-border focus:border-primary focus:outline-none text-text-primary placeholder:text-text-disabled"
-                      />
-                    </div>
-                    {historyProviders.length > 1 &&
-                      historyProviders.map((p) => (
-                        <button
-                          key={p}
-                          type="button"
-                          onClick={() =>
-                            setHistoryProviderFilter((cur) => (cur === p ? null : p))
-                          }
-                          className={`px-1.5 py-0.5 rounded text-[10px] transition ${
-                            historyProviderFilter === p
-                              ? 'bg-primary/20 text-primary border border-primary/40'
-                              : 'bg-surface-elevated text-text-tertiary border border-border hover:text-text-secondary'
-                          }`}
-                        >
-                          {p}
-                        </button>
-                      ))}
-                    <label className="inline-flex items-center gap-1.5 text-[11px] text-text-tertiary cursor-pointer select-none">
-                      <input
-                        type="checkbox"
-                        checked={historyFailedOnly}
-                        onChange={(e) => setHistoryFailedOnly(e.target.checked)}
-                        className="accent-primary"
-                      />
-                      Failed only
-                    </label>
-                    <span className="text-[10px] text-text-disabled">
-                      {filteredHistory.length} / {resultsHistory.length}
-                    </span>
-                  </div>
-
-                  <div className="flex-1 flex flex-col md:flex-row overflow-hidden">
-                    {/* Timeline Chart — uses the filtered set (so chart + table
-                        agree on which runs are shown) but always sorted
-                        chronologically (so the "Older → Recent" axis stays
-                        meaningful regardless of the table's current sort key). */}
-                    <div className="w-full md:w-64 flex-shrink-0 border-b md:border-b-0 md:border-r border-border p-3 overflow-hidden">
-                      <div className="text-xs text-text-tertiary mb-2 font-medium">Pass Rate Timeline</div>
-                      <div className="h-full flex flex-col justify-end pb-6">
-                        <div className="flex items-end gap-1 h-32">
-                          {filteredHistoryChronological.slice(-12).map((run, idx) => {
-                            const passRate = (run.pass_rate ?? 0) * 100
-                            const height = Math.max(4, passRate)
-                            const isPinned = pinnedHistoryRun?.metadata?.run_id === run.run_id
-                            return (
-                              <div key={`${run.run_id}-${idx}`} className="flex-1 flex flex-col items-center gap-1">
-                                <button
-                                  type="button"
-                                  className={`w-full rounded-t transition-all cursor-pointer hover:opacity-80 ${
-                                    passRate === 100 ? 'bg-green-500' : passRate >= 50 ? 'bg-yellow-500' : 'bg-red-500'
-                                  } ${isPinned ? 'ring-2 ring-primary' : ''}`}
-                                  style={{ height: `${height}%` }}
-                                  title={`Click to load · ${passRate.toFixed(0)}% · ${new Date(run.timestamp).toLocaleString()}`}
-                                  onClick={() => {
-                                    setSelectedHistoryRun(run)
-                                    pinHistoryRun(run.run_id)
-                                  }}
-                                />
-                              </div>
-                            )
-                          })}
-                        </div>
-                        <div className="flex justify-between text-[10px] text-text-disabled mt-1">
-                          <span>Older</span>
-                          <span>Recent</span>
-                        </div>
-                      </div>
-                    </div>
-
-                    {/* Run List */}
-                    <div className="flex-1 overflow-auto">
-                      <table className="w-full text-xs">
-                        <thead className="sticky top-0 bg-surface-elevated">
-                          <tr className="border-b border-border">
-                            {historySelectMode && (
-                              <th className="py-2 px-3">
-                                <input
-                                  type="checkbox"
-                                  className="accent-primary"
-                                  checked={filteredHistory.length > 0 && filteredHistory.every(r => selectedRunIds.has(r.run_id))}
-                                  onChange={(e) => {
-                                    if (e.target.checked) {
-                                      setSelectedRunIds(new Set(filteredHistory.map(r => r.run_id)))
-                                    } else {
-                                      setSelectedRunIds(new Set())
-                                    }
-                                  }}
-                                />
-                              </th>
-                            )}
-                            <SortableTH sortKey="timestamp" align="left" sort={historySort} onSort={toggleHistorySort}>Date</SortableTH>
-                            <th className="text-left py-2 px-3 text-text-tertiary font-medium">Provider</th>
-                            <th className="text-left py-2 px-3 text-text-tertiary font-medium">Model</th>
-                            <SortableTH sortKey="pass" align="center" sort={historySort} onSort={toggleHistorySort}>Pass</SortableTH>
-                            <SortableTH sortKey="cost" align="right" sort={historySort} onSort={toggleHistorySort}>Cost</SortableTH>
-                            <SortableTH sortKey="duration" align="right" sort={historySort} onSort={toggleHistorySort}>Time</SortableTH>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {filteredHistory.map((run, idx) => {
-                            const isPinned = pinnedHistoryRun?.metadata?.run_id === run.run_id
-                            const isSelected = selectedRunIds.has(run.run_id)
-                            return (
-                            <tr
-                              key={run.run_id || idx}
-                              className={`border-b border-border/30 cursor-pointer transition-colors ${
-                                isSelected
-                                  ? 'bg-primary/10'
-                                  : isPinned
-                                  ? 'bg-primary/15'
-                                  : selectedHistoryRun?.run_id === run.run_id
-                                  ? 'bg-primary/10'
-                                  : 'hover:bg-surface-hover'
-                              }`}
-                              onClick={() => {
-                                if (historySelectMode) {
-                                  setSelectedRunIds(prev => {
-                                    const next = new Set(prev)
-                                    if (next.has(run.run_id)) {
-                                      next.delete(run.run_id)
-                                    } else {
-                                      next.add(run.run_id)
-                                    }
-                                    return next
-                                  })
-                                } else {
-                                  setSelectedHistoryRun(run)
-                                  pinHistoryRun(run.run_id)
-                                }
-                              }}
-                            >
-                              {historySelectMode && (
-                                <td className="py-2 px-3" onClick={e => e.stopPropagation()}>
-                                  <input
-                                    type="checkbox"
-                                    className="accent-primary"
-                                    checked={isSelected}
-                                    onChange={() => {
-                                      setSelectedRunIds(prev => {
-                                        const next = new Set(prev)
-                                        if (next.has(run.run_id)) {
-                                          next.delete(run.run_id)
-                                        } else {
-                                          next.add(run.run_id)
-                                        }
-                                        return next
-                                      })
-                                    }}
-                                  />
-                                </td>
-                              )}
-                              <td className="py-2 px-3 text-text-secondary">
-                                {new Date(run.timestamp).toLocaleDateString()} {new Date(run.timestamp).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
-                              </td>
-                              <td className="py-2 px-3">
-                                <span className="px-1.5 py-0.5 rounded text-[10px] bg-blue-500/20 text-blue-400">
-                                  {run.provider}
-                                </span>
-                              </td>
-                              <td className="py-2 px-3 text-text-secondary font-mono truncate max-w-[120px]" title={run.model}>
-                                {run.model?.split('-').slice(-2).join('-') || run.model}
-                              </td>
-                              <td className="py-2 px-3 text-center">
-                                <span className={`font-semibold ${
-                                  run.pass_rate === 1 ? 'text-green-400' : run.pass_rate >= 0.5 ? 'text-yellow-400' : 'text-red-400'
-                                }`}>
-                                  {run.passed}/{run.total}
-                                </span>
-                              </td>
-                              <td className="py-2 px-3 text-right text-text-tertiary font-mono">
-                                ${run.total_cost?.toFixed(4) || '0.00'}
-                              </td>
-                              <td className="py-2 px-3 text-right text-text-tertiary">
-                                {run.total_duration?.toFixed(1)}s
-                              </td>
-                            </tr>
-                            )
-                          })}
-                        </tbody>
-                      </table>
-                    </div>
-
-                    {/* Selected Run Details */}
-                    {selectedHistoryRun && (
-                      <div className="w-full md:w-72 flex-shrink-0 border-t md:border-t-0 md:border-l border-border p-3 overflow-auto bg-surface-elevated/50">
-                        <div className="text-xs font-medium text-text-primary mb-2">Run Details</div>
-                        <div className="space-y-2 text-xs">
-                          <div className="flex justify-between">
-                            <span className="text-text-tertiary">Run ID</span>
-                            <span className="text-text-secondary font-mono">{selectedHistoryRun.run_id?.slice(0, 12)}</span>
-                          </div>
-                          <div className="flex justify-between">
-                            <span className="text-text-tertiary">Pass Rate</span>
-                            <span className={`font-semibold ${
-                              selectedHistoryRun.pass_rate === 1 ? 'text-green-400' : 'text-yellow-400'
-                            }`}>
-                              {(selectedHistoryRun.pass_rate * 100).toFixed(0)}%
-                            </span>
-                          </div>
-                          <div className="flex justify-between">
-                            <span className="text-text-tertiary">Tests</span>
-                            <span className="text-text-secondary">{selectedHistoryRun.passed} / {selectedHistoryRun.total}</span>
-                          </div>
-                          <div className="flex justify-between">
-                            <span className="text-text-tertiary">Cost</span>
-                            <span className="text-text-secondary font-mono">${selectedHistoryRun.total_cost?.toFixed(4)}</span>
-                          </div>
-                          <div className="flex justify-between">
-                            <span className="text-text-tertiary">Duration</span>
-                            <span className="text-text-secondary">{selectedHistoryRun.total_duration?.toFixed(1)}s</span>
-                          </div>
-                          {selectedHistoryRun.test_scores && (
-                            <div className="mt-3 pt-3 border-t border-border">
-                              <div className="text-text-tertiary mb-2">Per-Test Results</div>
-                              {Object.entries(selectedHistoryRun.test_scores).map(([name, score]) => (
-                                <div key={name} className="flex items-center justify-between py-1">
-                                  <span className="text-text-secondary truncate max-w-[140px]" title={name}>{name}</span>
-                                  {score.passed ? (
-                                    <CheckCircle size={12} className="text-green-400" />
-                                  ) : (
-                                    <XCircle size={12} className="text-red-400" />
-                                  )}
-                                </div>
-                              ))}
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                </div>
-              )}
 
               {/* All LLMs Results Panel */}
               {allLlmsResults && Object.keys(allLlmsResults).length > 0 && !running && (

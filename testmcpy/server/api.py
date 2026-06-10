@@ -665,7 +665,7 @@ async def list_mcp_tools(profiles: list[str] = Query(default=None)):
         # on every subsequent request until evicted.
         for cache_key in accessed_servers:
             await clear_cached_client(cache_key)
-        if is_connection_error(error_msg):
+        if is_connection_error(error_msg) or is_auth_error(error_msg):
             raise HTTPException(
                 status_code=503,
                 detail=f"Service unavailable: Unable to connect to MCP server. {error_msg}",

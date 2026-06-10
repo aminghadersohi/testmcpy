@@ -6,6 +6,23 @@ import pytest
 from starlette.testclient import TestClient
 
 
+@pytest.fixture(autouse=True)
+def isolated_storage(tmp_path, monkeypatch):
+    """Give every test its own TestStorage DB.
+
+    get_storage() caches a module-level singleton whose default DB path is
+    derived from Path.cwd() at first call — without a reset, the first test
+    to touch storage pins the DB to its own tmp workspace and every later
+    test reads/writes that stale DB.
+    """
+    import testmcpy.storage as storage_module
+
+    monkeypatch.setenv("TESTMCPY_DB_PATH", str(tmp_path / "storage.db"))
+    storage_module._storage = None
+    yield
+    storage_module._storage = None
+
+
 @pytest.fixture
 def client(mock_mcp_client, tmp_workspace, monkeypatch):
     """Create a TestClient with mocked MCP state and workspace directory."""

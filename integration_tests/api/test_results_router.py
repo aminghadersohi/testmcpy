@@ -1,6 +1,5 @@
 """Tests for results endpoints (save, list, get, history, compare, delete)."""
 
-import json
 
 
 def _make_test_run_payload(test_file="health/test.yaml", passed=2, failed=1):
@@ -39,18 +38,18 @@ class TestSaveTestRun:
         assert "run_id" in data
         assert data["saved"] is True
 
-    def test_save_creates_file(self, client, tmp_workspace):
+    def test_save_persists_to_db(self, client):
+        # Runs are stored in the DB, not as JSON files on disk
         resp = client.post("/api/results/save", json=_make_test_run_payload())
-        run_id = resp.json()["run_id"]
-        result_file = tmp_workspace / "tests" / ".results" / f"{run_id}.json"
-        assert result_file.exists()
+        data = resp.json()
+        assert data["path"] == f"db://test_runs/{data['run_id']}"
 
-    def test_save_file_content_valid_json(self, client, tmp_workspace):
+    def test_save_roundtrips_through_get(self, client):
         resp = client.post("/api/results/save", json=_make_test_run_payload())
         run_id = resp.json()["run_id"]
-        result_file = tmp_workspace / "tests" / ".results" / f"{run_id}.json"
-        with open(result_file) as f:
-            data = json.load(f)
+        get_resp = client.get(f"/api/results/run/{run_id}")
+        assert get_resp.status_code == 200
+        data = get_resp.json()
         assert "metadata" in data
         assert "results" in data
         assert "summary" in data

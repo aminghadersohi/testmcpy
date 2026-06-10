@@ -396,16 +396,19 @@ class TestCodexSDKProvider:
     def test_tool_call_extraction_from_raw_item(self) -> None:
         """tool_calls must be populated from ToolCallItem.raw_item, not .arguments."""
         pytest.importorskip("agents", reason="openai-agents not installed")
+        import types
+
         from agents.items import ToolCallItem
 
-        # Build a minimal ToolCallItem with a dict raw_item (the MCP call shape).
+        # RunItemBase stores a weakref to agent; SimpleNamespace supports weakrefs.
+        fake_agent = types.SimpleNamespace()
         raw = {"name": "list_dashboards", "arguments": '{"page": 1}', "call_id": "c1"}
-        item = ToolCallItem(raw_item=raw, agent=None)  # type: ignore[call-arg]
+        item = ToolCallItem(raw_item=raw, agent=fake_agent)  # type: ignore[arg-type]
 
         assert item.tool_name == "list_dashboards"
-        # Confirm .arguments does NOT exist (the bug this test guards against).
+        # Confirm .arguments does NOT exist on ToolCallItem (the bug this guards).
         assert not hasattr(item, "arguments")
-        # Confirm raw_item carries the arguments string.
+        # Arguments live on raw_item — our extraction code reads them correctly.
         assert raw.get("arguments") == '{"page": 1}'
 
     @pytest.mark.asyncio

@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react'
+import { useNotification } from '../components/NotificationProvider'
 import { ChevronDown, ChevronRight, Copy, Check, EyeOff, Sparkles, Code2, Search, Command, HelpCircle, CheckSquare, Square, MessageSquare, Wand2, TestTube2, Play, Clock, Bug, AlertCircle, GitCompare, LayoutList, LayoutGrid, History, Diff } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import ReactJson from '@microlink/react-json-view'
@@ -13,6 +14,7 @@ import { LoadingSpinner } from '../components/LoadingSpinner'
 import { useEditorTheme } from '../hooks/useEditorTheme'
 
 function MCPExplorer({ selectedProfiles = [] }) {
+  const { success: notifySuccess, error: notifyError, warning: notifyWarning, info: notifyInfo } = useNotification()
   const navigate = useNavigate()
   const { jsonTheme } = useEditorTheme()
   const [tools, setTools] = useState([])
@@ -265,7 +267,7 @@ function MCPExplorer({ selectedProfiles = [] }) {
     const testInfo = toolTests[safeName]
 
     if (!testInfo || testInfo.count === 0) {
-      alert('No tests found for this tool')
+      notifyInfo('No tests found for this tool')
       return
     }
 
@@ -288,15 +290,16 @@ function MCPExplorer({ selectedProfiles = [] }) {
         await loadToolTests()
 
         const summary = result.summary
-        alert(`Test run complete!\nPassed: ${summary.passed}/${summary.total}\nFailed: ${summary.failed}\n\nFiles tested: ${result.files_tested.length}`)
+        const reportFn = summary.failed > 0 ? notifyWarning : notifySuccess
+        reportFn(`Passed ${summary.passed}/${summary.total} (${result.files_tested.length} file(s) tested)`, 'Test run complete')
       } else {
         const error = await res.json()
         console.error('Test run failed:', error)
-        alert(`Failed to run tests: ${error.detail || 'Unknown error'}`)
+        notifyError(`Failed to run tests: ${error.detail || 'Unknown error'}`)
       }
     } catch (error) {
       console.error('Failed to run tests:', error)
-      alert(`Failed to run tests: ${error.message}`)
+      notifyError(`Failed to run tests: ${error.message}`)
     } finally {
       setRunningTests(prev => {
         const next = new Set(prev)
@@ -308,7 +311,7 @@ function MCPExplorer({ selectedProfiles = [] }) {
 
   const runSmokeTest = async () => {
     if (!activeProfile) {
-      alert('No MCP profile selected')
+      notifyWarning('No MCP profile selected')
       return
     }
 
@@ -336,11 +339,11 @@ function MCPExplorer({ selectedProfiles = [] }) {
       } else {
         const error = await res.json()
         console.error('Smoke test failed:', error)
-        alert(`Failed to run smoke test: ${error.detail || 'Unknown error'}`)
+        notifyError(`Failed to run smoke test: ${error.detail || 'Unknown error'}`)
       }
     } catch (error) {
       console.error('Failed to run smoke test:', error)
-      alert(`Failed to run smoke test: ${error.message}`)
+      notifyError(`Failed to run smoke test: ${error.message}`)
     } finally {
       setRunningSmokeTest(false)
     }
@@ -420,7 +423,7 @@ function MCPExplorer({ selectedProfiles = [] }) {
 
   const handleTestGenerationSuccess = (data) => {
     // Show success notification
-    alert(`Successfully generated ${data.test_count} test(s) in ${data.filename}`)
+    notifySuccess(`Generated ${data.test_count} test(s) in ${data.filename}`)
     // Close modal
     setSelectedToolForGeneration(null)
     // Reload test info to show the new tests
@@ -447,7 +450,7 @@ function MCPExplorer({ selectedProfiles = [] }) {
 
   const generateBatchTests = async () => {
     if (selectedTools.size === 0) {
-      alert('Please select at least one tool')
+      notifyWarning('Please select at least one tool')
       return
     }
 
@@ -492,11 +495,12 @@ function MCPExplorer({ selectedProfiles = [] }) {
     setBatchGenProgress('')
     const succeeded = results.filter(r => r.success)
     const failed = results.filter(r => !r.success)
-    let msg = `Batch generation complete!\n${succeeded.length}/${total} tools succeeded.`
+    let msg = `${succeeded.length}/${total} tools succeeded.`
     if (failed.length > 0) {
-      msg += '\n\nFailed:\n' + failed.map(r => `- ${r.tool}: ${r.error}`).join('\n')
+      msg += ' Failed: ' + failed.map(r => `${r.tool} (${r.error})`).join(', ')
     }
-    alert(msg)
+    const reportBatch = failed.length > 0 ? notifyWarning : notifySuccess
+    reportBatch(msg, 'Batch generation complete')
     loadToolTests()
   }
 
@@ -538,7 +542,7 @@ function MCPExplorer({ selectedProfiles = [] }) {
   // Run schema diff
   const runSchemaDiff = async () => {
     if (diffProfile1.length === 0 || diffProfile2.length === 0) {
-      alert('Please select two profiles to compare')
+      notifyWarning('Please select two profiles to compare')
       return
     }
 
@@ -564,7 +568,7 @@ function MCPExplorer({ selectedProfiles = [] }) {
       setDiffResults(data)
     } catch (error) {
       console.error('Schema diff error:', error)
-      alert(`Schema diff failed: ${error.message}`)
+      notifyError(`Schema diff failed: ${error.message}`)
     } finally {
       setRunningDiff(false)
     }
@@ -573,15 +577,15 @@ function MCPExplorer({ selectedProfiles = [] }) {
   // Run tool comparison
   const runComparison = async () => {
     if (!compareToolName.trim()) {
-      alert('Please select a tool to compare')
+      notifyWarning('Please select a tool to compare')
       return
     }
     if (compareProfile1.length === 0 || compareProfile2.length === 0) {
-      alert('Please select two profiles/servers to compare')
+      notifyWarning('Please select two profiles/servers to compare')
       return
     }
     if (compareProfile1[0] === compareProfile2[0]) {
-      alert('Please select two different profiles/servers')
+      notifyWarning('Please select two different profiles/servers')
       return
     }
 
@@ -589,7 +593,7 @@ function MCPExplorer({ selectedProfiles = [] }) {
     try {
       parameters = JSON.parse(compareParameters)
     } catch (e) {
-      alert('Invalid JSON in parameters field')
+      notifyWarning('Invalid JSON in parameters field')
       return
     }
 
@@ -618,7 +622,7 @@ function MCPExplorer({ selectedProfiles = [] }) {
       setComparisonResults(data)
     } catch (error) {
       console.error('Comparison error:', error)
-      alert(`Comparison failed: ${error.message}`)
+      notifyError(`Comparison failed: ${error.message}`)
     } finally {
       setRunningComparison(false)
     }

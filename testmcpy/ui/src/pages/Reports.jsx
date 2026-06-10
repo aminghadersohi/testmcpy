@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react'
+import { useNotification } from '../components/NotificationProvider'
 import { useSearchParams } from 'react-router-dom'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -939,6 +940,7 @@ function TrendsTab({ testRuns }) {
 }
 
 function Reports() {
+  const { success: notifySuccess, error: notifyError, warning: notifyWarning, info: notifyInfo } = useNotification()
   const [searchParams, setSearchParams] = useSearchParams()
   const [activeTab, setActiveTab] = useState('tests')
   const [testRuns, setTestRuns] = useState([])
@@ -1210,7 +1212,7 @@ function Reports() {
       })
       if (!res.ok) {
         const err = await res.json().catch(() => ({}))
-        alert(`Delete failed: ${err.detail || res.statusText}`)
+        notifyError(`Delete failed: ${err.detail || res.statusText}`)
         return
       }
       if (selectedRuns.has(selectedRun?.id)) {
@@ -1227,7 +1229,7 @@ function Reports() {
       await Promise.all([loadTestRuns(), loadFilterOptions()])
     } catch (error) {
       console.error('Bulk delete failed:', error)
-      alert(`Delete failed: ${error.message || error}`)
+      notifyError(`Delete failed: ${error.message || error}`)
     }
   }
 

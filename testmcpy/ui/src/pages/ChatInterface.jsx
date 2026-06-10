@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react'
+import { useNotification } from '../components/NotificationProvider'
 import { Send, Loader, Wrench, DollarSign, ChevronDown, ChevronRight, CheckCircle, FileText, Plus, Server, Trash2, RefreshCw, Download, Edit3, Settings2 } from 'lucide-react'
 import ReactJson from '@microlink/react-json-view'
 import ReactMarkdown from 'react-markdown'
@@ -80,6 +81,7 @@ function JSONViewer({ data }) {
 }
 
 function ChatInterface({ selectedProfiles = [], selectedLlmProfile, llmProfiles = [] }) {
+  const { success: notifySuccess, error: notifyError, warning: notifyWarning, info: notifyInfo } = useNotification()
   const { jsonTheme } = useEditorTheme()
   const [messages, setMessages] = useState([])
   const [input, setInput] = useState('')
@@ -741,15 +743,15 @@ ${evaluators}
       if (res.ok) {
         const result = await res.json()
         console.log('Test created:', result)
-        alert(`Test case created successfully: ${testName}.yaml`)
+        notifySuccess(`Test case created: ${testName}.yaml`)
       } else {
         const error = await res.json().catch(() => ({ detail: 'Unknown error' }))
         console.error('Failed to create test:', error)
-        alert(`Failed to create test case: ${error.detail}`)
+        notifyError(`Failed to create test case: ${error.detail}`)
       }
     } catch (error) {
       console.error('Failed to create test case:', error)
-      alert(`Failed to create test case: ${error.message}`)
+      notifyError(`Failed to create test case: ${error.message}`)
     }
   }
 

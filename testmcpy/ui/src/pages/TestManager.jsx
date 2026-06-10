@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
+import { useNotification } from '../components/NotificationProvider'
 import {
   Plus,
   Play,
@@ -430,6 +431,7 @@ function TestCaseWizard({ onComplete, onCancel }) {
 }
 
 function TestManager({ selectedProfiles = [], selectedLlmProfile = null, llmProfiles = [] }) {
+  const { success: notifySuccess, error: notifyError, warning: notifyWarning, info: notifyInfo } = useNotification()
   const { monacoTheme } = useEditorTheme()
   // Get test run state from context (persists across navigation)
   const {
@@ -1159,10 +1161,10 @@ function TestManager({ selectedProfiles = [], selectedLlmProfile = null, llmProf
       setSelectedFile(prev => ({ ...prev, content: fileContent }))
       setEditMode(false)
       loadTestFiles()
-      alert('File saved successfully')
+      notifySuccess('File saved successfully')
     } catch (error) {
       console.error('Failed to save test file:', error)
-      alert(`Failed to save file: ${error.message}`)
+      notifyError(`Failed to save file: ${error.message}`)
     }
   }
 
@@ -1196,7 +1198,7 @@ tests:
       loadTestFiles()
     } catch (error) {
       console.error('Failed to create test file:', error)
-      alert('Failed to create file')
+      notifyError('Failed to create file')
     }
   }
 
@@ -1215,7 +1217,7 @@ tests:
       loadTestFiles()
     } catch (error) {
       console.error('Failed to delete test file:', error)
-      alert('Failed to delete file')
+      notifyError('Failed to delete file')
     }
   }
 
@@ -1280,7 +1282,7 @@ tests:
 
     const allProviders = getAllProviders()
     if (allProviders.length === 0) {
-      alert('No LLM providers configured')
+      notifyWarning('No LLM providers configured')
       return
     }
 
@@ -2024,7 +2026,7 @@ tests:
                                         headers: { 'Content-Type': 'application/json' },
                                         body: JSON.stringify({ run_ids: ids }),
                                       })
-                                      if (!res.ok) { alert('Delete failed'); return }
+                                      if (!res.ok) { notifyError('Delete failed'); return }
                                       const { run_ids: deletedIds } = await res.json()
                                       const deletedSet = new Set(deletedIds)
                                       if (pinnedHistoryRun?.metadata?.run_id && deletedSet.has(pinnedHistoryRun.metadata.run_id)) setPinnedHistoryRun(null)
@@ -2032,7 +2034,7 @@ tests:
                                       setHistorySelectMode(false)
                                       const testFile = selectedFile?.relative_path || selectedFile?.filename
                                       if (testFile) loadResultsHistory(testFile)
-                                    } catch (e) { alert('Failed to delete selected runs') }
+                                    } catch (e) { notifyError('Failed to delete selected runs') }
                                   }}
                                   className="px-2 py-1 text-xs rounded bg-error/20 text-error hover:bg-error/30 transition-colors"
                                 >
@@ -2360,7 +2362,7 @@ tests:
               loadTestFile(filename)
             } catch (error) {
               console.error('Failed to create test file:', error)
-              alert('Failed to create test file')
+              notifyError('Failed to create test file')
             }
           }}
           onCancel={() => setShowTestWizard(false)}

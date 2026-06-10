@@ -331,9 +331,9 @@ function TestResultCard({ result, providerHint, onFpToggle }) {
   const hasResponse = !!(result.response || result.llm_response)
 
   // False positive state (optimistic)
-  const [isFp, setIsFp] = useState(!!(result.false_positive))
+  const [isFp, setIsFp] = useState(!!(result.manual_false_positive))
   const [fpRate, setFpRate] = useState(result.false_positive_rate ?? 0)
-  const showFpBadge = fpRate >= 0.5
+  const showFpBadge = isFp
 
   const handleFpToggle = async (e) => {
     e.stopPropagation()

@@ -59,8 +59,22 @@ def get_session_factory(db_path: str | Path | None = None) -> sessionmaker:
 
 def init_db(db_path: str | Path | None = None) -> None:
     """Initialize the database, creating all tables."""
+    from sqlalchemy import inspect, text
+
     engine = get_engine(db_path)
     Base.metadata.create_all(bind=engine)
+    # Inline migrations for columns added after initial schema creation.
+    # SQLite does not support ALTER TABLE IF NOT EXISTS, so we check first.
+    inspector = inspect(engine)
+    existing = {c["name"] for c in inspector.get_columns("question_results")}
+    with engine.connect() as conn:
+        if "manual_false_positive" not in existing:
+            conn.execute(
+                text(
+                    "ALTER TABLE question_results ADD COLUMN manual_false_positive BOOLEAN DEFAULT FALSE"
+                )
+            )
+            conn.commit()
 
 
 def get_db(db_path: str | Path | None = None) -> Generator[Session, None, None]:

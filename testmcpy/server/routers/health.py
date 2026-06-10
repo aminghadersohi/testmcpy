@@ -58,6 +58,7 @@ async def _ping_server(mcp_server, profile_id: str, profile_name: str) -> dict[s
 
         result["checked_at"] = datetime.now(timezone.utc).isoformat()
         _last_success[server_key] = result["checked_at"]
+        result["last_success_at"] = result["checked_at"]
         return result
 
     except asyncio.TimeoutError:
@@ -95,6 +96,7 @@ async def _ping_server(mcp_server, profile_id: str, profile_name: str) -> dict[s
 
             result["checked_at"] = datetime.now(timezone.utc).isoformat()
             _last_success[server_key] = result["checked_at"]
+            result["last_success_at"] = result["checked_at"]
             return result
 
         except (

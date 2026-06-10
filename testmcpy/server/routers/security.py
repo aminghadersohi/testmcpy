@@ -118,9 +118,11 @@ async def get_security_results(
             )
             .join(TestRunModel, QuestionResultModel.run_id == TestRunModel.run_id)
             .order_by(QuestionResultModel.created_at.desc())
-            .limit(limit)
+            .limit(limit + 1)
             .all()
         )
+        truncated = len(results) > limit
+        results = results[:limit]
 
         # Filter and categorize security evaluations
         severity_counts = {
@@ -174,7 +176,6 @@ async def get_security_results(
         total_security = sum(s["total"] for s in severity_counts.values())
         total_passed = sum(s["passed"] for s in severity_counts.values())
         total_failed = sum(s["failed"] for s in severity_counts.values())
-        truncated = len(results) == limit
 
         return {
             "summary": {

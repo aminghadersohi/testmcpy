@@ -282,6 +282,7 @@ async def get_test_run(run_id: str) -> dict[str, Any]:
                 "cost": qr.get("cost_usd", 0.0),
                 "tool_call_counts": qr.get("tool_call_counts") or {},
                 "false_positive_rate": qr.get("false_positive_rate") or 0.0,
+                "manual_false_positive": qr.get("manual_false_positive") or False,
                 "response": qr["answer"],
                 "tool_calls": qr["tool_uses"],
                 "tool_results": qr["tool_results"],

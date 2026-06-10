@@ -858,15 +858,15 @@ ${evaluators}
         {messages.length === 0 && !loading ? (
           <div className="flex flex-col items-center justify-center h-full gap-6 p-8">
             <div className="text-center">
-              <h2 className="text-xl font-semibold text-gray-700 mb-2">Chat with your MCP tools</h2>
-              <p className="text-gray-500 text-sm">Send a message to start a conversation with your configured MCP servers</p>
+              <h2 className="text-xl font-semibold text-text-secondary mb-2">Chat with your MCP tools</h2>
+              <p className="text-text-tertiary text-sm">Send a message to start a conversation with your configured MCP servers</p>
             </div>
             <div className="flex flex-wrap gap-2 justify-center max-w-lg">
               {["List all available tools", "What can you help me with?", "Run a health check", "Show available resources"].map(examplePrompt => (
                 <button
                   key={examplePrompt}
                   onClick={() => setInput(examplePrompt)}
-                  className="px-3 py-2 text-sm bg-white border border-gray-200 rounded-lg hover:bg-gray-50 text-gray-600 cursor-pointer"
+                  className="px-3 py-2 text-sm bg-surface-elevated border border-border rounded-lg hover:bg-surface-hover text-text-secondary cursor-pointer"
                 >
                   {examplePrompt}
                 </button>
@@ -966,9 +966,9 @@ ${evaluators}
                       )}
                       {message.streaming && !message.content && idx === messages.length - 1 ? (
                         <div className="flex gap-1 items-center p-3">
-                          <div className="w-2 h-2 rounded-full bg-gray-400 animate-bounce [animation-delay:-0.3s]" />
-                          <div className="w-2 h-2 rounded-full bg-gray-400 animate-bounce [animation-delay:-0.15s]" />
-                          <div className="w-2 h-2 rounded-full bg-gray-400 animate-bounce" />
+                          <div className="w-2 h-2 rounded-full bg-text-disabled animate-bounce [animation-delay:-0.3s]" />
+                          <div className="w-2 h-2 rounded-full bg-text-disabled animate-bounce [animation-delay:-0.15s]" />
+                          <div className="w-2 h-2 rounded-full bg-text-disabled animate-bounce" />
                         </div>
                       ) : (
                         <div className="prose dark:prose-invert prose-sm max-w-none leading-relaxed prose-p:my-2 prose-pre:bg-background-subtle prose-pre:border prose-pre:border-border prose-code:text-primary-light prose-a:text-primary-light prose-a:no-underline hover:prose-a:underline prose-strong:text-text-primary prose-headings:text-text-primary">

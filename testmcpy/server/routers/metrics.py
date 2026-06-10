@@ -126,7 +126,7 @@ async def get_metrics(
                 session.query(func.count(QuestionResultModel.id).label("fp_count"))
                 .filter(QuestionResultModel.run_id.in_(run_ids))
                 .filter(~QuestionResultModel.passed)
-                .filter(QuestionResultModel.false_positive_rate >= 0.5)
+                .filter(QuestionResultModel.manual_false_positive == True)  # noqa: E712
                 .one()
             )
             fp_count = fp_stats.fp_count or 0
@@ -246,12 +246,12 @@ async def set_false_positive(question_id: int, is_false_positive: bool = True) -
         )
         if not qr:
             raise HTTPException(status_code=404, detail="Question result not found")
-        qr.false_positive_rate = 1.0 if is_false_positive else 0.0
+        qr.manual_false_positive = is_false_positive
         session.commit()
         return {
             "success": True,
             "id": question_id,
-            "false_positive_rate": qr.false_positive_rate,
+            "manual_false_positive": qr.manual_false_positive,
         }
     finally:
         session.close()

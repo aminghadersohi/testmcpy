@@ -300,41 +300,41 @@ class TestClaudeSDKVerboseLogs:
 class TestCodexSDKProvider:
     """Cover CodexSDKProvider construction, auth resolution, and factory aliases."""
 
-    def test_factory_alias_codex_sdk(self):
+    def test_factory_alias_codex_sdk(self) -> None:
         p = create_llm_provider("codex-sdk", "codex-o3", openai_api_key="sk-test")
         assert isinstance(p, CodexSDKProvider)
 
-    def test_factory_alias_codex_cli(self):
+    def test_factory_alias_codex_cli(self) -> None:
         p = create_llm_provider("codex-cli", "codex-o3", openai_api_key="sk-test")
         assert isinstance(p, CodexSDKProvider)
 
-    def test_factory_alias_codex(self):
+    def test_factory_alias_codex(self) -> None:
         p = create_llm_provider("codex", "codex-o3", openai_api_key="sk-test")
         assert isinstance(p, CodexSDKProvider)
 
-    def test_model_id_remapped(self):
+    def test_model_id_remapped(self) -> None:
         p = CodexSDKProvider(model="codex-o3", openai_api_key="sk-test")
         assert p.model == "o3"
 
-    def test_model_id_remapped_o4mini(self):
+    def test_model_id_remapped_o4mini(self) -> None:
         p = CodexSDKProvider(model="codex-o4-mini", openai_api_key="sk-test")
         assert p.model == "o4-mini"
 
-    def test_model_id_passthrough_for_unknown(self):
+    def test_model_id_passthrough_for_unknown(self) -> None:
         # If user passes a raw OpenAI model ID, it is passed through unchanged.
         p = CodexSDKProvider(model="gpt-4o-mini", openai_api_key="sk-test")
         assert p.model == "gpt-4o-mini"
 
-    def test_api_key_from_constructor(self):
+    def test_api_key_from_constructor(self) -> None:
         p = CodexSDKProvider(model="codex-o3", openai_api_key="sk-explicit")
         assert p.openai_api_key == "sk-explicit"
 
-    def test_api_key_from_env(self, monkeypatch):
+    def test_api_key_from_env(self, monkeypatch) -> None:
         monkeypatch.setenv("OPENAI_API_KEY", "sk-from-env")
         p = CodexSDKProvider(model="codex-o3")
         assert p.openai_api_key == "sk-from-env"
 
-    def test_read_cached_codex_token_present(self, tmp_path, monkeypatch):
+    def test_read_cached_codex_token_present(self, tmp_path, monkeypatch) -> None:
         auth_file = tmp_path / ".codex" / "auth.json"
         auth_file.parent.mkdir(parents=True)
         auth_file.write_text('{"accessToken": "oauth-tok-123"}')
@@ -342,7 +342,7 @@ class TestCodexSDKProvider:
         p = CodexSDKProvider(model="codex-o3")
         assert p._read_cached_codex_token() == "oauth-tok-123"
 
-    def test_read_cached_codex_token_snake_case(self, tmp_path, monkeypatch):
+    def test_read_cached_codex_token_snake_case(self, tmp_path, monkeypatch) -> None:
         auth_file = tmp_path / ".codex" / "auth.json"
         auth_file.parent.mkdir(parents=True)
         auth_file.write_text('{"access_token": "snake-tok-456"}')
@@ -350,12 +350,12 @@ class TestCodexSDKProvider:
         p = CodexSDKProvider(model="codex-o3")
         assert p._read_cached_codex_token() == "snake-tok-456"
 
-    def test_read_cached_codex_token_missing_file(self, tmp_path, monkeypatch):
+    def test_read_cached_codex_token_missing_file(self, tmp_path, monkeypatch) -> None:
         monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
         p = CodexSDKProvider(model="codex-o3")
         assert p._read_cached_codex_token() is None
 
-    def test_read_cached_codex_token_invalid_json(self, tmp_path, monkeypatch):
+    def test_read_cached_codex_token_invalid_json(self, tmp_path, monkeypatch) -> None:
         auth_file = tmp_path / ".codex" / "auth.json"
         auth_file.parent.mkdir(parents=True)
         auth_file.write_text("not-json{{")
@@ -364,7 +364,7 @@ class TestCodexSDKProvider:
         assert p._read_cached_codex_token() is None
 
     @pytest.mark.asyncio
-    async def test_initialize_missing_package_raises(self, monkeypatch):
+    async def test_initialize_missing_package_raises(self, monkeypatch) -> None:
         import sys
 
         monkeypatch.setitem(sys.modules, "agents", None)
@@ -373,7 +373,7 @@ class TestCodexSDKProvider:
             await p.initialize()
 
     @pytest.mark.asyncio
-    async def test_initialize_no_key_raises(self, monkeypatch, tmp_path):
+    async def test_initialize_no_key_raises(self, monkeypatch, tmp_path) -> None:
         """No API key and no cached Codex CLI token must raise ValueError."""
         import sys
         import types
@@ -390,7 +390,7 @@ class TestCodexSDKProvider:
             await p.initialize()
 
     @pytest.mark.asyncio
-    async def test_initialize_bearer_auth_sets_mcp_header(self, monkeypatch):
+    async def test_initialize_bearer_auth_sets_mcp_header(self, monkeypatch) -> None:
         """Bearer auth type must set Authorization header on MCP requests."""
         import sys
         import types

@@ -9,6 +9,7 @@ import os
 import re
 import subprocess
 import time
+import urllib.parse
 import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -3457,8 +3458,6 @@ class CodexSDKProvider(LLMProvider):
         if not cache_dir.exists():
             return None
         try:
-            import urllib.parse
-
             server_key = urllib.parse.quote(self.mcp_url, safe="")
             token_file = cache_dir / f"{server_key}.json"
             if not token_file.exists():
@@ -3481,10 +3480,12 @@ class CodexSDKProvider(LLMProvider):
         messages: list[dict[str, Any]] | None = None,
     ) -> LLMResult:
         """Generate a response using openai-agents with native MCP tool access."""
-        from agents import Agent, Runner
-        from agents.mcp import MCPServerStreamableHttp
-        from agents.models.openai_provider import OpenAIProvider as OAIProvider
-        from agents.run_config import RunConfig
+        # openai-agents is an optional dependency; initialize() has already
+        # validated it is installed, so these deferred imports are safe here.
+        from agents import Agent, Runner  # noqa: PLC0415
+        from agents.mcp import MCPServerStreamableHttp  # noqa: PLC0415
+        from agents.models.openai_provider import OpenAIProvider as OAIProvider  # noqa: PLC0415
+        from agents.run_config import RunConfig  # noqa: PLC0415
 
         start_time = time.time()
 

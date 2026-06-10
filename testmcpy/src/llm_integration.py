@@ -3318,10 +3318,9 @@ class CodexSDKProvider(LLMProvider):
     Handles MCP tool discovery natively via MCPServerStreamableHttp — no manual
     tool schema injection required.
 
-    Auth priority:
-      1. ``openai_api_key`` constructor argument
-      2. ``OPENAI_API_KEY`` environment variable
-      3. Cached Codex CLI OAuth token (``~/.codex/auth.json`` after ``codex auth login``)
+    ``openai_api_key`` must be supplied via the constructor (resolved from the
+    LLM profile in ``.llm_providers.yaml``) or left None to fall back to the
+    stored Codex CLI API key (``OPENAI_API_KEY`` field in ``~/.codex/auth.json``).
 
     MCP server auth (bearer / jwt / oauth) follows the same pattern as
     ClaudeSDKProvider: a Bearer token is resolved from the auth config and
@@ -3336,7 +3335,7 @@ class CodexSDKProvider(LLMProvider):
         openai_api_key: str | None = None,
     ):
         self.model = _CODEX_MODEL_MAP.get(model, model)
-        self.openai_api_key = openai_api_key or os.environ.get("OPENAI_API_KEY")
+        self.openai_api_key = openai_api_key or ""
         config = get_config()
 
         if mcp_url is None:
@@ -3365,9 +3364,9 @@ class CodexSDKProvider(LLMProvider):
             self.openai_api_key = self._read_cached_codex_token()
         if not self.openai_api_key:
             raise ValueError(
-                "No OpenAI API key found. Set OPENAI_API_KEY or configure the Codex CLI "
-                "with an API key (`codex config set apiKey sk-...`) so it is stored in "
-                "~/.codex/auth.json."
+                "No OpenAI API key. Supply api_key in the LLM profile "
+                "(.llm_providers.yaml) or configure the Codex CLI with an API key "
+                "so it is stored in ~/.codex/auth.json."
             )
 
         # Resolve MCP Bearer token from auth config
@@ -3533,19 +3532,31 @@ class CodexSDKProvider(LLMProvider):
             tool_calls: list[dict[str, Any]] = []
             for item in result.new_items:
                 if isinstance(item, ToolCallItem) and item.tool_name:
-                    raw_args = item.arguments or "{}"
+                    # ToolCallItem has no .arguments attribute; arguments live on
+                    # the raw_item (e.g. ResponseFunctionToolCall.arguments).
+                    raw = item.raw_item
+                    raw_args = (
+                        raw.get("arguments")
+                        if isinstance(raw, dict)
+                        else getattr(raw, "arguments", None)
+                    ) or "{}"
                     try:
                         args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
                     except json.JSONDecodeError:
                         args = {}
                     tool_calls.append({"name": item.tool_name, "arguments": args})
 
-            # Extract token usage when available.
+            # Extract token usage when available; use the same key names as
+            # every other provider (prompt / completion / total).
             usage = getattr(getattr(result, "context_wrapper", None), "usage", None)
             input_tokens = getattr(usage, "input_tokens", None)
             output_tokens = getattr(usage, "output_tokens", None)
             token_usage = (
-                {"input": input_tokens, "output": output_tokens}
+                {
+                    "prompt": input_tokens,
+                    "completion": output_tokens,
+                    "total": (input_tokens or 0) + (output_tokens or 0),
+                }
                 if input_tokens is not None
                 else None
             )

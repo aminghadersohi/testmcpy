@@ -329,10 +329,11 @@ class TestCodexSDKProvider:
         p = CodexSDKProvider(model="codex-o3", openai_api_key="sk-explicit")
         assert p.openai_api_key == "sk-explicit"
 
-    def test_api_key_from_env(self, monkeypatch) -> None:
-        monkeypatch.setenv("OPENAI_API_KEY", "sk-from-env")
+    def test_no_api_key_defaults_empty(self) -> None:
+        # Key comes from the LLM profile (resolved in .llm_providers.yaml),
+        # not from the environment — constructor with no key yields empty string.
         p = CodexSDKProvider(model="codex-o3")
-        assert p.openai_api_key == "sk-from-env"
+        assert p.openai_api_key == ""
 
     def test_read_cached_codex_token_present(self, tmp_path, monkeypatch) -> None:
         auth_file = tmp_path / ".codex" / "auth.json"
@@ -378,7 +379,7 @@ class TestCodexSDKProvider:
 
     @pytest.mark.asyncio
     async def test_initialize_no_key_raises(self, monkeypatch, tmp_path) -> None:
-        """No API key and no cached Codex CLI token must raise ValueError."""
+        """No constructor key and no ~/.codex/auth.json must raise ValueError."""
         import sys
         import types
 
@@ -386,12 +387,26 @@ class TestCodexSDKProvider:
         fake_agents.Agent = object
         fake_agents.Runner = object
         monkeypatch.setitem(sys.modules, "agents", fake_agents)
-        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
         monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
 
-        p = CodexSDKProvider(model="codex-o3")
-        with pytest.raises(ValueError, match="OPENAI_API_KEY"):
+        p = CodexSDKProvider(model="codex-o3")  # no openai_api_key
+        with pytest.raises(ValueError, match="api_key"):
             await p.initialize()
+
+    def test_tool_call_extraction_from_raw_item(self) -> None:
+        """tool_calls must be populated from ToolCallItem.raw_item, not .arguments."""
+        pytest.importorskip("agents", reason="openai-agents not installed")
+        from agents.items import ToolCallItem
+
+        # Build a minimal ToolCallItem with a dict raw_item (the MCP call shape).
+        raw = {"name": "list_dashboards", "arguments": '{"page": 1}', "call_id": "c1"}
+        item = ToolCallItem(raw_item=raw, agent=None)  # type: ignore[call-arg]
+
+        assert item.tool_name == "list_dashboards"
+        # Confirm .arguments does NOT exist (the bug this test guards against).
+        assert not hasattr(item, "arguments")
+        # Confirm raw_item carries the arguments string.
+        assert raw.get("arguments") == '{"page": 1}'
 
     @pytest.mark.asyncio
     async def test_initialize_bearer_auth_sets_mcp_header(self, monkeypatch) -> None:

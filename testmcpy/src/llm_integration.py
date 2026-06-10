@@ -3807,8 +3807,6 @@ _GEMINI_SDK_MODEL_MAP: dict[str, str] = {
     "gemini-sdk": "gemini-2.5-flash",
     "gemini-sdk-flash": "gemini-2.5-flash",
     "gemini-sdk-pro": "gemini-2.5-pro",
-    "gemini-sdk-flash-8b": "gemini-1.5-flash-8b",
-    "gemini-sdk-2.0-flash": "gemini-2.0-flash",
 }
 
 _GEMINI_SDK_SYSTEM_PROMPT = (
@@ -3842,6 +3840,7 @@ class GeminiSDKProvider(LLMProvider):
         auth: dict[str, Any] | None = None,
         api_key: str | None = None,
     ):
+        self._registry_model_id = model  # kept for cost estimation via model_registry
         self.model = _GEMINI_SDK_MODEL_MAP.get(model, model)
         self.api_key = api_key or ""
         config = get_config()
@@ -4012,8 +4011,8 @@ class GeminiSDKProvider(LLMProvider):
                 tools=[mcp_toolset],
             )
             session_service = InMemorySessionService()
-            # Create the session explicitly so the runner can find it.
-            # (InMemorySessionService does not auto-create on first run_async call.)
+            # Create the session explicitly — InMemorySessionService does not
+            # auto-create on first run_async call.
             session = await session_service.create_session(
                 app_name="testmcpy",
                 user_id="testmcpy",
@@ -4030,8 +4029,15 @@ class GeminiSDKProvider(LLMProvider):
             )
 
             tool_calls: list[dict[str, Any]] = []
+            # Indexed by function name for response correlation.
+            func_responses_by_name: dict[str, Any] = {}
             response_parts: list[str] = []
-            last_usage: Any = None
+            # Accumulate usage across all model-response events (each tool round
+            # trip can produce one; the final synthesis produces another).
+            total_prompt_tokens = 0
+            total_completion_tokens = 0
+            total_tokens = 0
+            has_usage = False
 
             async with asyncio.timeout(timeout):
                 async for event in runner.run_async(
@@ -4039,7 +4045,7 @@ class GeminiSDKProvider(LLMProvider):
                     session_id=session.id,
                     new_message=new_message,
                 ):
-                    # Collect tool calls from function-call events.
+                    # Collect function calls made by the model.
                     for fc in event.get_function_calls():
                         tool_calls.append(
                             {
@@ -4047,32 +4053,69 @@ class GeminiSDKProvider(LLMProvider):
                                 "arguments": dict(fc.args) if fc.args else {},
                             }
                         )
+                    # Collect function responses (already executed by McpToolset)
+                    # so test_runner.py does not re-execute them.
+                    for fr in event.get_function_responses():
+                        func_responses_by_name[fr.name] = fr
                     # Collect final response text.
                     if event.is_final_response() and event.content:
                         for part in event.content.parts or []:
                             if getattr(part, "text", None):
                                 response_parts.append(part.text)
-                    # Accumulate token usage from the last event that carries it.
+                    # Sum usage across every model-response event.
                     if event.usage_metadata is not None:
-                        last_usage = event.usage_metadata
+                        has_usage = True
+                        total_prompt_tokens += (
+                            getattr(event.usage_metadata, "prompt_token_count", 0) or 0
+                        )
+                        total_completion_tokens += (
+                            getattr(event.usage_metadata, "candidates_token_count", 0) or 0
+                        )
+                        total_tokens += getattr(event.usage_metadata, "total_token_count", 0) or 0
 
-            token_usage = None
-            if last_usage is not None:
-                prompt_tokens = getattr(last_usage, "prompt_token_count", None)
-                completion_tokens = getattr(last_usage, "candidates_token_count", None)
-                if prompt_tokens is not None:
-                    token_usage = {
-                        "prompt": prompt_tokens,
-                        "completion": completion_tokens or 0,
-                        "total": getattr(last_usage, "total_token_count", None)
-                        or (prompt_tokens + (completion_tokens or 0)),
-                    }
+            # Build MCPToolResult objects from ADK function responses so
+            # test_runner knows these calls are already executed.
+            mcp_tool_results = []
+            for tc in tool_calls:
+                fr = func_responses_by_name.get(tc["name"])
+                if fr is not None:
+                    mcp_tool_results.append(
+                        MCPToolResult(
+                            tool_call_id=getattr(fr, "id", tc["name"]),
+                            tool_name=tc["name"],
+                            content=getattr(fr, "response", {}),
+                            is_error=False,
+                        )
+                    )
+
+            token_usage = (
+                {
+                    "prompt": total_prompt_tokens,
+                    "completion": total_completion_tokens,
+                    "total": total_tokens or total_prompt_tokens + total_completion_tokens,
+                }
+                if has_usage
+                else None
+            )
+
+            # Estimate cost from token counts using registry pricing.
+            cost = 0.0
+            if token_usage:
+                from .model_registry import get_model  # noqa: PLC0415
+
+                model_info = get_model(self._registry_model_id) or get_model(self.model)
+                if model_info:
+                    cost = (
+                        token_usage["prompt"] * model_info.input_price_per_1m / 1_000_000
+                        + token_usage["completion"] * model_info.output_price_per_1m / 1_000_000
+                    )
 
             return LLMResult(
                 response=" ".join(response_parts),
                 tool_calls=tool_calls,
+                tool_results=mcp_tool_results,
                 token_usage=token_usage,
-                cost=0.0,
+                cost=cost,
                 duration=time.time() - start_time,
                 raw_response={"parts": response_parts},
             )
@@ -4083,10 +4126,18 @@ class GeminiSDKProvider(LLMProvider):
                 tool_calls=[],
                 duration=time.time() - start_time,
             )
+        except (ConnectionError, TimeoutError, OSError) as e:
+            # Expected network/MCP errors — surface cleanly without traceback.
+            _gemini_sdk_logger.warning("[GeminiSDK] connection error: %s", e)
+            return LLMResult(
+                response=f"Error: {e}",
+                tool_calls=[],
+                duration=time.time() - start_time,
+            )
         except Exception as e:
-            # generate_with_tools must never raise — the eval harness expects an
-            # LLMResult so the test run keeps going and records a clean failure.
-            # Log at exception level so the traceback is visible in server logs.
+            # Unexpected errors (SDK bugs, event-shape regressions, etc.) — log
+            # with full traceback so they surface in server logs rather than
+            # vanishing as silent 0-score eval failures.
             _gemini_sdk_logger.exception("[GeminiSDK] generate_with_tools failed: %s", e)
             return LLMResult(
                 response=f"Error: {e}",
@@ -4094,7 +4145,12 @@ class GeminiSDKProvider(LLMProvider):
                 duration=time.time() - start_time,
             )
         finally:
-            await mcp_toolset.close()
+            # Guard cleanup separately so a close() error does not suppress the
+            # LLMResult already returned above.
+            try:
+                await mcp_toolset.close()
+            except Exception:
+                _gemini_sdk_logger.debug("[GeminiSDK] mcp_toolset.close() raised", exc_info=True)
 
     async def close(self) -> None:
         """No persistent connections to close (MCP session is per-request)."""

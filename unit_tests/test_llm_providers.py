@@ -529,6 +529,137 @@ class TestGeminiSDKProvider:
         await p.initialize()
         assert p._mcp_headers == {"Authorization": "Bearer bearer-gemini-xyz"}
 
+    @pytest.mark.asyncio
+    async def test_generate_with_tools_fake_events(self) -> None:
+        """generate_with_tools must: populate tool_results, sum usage, compute cost,
+        not re-execute tools, and close McpToolset on completion."""
+        pytest.importorskip("google.adk", reason="google-adk not installed")
+        import types
+        import uuid as _uuid
+
+        from google.adk.events.event import Event
+
+        # Build fake events:
+        # 1. function-call event (model calls list_dashboards)
+        # 2. function-response event (ADK/McpToolset already executed it)
+        # 3. final-response event with text + usage_metadata
+        class _FakeUsage:
+            prompt_token_count = 10
+            candidates_token_count = 20
+            total_token_count = 30
+
+        class _FakeFunctionCall:
+            name = "list_dashboards"
+            args = {"page": 1}
+
+        class _FakeFunctionResponse:
+            name = "list_dashboards"
+            id = "fc-1"
+            response = {"dashboards": ["d1", "d2"]}
+
+        class _FakePart:
+            text = "Found 2 dashboards."
+            function_call = None
+            function_response = None
+
+        class _FakeContent:
+            parts = [_FakePart()]
+
+        class _FakeAgent:
+            pass
+
+        # Build real Event stubs using the public dataclass
+        fc_event = Event(raw_item={}, agent=_FakeAgent())
+        fr_event = Event(raw_item={}, agent=_FakeAgent())
+        final_event = Event(raw_item={}, agent=_FakeAgent())
+
+        fc_event.get_function_calls = lambda: [_FakeFunctionCall()]
+        fc_event.get_function_responses = lambda: []
+        fc_event.is_final_response = lambda: False
+        fc_event.content = None
+        fc_event.usage_metadata = None
+
+        fr_event.get_function_calls = lambda: []
+        fr_event.get_function_responses = lambda: [_FakeFunctionResponse()]
+        fr_event.is_final_response = lambda: False
+        fr_event.content = None
+        fr_event.usage_metadata = _FakeUsage()
+
+        final_event.get_function_calls = lambda: []
+        final_event.get_function_responses = lambda: []
+        final_event.is_final_response = lambda: True
+        final_event.content = _FakeContent()
+        final_event.usage_metadata = _FakeUsage()
+
+        async def _fake_run_async(**kwargs):
+            for ev in [fc_event, fr_event, final_event]:
+                yield ev
+
+        closed = []
+
+        class _FakeMcpToolset:
+            async def close(self):
+                closed.append(True)
+
+        class _FakeSession:
+            id = _uuid.uuid4().hex
+
+        class _FakeSessionService:
+            async def create_session(self, **kwargs):
+                return _FakeSession()
+
+        class _FakeRunner:
+            def __init__(self, **kwargs):
+                pass
+
+            def run_async(self, **kwargs):
+                return _fake_run_async(**kwargs)
+
+        from unittest.mock import patch
+
+        p = GeminiSDKProvider(
+            model="gemini-sdk-flash",
+            mcp_url="https://mcp.example.com/mcp",
+            api_key="AIza-test",
+        )
+        p._mcp_headers = {}
+
+        with (
+            patch(
+                "testmcpy.src.llm_integration.McpToolset",
+                return_value=_FakeMcpToolset(),
+            ),
+            patch(
+                "testmcpy.src.llm_integration.InMemorySessionService",
+                return_value=_FakeSessionService(),
+            ),
+            patch(
+                "testmcpy.src.llm_integration.Runner",
+                side_effect=lambda **kw: _FakeRunner(**kw),
+            ),
+            patch("testmcpy.src.llm_integration.StreamableHTTPConnectionParams"),
+            patch("testmcpy.src.llm_integration.Agent"),
+            patch("testmcpy.src.llm_integration.Gemini"),
+        ):
+            result = await p.generate_with_tools("list dashboards", [], timeout=30.0)
+
+        # tool_calls populated
+        assert len(result.tool_calls) == 1
+        assert result.tool_calls[0]["name"] == "list_dashboards"
+        # tool_results populated — no second MCP execution needed
+        assert len(result.tool_results) == 1
+        assert result.tool_results[0].tool_name == "list_dashboards"
+        # usage summed across two usage-bearing events
+        assert result.token_usage is not None
+        assert result.token_usage["prompt"] == 20  # 10 + 10
+        assert result.token_usage["completion"] == 40  # 20 + 20
+        # cost nonzero (registry has pricing for gemini-sdk-flash)
+        assert result.cost > 0
+        # response text collected
+        assert "dashboards" in result.response.lower()
+        # toolset closed
+        assert closed == [True]
+
 
 # ---------------------------------------------------------------------------
 # AssistantProvider SSE tool_call parsing tests

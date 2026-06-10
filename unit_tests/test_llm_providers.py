@@ -337,18 +337,22 @@ class TestCodexSDKProvider:
     def test_read_cached_codex_token_present(self, tmp_path, monkeypatch) -> None:
         auth_file = tmp_path / ".codex" / "auth.json"
         auth_file.parent.mkdir(parents=True)
-        auth_file.write_text('{"accessToken": "oauth-tok-123"}')
+        # Real Codex CLI schema: OPENAI_API_KEY at top level, OAuth tokens nested
+        auth_file.write_text(
+            '{"OPENAI_API_KEY": "sk-stored-key", "tokens": {"access_token": "oauth-only"}}'
+        )
         monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
         p = CodexSDKProvider(model="codex-o3")
-        assert p._read_cached_codex_token() == "oauth-tok-123"
+        assert p._read_cached_codex_token() == "sk-stored-key"
 
-    def test_read_cached_codex_token_snake_case(self, tmp_path, monkeypatch) -> None:
+    def test_read_cached_codex_token_oauth_only_returns_none(self, tmp_path, monkeypatch) -> None:
+        # OAuth-only login: OPENAI_API_KEY is null — ChatGPT token can't hit Platform API
         auth_file = tmp_path / ".codex" / "auth.json"
         auth_file.parent.mkdir(parents=True)
-        auth_file.write_text('{"access_token": "snake-tok-456"}')
+        auth_file.write_text('{"OPENAI_API_KEY": null, "tokens": {"access_token": "chatgpt-tok"}}')
         monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
         p = CodexSDKProvider(model="codex-o3")
-        assert p._read_cached_codex_token() == "snake-tok-456"
+        assert p._read_cached_codex_token() is None
 
     def test_read_cached_codex_token_missing_file(self, tmp_path, monkeypatch) -> None:
         monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)

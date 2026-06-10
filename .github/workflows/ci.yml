@@ -131,3 +131,40 @@ jobs:
           out = subprocess.check_output([cli_path, '--version'], text=True, timeout=30)
           print(f'CLI invoked successfully: {out.strip()}')
           "
+
+  docker-openai-agents:
+    # Guards the openai-agents transitive dependency set introduced by
+    # CodexSDKProvider.  openai-agents>=0.17,<0.18 forces openai>=2.36,<3
+    # and pydantic>=2.12.2 — a resolver conflict against either of those
+    # (or a future openai-agents bump that moves the agents.* import paths
+    # we rely on) would be caught here rather than at runtime.
+    name: Docker build (openai-agents dep smoke)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Build default image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: testmcpy:agents-ci
+      - name: Verify no resolver conflict (pip check)
+        run: docker run --rm testmcpy:agents-ci pip check
+      - name: Verify openai-agents import paths exist at pinned version
+        run: |
+          docker run --rm testmcpy:agents-ci python -c "
+          import agents
+          from agents import Agent, Runner
+          from agents.mcp import MCPServerStreamableHttp
+          from agents.models.openai_provider import OpenAIProvider
+          from agents.run_config import RunConfig
+          from agents.items import ToolCallItem, ToolCallOutputItem
+          print('openai-agents', agents.__version__, 'import paths OK')
+          import openai, pydantic
+          print('openai', openai.__version__, 'pydantic', pydantic.__version__)
+          import claude_agent_sdk, fastmcp, mcp
+          print('coexistence with claude-agent-sdk OK')
+          "

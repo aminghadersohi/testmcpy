@@ -20,6 +20,8 @@ services:
       args:
         INSTALL_CLAUDE_CLI: ${INSTALL_CLAUDE_CLI:-false}
         CLAUDE_CLI_VERSION: ${CLAUDE_CLI_VERSION:-}
+        INSTALL_CODEX_CLI: ${INSTALL_CODEX_CLI:-false}
+        CODEX_CLI_VERSION: ${CODEX_CLI_VERSION:-}
     image: testmcpy:latest
     ports:
       - "${PORT:-7100}:8000"

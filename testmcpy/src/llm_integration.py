@@ -3365,7 +3365,9 @@ class CodexSDKProvider(LLMProvider):
             self.openai_api_key = self._read_cached_codex_token()
         if not self.openai_api_key:
             raise ValueError(
-                "No OpenAI API key found. Set OPENAI_API_KEY or run `codex auth login`."
+                "No OpenAI API key found. Set OPENAI_API_KEY or configure the Codex CLI "
+                "with an API key (`codex config set apiKey sk-...`) so it is stored in "
+                "~/.codex/auth.json."
             )
 
         # Resolve MCP Bearer token from auth config
@@ -3396,14 +3398,24 @@ class CodexSDKProvider(LLMProvider):
         _codex_sdk_logger.info("[CodexSDK] MCP server ready: %s", self.mcp_url)
 
     def _read_cached_codex_token(self) -> str | None:
-        """Read cached OAuth access token from ~/.codex/auth.json."""
+        """Read the stored OpenAI API key from ~/.codex/auth.json.
+
+        The Codex CLI persists credentials as:
+          {"OPENAI_API_KEY": "sk-...", "tokens": {"access_token": "...", ...}}
+
+        The top-level ``OPENAI_API_KEY`` is an OpenAI Platform key usable with
+        api.openai.com.  The nested OAuth ``access_token`` is a ChatGPT-backend
+        token and does NOT work with the Platform API — don't read it here.
+        Returns None when the key is absent or null (e.g. after a pure OAuth
+        login where no API key was configured).
+        """
         auth_path = Path.home() / ".codex" / "auth.json"
         if not auth_path.exists():
             return None
         try:
             data = json.loads(auth_path.read_text())
-            # Codex CLI uses camelCase; fall back to snake_case just in case
-            return data.get("accessToken") or data.get("access_token")
+            api_key = data.get("OPENAI_API_KEY")
+            return api_key if isinstance(api_key, str) and api_key else None
         except (json.JSONDecodeError, OSError) as e:
             _codex_sdk_logger.warning("[CodexSDK] Could not read %s: %s", auth_path, e)
             return None
@@ -3514,10 +3526,34 @@ class CodexSDKProvider(LLMProvider):
                 )
 
             response_text = str(result.final_output) if result.final_output is not None else ""
+
+            # Extract tool calls from the run's item trace.
+            from agents.items import ToolCallItem  # noqa: PLC0415
+
+            tool_calls: list[dict[str, Any]] = []
+            for item in result.new_items:
+                if isinstance(item, ToolCallItem) and item.tool_name:
+                    raw_args = item.arguments or "{}"
+                    try:
+                        args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+                    except json.JSONDecodeError:
+                        args = {}
+                    tool_calls.append({"name": item.tool_name, "arguments": args})
+
+            # Extract token usage when available.
+            usage = getattr(getattr(result, "context_wrapper", None), "usage", None)
+            input_tokens = getattr(usage, "input_tokens", None)
+            output_tokens = getattr(usage, "output_tokens", None)
+            token_usage = (
+                {"input": input_tokens, "output": output_tokens}
+                if input_tokens is not None
+                else None
+            )
+
             return LLMResult(
                 response=response_text,
-                tool_calls=[],
-                token_usage=None,
+                tool_calls=tool_calls,
+                token_usage=token_usage,
                 cost=0.0,
                 duration=time.time() - start_time,
                 raw_response={"final_output": response_text},
@@ -3529,9 +3565,13 @@ class CodexSDKProvider(LLMProvider):
                 tool_calls=[],
                 duration=time.time() - start_time,
             )
-        except (ConnectionError, TimeoutError, OSError) as e:
+        except Exception as e:  # openai.APIError, agents errors, MCP/httpx errors
+            # generate_with_tools must never raise — the eval harness expects an
+            # LLMResult even on auth/rate-limit/connection failures so the test
+            # run keeps going and records a clean failure result.
+            _codex_sdk_logger.warning("[CodexSDK] generate_with_tools failed: %s", e)
             return LLMResult(
-                response=f"Error connecting to MCP server: {e}",
+                response=f"Error: {e}",
                 tool_calls=[],
                 duration=time.time() - start_time,
             )

@@ -535,13 +535,10 @@ class TestGeminiSDKProvider:
         not re-execute tools, and close McpToolset on completion."""
         pytest.importorskip("google.adk", reason="google-adk not installed")
         import uuid as _uuid
+        from unittest.mock import MagicMock
 
-        from google.adk.events.event import Event
-
-        # Build fake events:
-        # 1. function-call event (model calls list_dashboards)
-        # 2. function-response event (ADK/McpToolset already executed it)
-        # 3. final-response event with text + usage_metadata
+        # Build fake events using MagicMock — Event is a Pydantic model and does
+        # not allow setting arbitrary attributes directly.
         class _FakeUsage:
             prompt_token_count = 10
             candidates_token_count = 20
@@ -558,35 +555,28 @@ class TestGeminiSDKProvider:
 
         class _FakePart:
             text = "Found 2 dashboards."
-            function_call = None
-            function_response = None
 
         class _FakeContent:
             parts = [_FakePart()]
 
-        class _FakeAgent:
-            pass
-
-        # Build real Event stubs using the public dataclass
-        fc_event = Event(raw_item={}, agent=_FakeAgent())
-        fr_event = Event(raw_item={}, agent=_FakeAgent())
-        final_event = Event(raw_item={}, agent=_FakeAgent())
-
-        fc_event.get_function_calls = lambda: [_FakeFunctionCall()]
-        fc_event.get_function_responses = lambda: []
-        fc_event.is_final_response = lambda: False
+        fc_event = MagicMock()
+        fc_event.get_function_calls.return_value = [_FakeFunctionCall()]
+        fc_event.get_function_responses.return_value = []
+        fc_event.is_final_response.return_value = False
         fc_event.content = None
         fc_event.usage_metadata = None
 
-        fr_event.get_function_calls = lambda: []
-        fr_event.get_function_responses = lambda: [_FakeFunctionResponse()]
-        fr_event.is_final_response = lambda: False
+        fr_event = MagicMock()
+        fr_event.get_function_calls.return_value = []
+        fr_event.get_function_responses.return_value = [_FakeFunctionResponse()]
+        fr_event.is_final_response.return_value = False
         fr_event.content = None
         fr_event.usage_metadata = _FakeUsage()
 
-        final_event.get_function_calls = lambda: []
-        final_event.get_function_responses = lambda: []
-        final_event.is_final_response = lambda: True
+        final_event = MagicMock()
+        final_event.get_function_calls.return_value = []
+        final_event.get_function_responses.return_value = []
+        final_event.is_final_response.return_value = True
         final_event.content = _FakeContent()
         final_event.usage_metadata = _FakeUsage()
 

@@ -19,6 +19,8 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+          cache: 'pip'
+          cache-dependency-path: pyproject.toml
 
       - name: Install dependencies
         run: |
@@ -30,16 +32,14 @@ jobs:
           ruff check testmcpy unit_tests integration_tests
           ruff format --check testmcpy unit_tests integration_tests
 
-      - name: Type check with mypy
-        run: mypy testmcpy
-        continue-on-error: true
+      - name: Type check with mypy (ratchet — fails only if error count grows)
+        run: bash scripts/check_mypy_ratchet.sh
 
       - name: Run tests with pytest
         run: pytest unit_tests/ --cov=testmcpy --cov-report=xml --cov-report=term
 
       - name: Run integration tests
         run: python -m pytest integration_tests/ -v --tb=short -m "not e2e"
-        continue-on-error: true
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v4
@@ -69,7 +69,6 @@ jobs:
 
       - name: Test UI
         run: cd testmcpy/ui && npm test
-        continue-on-error: true
 
   docker-claude-cli:
     # Guards the opt-in path that bakes the Claude Code CLI into the

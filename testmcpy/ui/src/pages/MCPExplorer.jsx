@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react'
 import { useNotification } from '../components/NotificationProvider'
-import { ChevronDown, ChevronRight, Copy, Check, EyeOff, Sparkles, Code2, Search, Command, HelpCircle, CheckSquare, Square, MessageSquare, Wand2, TestTube2, Play, Clock, Bug, AlertCircle, GitCompare, LayoutList, LayoutGrid, History, Diff } from 'lucide-react'
+import { Server, ChevronDown, ChevronRight, Copy, Check, EyeOff, Sparkles, Code2, Search, Command, HelpCircle, CheckSquare, Square, MessageSquare, Wand2, TestTube2, Play, Clock, Bug, AlertCircle, GitCompare, LayoutList, LayoutGrid, History, Diff } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import ReactJson from '@microlink/react-json-view'
 import ParameterCard from '../components/ParameterCard'
@@ -191,13 +191,16 @@ function MCPExplorer({ selectedProfiles = [] }) {
         toolsData = cached.tools
       }
 
+      // With no profile selected there is nothing to wait for — fail fast
+      // (single attempt) so the setup guidance below appears immediately.
+      const retries = activeProfile ? undefined : 1
       const [resourcesRes, promptsRes] = await Promise.all([
-        fetchWithRetry(`/api/mcp/resources${queryString}`),
-        fetchWithRetry(`/api/mcp/prompts${queryString}`),
+        fetchWithRetry(`/api/mcp/resources${queryString}`, retries),
+        fetchWithRetry(`/api/mcp/prompts${queryString}`, retries),
       ])
 
       if (toolsData === null) {
-        const toolsRes = await fetchWithRetry(`/api/mcp/tools${queryString}`)
+        const toolsRes = await fetchWithRetry(`/api/mcp/tools${queryString}`, retries)
         toolsData = await toolsRes.json()
         toolsCacheRef.current[cacheKey] = { tools: toolsData, loadedAt: new Date().getTime() }
       }
@@ -667,6 +670,58 @@ function MCPExplorer({ selectedProfiles = [] }) {
             {Array.from({ length: 5 }).map((_, idx) => (
               <ToolCardSkeleton key={idx} />
             ))}
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  if (error && !activeProfile) {
+    return (
+      <div className="h-full flex flex-col">
+        <div className="p-4 border-b border-border bg-surface-elevated">
+          <h1 className="text-2xl font-bold">Explorer</h1>
+          <p className="text-text-secondary mt-1 text-base">
+            No MCP server connected
+          </p>
+        </div>
+        <div className="flex-1 overflow-auto p-4 bg-background-subtle">
+          <div className="max-w-2xl mx-auto mt-8">
+            <div className="bg-surface-elevated border border-border rounded-lg p-8 text-center">
+              <Server size={48} className="text-text-tertiary mx-auto mb-4" />
+              <h2 className="text-xl font-semibold mb-2">Connect an MCP server to get started</h2>
+              <p className="text-text-secondary mb-6">
+                The Explorer lists the tools, resources and prompts of a connected
+                MCP server. Two quick steps:
+              </p>
+              <div className="text-left max-w-md mx-auto space-y-3 mb-6">
+                <div className="flex items-start gap-3">
+                  <span className="flex-shrink-0 w-6 h-6 rounded-full bg-primary/15 text-primary text-sm font-semibold flex items-center justify-center">1</span>
+                  <div>
+                    <p className="font-medium">Add an MCP profile</p>
+                    <p className="text-sm text-text-secondary">Point testmcpy at your MCP server URL and auth.</p>
+                  </div>
+                </div>
+                <div className="flex items-start gap-3">
+                  <span className="flex-shrink-0 w-6 h-6 rounded-full bg-primary/15 text-primary text-sm font-semibold flex items-center justify-center">2</span>
+                  <div>
+                    <p className="font-medium">Pick an LLM profile</p>
+                    <p className="text-sm text-text-secondary">Needed to run tests and chat against the tools.</p>
+                  </div>
+                </div>
+              </div>
+              <div className="flex items-center justify-center gap-3">
+                <button onClick={() => navigate('/mcp-profiles')} className="btn btn-primary">
+                  Configure MCP profile
+                </button>
+                <button onClick={() => navigate('/llm-profiles')} className="btn btn-secondary">
+                  LLM profiles
+                </button>
+              </div>
+              <button onClick={loadData} className="mt-4 text-sm text-text-tertiary hover:text-text-primary underline">
+                Retry connection
+              </button>
+            </div>
           </div>
         </div>
       </div>

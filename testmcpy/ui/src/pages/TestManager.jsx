@@ -488,7 +488,6 @@ function TestManager({ selectedProfiles = [], selectedLlmProfile = null, llmProf
   // directoryRunProgress moved to TestRunContext (SC-108184) so a reload
   // mid-batch can reattach via the persisted currentRunId.
   const [resultsHistory, setResultsHistory] = useState([])
-  const [selectedHistoryRun, setSelectedHistoryRun] = useState(null)
   const [expandedRunId, setExpandedRunId] = useState(null)
   const [expandedRunDetails, setExpandedRunDetails] = useState({})
   const [loadingRunId, setLoadingRunId] = useState(null)
@@ -764,16 +763,6 @@ function TestManager({ selectedProfiles = [], selectedLlmProfile = null, llmProf
     }
     return [...filtered].sort(cmp)
   }, [resultsHistory, historyFilterQuery, historyProviderFilter, historyFailedOnly, historySort])
-
-  // The timeline chart's "Older → Recent" axis must always be chronological,
-  // independent of the table's current sort key. Without this the bars
-  // re-order when the user sorts by Pass/Cost/Time and the axis labels
-  // become misleading.
-  const filteredHistoryChronological = useMemo(() => {
-    return [...filteredHistory].sort(
-      (a, b) => new Date(a.timestamp) - new Date(b.timestamp),
-    )
-  }, [filteredHistory])
 
   // Dashboard metrics computed from history — no extra API call needed
   const dashboardData = useMemo(() => {

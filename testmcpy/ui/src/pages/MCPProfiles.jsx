@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react'
+import { useNotification } from '../components/NotificationProvider'
 import {
   Server, Check, AlertCircle, RefreshCw, ChevronDown, ChevronRight,
   Edit2, Trash2, Plus, Save, X, Copy, Download, Upload, Key, Lock,
@@ -6,32 +7,6 @@ import {
   Settings, Wand2, Loader2
 } from 'lucide-react'
 import Wizard from '../components/Wizard'
-
-// Toast notification component
-function Toast({ message, type = 'success', onClose }) {
-  useEffect(() => {
-    const timer = setTimeout(onClose, 3000)
-    return () => clearTimeout(timer)
-  }, [onClose])
-
-  const bgColor = type === 'success' ? 'bg-success border-success text-white' :
-                  type === 'error' ? 'bg-error border-error text-white' :
-                  'bg-warning border-warning text-white'
-
-  const icon = type === 'success' ? <CheckCircle size={16} /> :
-               type === 'error' ? <XCircle size={16} /> :
-               <AlertTriangle size={16} />
-
-  return (
-    <div className={`fixed top-4 right-4 ${bgColor} border-2 rounded-lg p-4 shadow-xl flex items-center gap-3 z-50 animate-slide-in`}>
-      {icon}
-      <span className="font-medium">{message}</span>
-      <button onClick={onClose} className="ml-2 hover:opacity-70">
-        <X size={16} />
-      </button>
-    </div>
-  )
-}
 
 // Confirmation dialog component
 function ConfirmDialog({ title, message, onConfirm, onCancel }) {
@@ -1017,7 +992,6 @@ function MCPProfiles({ selectedProfiles = [], onSelectProfiles, hideHeader = fal
   const [expandedProfiles, setExpandedProfiles] = useState(new Set())
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
-  const [toast, setToast] = useState(null)
   const [confirmDialog, setConfirmDialog] = useState(null)
   const [profileEditor, setProfileEditor] = useState(null)
   const [mcpEditor, setMCPEditor] = useState(null)
@@ -1077,8 +1051,11 @@ function MCPProfiles({ selectedProfiles = [], onSelectProfiles, hideHeader = fal
     }
   }
 
+  const { success: notifySuccess, error: notifyError, warning: notifyWarning } = useNotification()
   const showToast = (message, type = 'success') => {
-    setToast({ message, type })
+    if (type === 'error') notifyError(message)
+    else if (type === 'warning') notifyWarning(message)
+    else notifySuccess(message)
   }
 
   const toggleServer = (profileId, mcpName) => {
@@ -1791,14 +1768,6 @@ function MCPProfiles({ selectedProfiles = [], onSelectProfiles, hideHeader = fal
       </div>
 
       {/* Modals and Dialogs */}
-      {toast && (
-        <Toast
-          message={toast.message}
-          type={toast.type}
-          onClose={() => setToast(null)}
-        />
-      )}
-
       {confirmDialog && (
         <ConfirmDialog
           title={confirmDialog.title}

@@ -163,6 +163,54 @@ class TestClaudeSDKProviderOAuth:
 
 
 # ---------------------------------------------------------------------------
+# ClaudeSDKProvider env construction tests
+# ---------------------------------------------------------------------------
+
+
+class TestClaudeSDKBuildCleanEnv:
+    """Cover the subprocess env handed to the Claude CLI.
+
+    The IS_SANDBOX=1 entry is load-bearing: recent Claude CLI versions
+    refuse --dangerously-skip-permissions (driven by permission_mode=
+    "bypassPermissions") under root/sudo unless IS_SANDBOX=1 is set, which
+    breaks testmcpy 100% inside our root Docker container.
+    """
+
+    def test_is_sandbox_set(self):
+        env = ClaudeSDKProvider._build_clean_env({})
+        assert env["IS_SANDBOX"] == "1"
+
+    def test_anthropic_api_key_cleared(self):
+        env = ClaudeSDKProvider._build_clean_env({"ANTHROPIC_API_KEY": "sk-real-key"})
+        assert env["ANTHROPIC_API_KEY"] == ""
+
+    def test_claude_code_session_vars_stripped(self):
+        source = {
+            "CLAUDECODE": "1",
+            "CLAUDE_CODE_ENTRYPOINT": "cli",
+            "CLAUDE_CODE_SOMETHING": "x",
+            "PATH": "/usr/bin",
+        }
+        env = ClaudeSDKProvider._build_clean_env(source)
+        assert "CLAUDECODE" not in env
+        assert not any(k.startswith("CLAUDE_CODE") for k in env)
+        # Unrelated vars are passed through.
+        assert env["PATH"] == "/usr/bin"
+
+    def test_unrelated_env_preserved(self):
+        env = ClaudeSDKProvider._build_clean_env({"HOME": "/root", "FOO": "bar"})
+        assert env["HOME"] == "/root"
+        assert env["FOO"] == "bar"
+
+    def test_default_reads_os_environ(self, monkeypatch):
+        # Without an explicit source_env, _build_clean_env should read os.environ
+        # — and still apply IS_SANDBOX=1 regardless of whether the caller is root.
+        monkeypatch.delenv("IS_SANDBOX", raising=False)
+        env = ClaudeSDKProvider._build_clean_env()
+        assert env["IS_SANDBOX"] == "1"
+
+
+# ---------------------------------------------------------------------------
 # ClaudeSDK verbose log format tests
 # ---------------------------------------------------------------------------
 

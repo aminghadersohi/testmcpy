@@ -4040,6 +4040,8 @@ class GeminiSDKProvider(LLMProvider):
             has_usage = False
 
             async def _collect_events() -> None:
+                # += rebinds the outer names — nonlocal required.
+                nonlocal has_usage, total_prompt_tokens, total_completion_tokens, total_tokens
                 async for event in runner.run_async(
                     user_id="testmcpy",
                     session_id=session.id,

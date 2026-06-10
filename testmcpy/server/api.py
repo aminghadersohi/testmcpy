@@ -111,6 +111,9 @@ active_websockets: list[WebSocket] = []
 
 # Exponential back-off state for failed MCP connections.
 # Maps cache_key → (next_retry_monotonic, failure_count)
+# No lock needed: the helpers below never await between read and write, so
+# each mutation runs atomically on the event loop; the connection-init path
+# itself is serialized per key by _client_init_locks.
 _connection_backoff: dict[str, tuple[float, int]] = {}
 _BACKOFF_BASE = 5.0  # seconds for first retry
 _BACKOFF_MAX = 300.0  # cap at 5 minutes
@@ -201,6 +204,8 @@ async def get_mcp_clients_for_profile(profile_id: str) -> list[tuple[str, MCPCli
             try:
                 await client.initialize()
             except Exception:
+                # Intentionally broad: any init failure (auth, network, SDK
+                # bug) must record back-off state before re-raising.
                 _record_failure(cache_key)
                 raise
 
@@ -276,6 +281,8 @@ async def get_mcp_client_for_server(profile_id: str, mcp_name: str) -> MCPClient
         try:
             await client.initialize()
         except Exception:
+            # Intentionally broad: any init failure (auth, network, SDK bug)
+            # must record back-off state before re-raising.
             _record_failure(cache_key)
             raise
 
@@ -308,7 +315,7 @@ async def clear_cached_client(cache_key: str) -> bool:
         try:
             await client.close()
             print(f"Cleared cached client '{cache_key}'")
-        except Exception as e:
+        except (OSError, RuntimeError) as e:
             print(f"Warning: Failed to close cached client '{cache_key}': {e}")
         return True
     return False

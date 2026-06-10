@@ -21,14 +21,14 @@ import httpx
 # Import MCP components (we'll handle the import error gracefully)
 try:
     from ..config import get_config
-    from .mcp_client import MCPClient, MCPTool, MCPToolCall, MCPToolResult
+    from .mcp_client import MCPClient, MCPError, MCPTool, MCPToolCall, MCPToolResult
 except ImportError:
     # Fallback for when running as script
     import os
     import sys
 
     sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-    from mcp_client import MCPClient, MCPTool, MCPToolCall, MCPToolResult
+    from mcp_client import MCPClient, MCPError, MCPTool, MCPToolCall, MCPToolResult
 
     # Config will fall back to environment variables
     def get_config():
@@ -37,6 +37,9 @@ except ImportError:
                 return os.getenv(key, default)
 
         return FallbackConfig()
+
+
+_logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -888,12 +891,12 @@ class ToolDiscoveryService:
             return tool_schemas
 
         except Exception as e:
-            raise Exception(f"Failed to discover MCP tools: {e}")
+            raise MCPError(f"Failed to discover MCP tools: {e}") from e
 
     async def execute_tool_call(self, tool_call: dict[str, Any]) -> MCPToolResult:
         """Execute tool call via local MCP client."""
         if not self._mcp_client:
-            raise Exception("MCP client not initialized")
+            raise MCPError("MCP client not initialized")
 
         mcp_call = MCPToolCall(
             name=tool_call["name"],
@@ -1094,12 +1097,16 @@ class AnthropicProvider(LLMProvider):
                     )
 
             # Execute tool calls locally (don't append to response_text - tool results shown separately in UI)
+            # call_tool() reports tool failures as MCPToolResult(is_error=True);
+            # only client-not-initialized or a malformed tool_call dict raise.
             for tool_call in tool_calls:
                 try:
                     await self.tool_discovery.execute_tool_call(tool_call)
                     # Tool results are returned separately, not appended to response text
-                except Exception:
-                    pass  # Errors are handled by the tool execution
+                except (MCPError, KeyError) as e:
+                    _logger.warning(
+                        "Tool call %s failed locally: %s", tool_call.get("name", "?"), e
+                    )
 
             # Calculate usage and cost
             usage = result.get("usage", {})
@@ -1345,8 +1352,10 @@ class BedrockProvider(LLMProvider):
             for tool_call in tool_calls:
                 try:
                     await self.tool_discovery.execute_tool_call(tool_call)
-                except Exception:
-                    pass
+                except (MCPError, KeyError) as e:
+                    _logger.warning(
+                        "Tool call %s failed locally: %s", tool_call.get("name", "?"), e
+                    )
 
             # Calculate usage and cost
             usage = response.usage
@@ -3359,8 +3368,10 @@ class GeminiProvider(LLMProvider):
             for tool_call in tool_calls:
                 try:
                     await self.tool_discovery.execute_tool_call(tool_call)
-                except Exception:
-                    pass
+                except (MCPError, KeyError) as e:
+                    _logger.warning(
+                        "Tool call %s failed locally: %s", tool_call.get("name", "?"), e
+                    )
 
             # Extract usage metadata
             usage_metadata = result.get("usageMetadata", {})
@@ -3541,8 +3552,10 @@ class CodexCLIProvider(LLMProvider):
             for tool_call in tool_calls:
                 try:
                     await self.tool_discovery.execute_tool_call(tool_call)
-                except Exception:
-                    pass  # Errors are handled by the tool execution
+                except (MCPError, KeyError) as e:
+                    _logger.warning(
+                        "Tool call %s failed locally: %s", tool_call.get("name", "?"), e
+                    )
 
             return LLMResult(
                 response=response_text,

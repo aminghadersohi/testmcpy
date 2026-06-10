@@ -20,10 +20,14 @@ import {
   ArrowRight,
   Info,
   Eye,
-  Timer
+  Timer,
+  Bookmark,
+  Trash2,
+  ExternalLink,
 } from 'lucide-react'
 import ReactJson from '@microlink/react-json-view'
 import { useEditorTheme } from '../hooks/useEditorTheme'
+import { useNavigate } from 'react-router-dom'
 import {
   ReactFlow,
   Background,
@@ -702,8 +706,19 @@ function TestRefreshButton({ tokenUrl, refreshToken, clientId, clientSecret, onN
   )
 }
 
+// Decode a JWT payload without throwing
+function decodeJwtPayload(token) {
+  try {
+    const payload = token.split('.')[1]
+    return JSON.parse(atob(payload.replace(/-/g, '+').replace(/_/g, '/')))
+  } catch {
+    return null
+  }
+}
+
 function AuthDebugger() {
   const { jsonTheme } = useEditorTheme()
+  const navigate = useNavigate()
   const [authType, setAuthType] = useState('oauth')
   const [profiles, setProfiles] = useState([])
   const [selectedProfile, setSelectedProfile] = useState('')
@@ -716,6 +731,12 @@ function AuthDebugger() {
   const [isRetrying, setIsRetrying] = useState(false)
   const [authError, setAuthError] = useState(null)
   const [progressMessage, setProgressMessage] = useState('')
+
+  // Saved sessions — persisted to localStorage
+  const [savedSessions, setSavedSessions] = useState(() => {
+    try { return JSON.parse(localStorage.getItem('testmcpy-auth-sessions') || '[]') }
+    catch { return [] }
+  })
 
   // Form fields for OAuth
   const [clientId, setClientId] = useState('')
@@ -804,6 +825,64 @@ function AuthDebugger() {
   const handleProfileChange = (profileId) => {
     setSelectedProfile(profileId)
     loadFromProfile(profileId)
+  }
+
+  // Save current session to localStorage
+  const saveSession = () => {
+    const name = `${authType.toUpperCase()} session ${new Date().toLocaleString()}`
+    const timestamp = new Date().toISOString()
+
+    // Build sanitized config — never save secrets
+    const safeConfig = { auth_type: authType }
+    if (authType === 'oauth') {
+      safeConfig.token_url = tokenUrl
+      safeConfig.client_id = clientId
+      safeConfig.scopes = scopes
+      safeConfig.mcp_url = mcpUrl
+      safeConfig.oauth_auto_discover = oauthAutoDiscover
+    } else if (authType === 'jwt') {
+      safeConfig.api_url = apiUrl
+    } else if (authType === 'bearer') {
+      safeConfig.mcp_url = mcpUrl
+    }
+
+    const session = {
+      id: Date.now().toString(),
+      name,
+      timestamp,
+      config: safeConfig,
+      result: debugResult,
+    }
+
+    const updated = [session, ...savedSessions]
+    setSavedSessions(updated)
+    localStorage.setItem('testmcpy-auth-sessions', JSON.stringify(updated))
+  }
+
+  // Load a saved session into the form
+  const loadSession = (sessionId) => {
+    const session = savedSessions.find(s => s.id === sessionId)
+    if (!session) return
+
+    const cfg = session.config || {}
+    setAuthType(cfg.auth_type || 'oauth')
+    setTokenUrl(cfg.token_url || '')
+    setClientId(cfg.client_id || '')
+    setScopes(cfg.scopes || '')
+    setMcpUrl(cfg.mcp_url || '')
+    setOauthAutoDiscover(cfg.oauth_auto_discover || false)
+    setApiUrl(cfg.api_url || '')
+    setDebugResult(session.result || null)
+    if (session.result?.steps) {
+      setExpandedSteps(new Set(session.result.steps.map((_, i) => i)))
+    }
+  }
+
+  // Delete a saved session
+  const deleteSession = (sessionId) => {
+    const updated = savedSessions.filter(s => s.id !== sessionId)
+    setSavedSessions(updated)
+    localStorage.setItem('testmcpy-auth-sessions', JSON.stringify(updated))
   }
 
   const handleDebugAuth = async (isRetry = false) => {
@@ -1030,6 +1109,65 @@ function AuthDebugger() {
     return false
   }
 
+  // Security hints derived from current debugResult
+  const securityHints = useMemo(() => {
+    if (!debugResult) return []
+    const hints = []
+
+    // Hint 1: HTTP token URL
+    if (tokenUrl && tokenUrl.startsWith('http://')) {
+      hints.push({
+        level: 'red',
+        message: 'Token URL uses HTTP — credentials sent in plaintext',
+      })
+    }
+
+    // Hint 2: Token expiry — search steps for a JWT access_token
+    let jwtPayload = null
+    for (const step of debugResult.steps || []) {
+      const accessToken = step.data?.access_token
+      if (accessToken && typeof accessToken === 'string') {
+        jwtPayload = decodeJwtPayload(accessToken)
+        if (jwtPayload) break
+      }
+    }
+
+    if (jwtPayload && jwtPayload.exp) {
+      const computeSecondsUntilExpiry = () => {
+        const now = Math.floor(Date.now() / 1000)
+        return jwtPayload.exp - now
+      }
+      const secondsLeft = computeSecondsUntilExpiry()
+      if (secondsLeft < 300) {
+        hints.push({
+          level: 'amber',
+          message: secondsLeft <= 0
+            ? 'Token has already expired'
+            : `Token expires soon (in ${secondsLeft}s)`,
+        })
+      }
+    }
+
+    // Hint 3: Scope mismatch
+    if (scopes && jwtPayload) {
+      const requestedScopes = scopes.split(',').map(s => s.trim()).filter(Boolean)
+      const grantedScopes = (
+        (jwtPayload.scope ? jwtPayload.scope.split(' ') : null) ||
+        jwtPayload.scp ||
+        []
+      )
+      const missing = requestedScopes.filter(s => !grantedScopes.includes(s))
+      if (missing.length > 0) {
+        hints.push({
+          level: 'amber',
+          message: `Scopes not granted: ${missing.join(', ')}`,
+        })
+      }
+    }
+
+    return hints
+  }, [debugResult, tokenUrl, scopes])
+
   return (
     <div className="h-full overflow-auto bg-background">
       <div className="max-w-7xl mx-auto p-4 md:p-6 space-y-6">
@@ -1047,6 +1185,36 @@ function AuthDebugger() {
             </p>
           </div>
         </div>
+
+        {/* Saved Sessions */}
+        {savedSessions.length > 0 && (
+          <div className="bg-surface-elevated rounded-xl border border-border p-4">
+            <h2 className="text-sm font-semibold text-text-primary flex items-center gap-2 mb-3">
+              <Bookmark size={16} className="text-primary" />
+              Saved Sessions
+            </h2>
+            <div className="flex flex-wrap gap-2">
+              {savedSessions.map(session => (
+                <div key={session.id} className="flex items-center gap-1 bg-surface border border-border rounded-lg px-3 py-1.5">
+                  <button
+                    onClick={() => loadSession(session.id)}
+                    className="text-xs text-text-primary hover:text-primary transition-colors"
+                    title={`Saved: ${session.timestamp}`}
+                  >
+                    {session.name}
+                  </button>
+                  <button
+                    onClick={() => deleteSession(session.id)}
+                    className="ml-2 text-text-disabled hover:text-error transition-colors"
+                    title="Delete session"
+                  >
+                    <Trash2 size={12} />
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
           {/* Configuration Panel */}
@@ -1418,13 +1586,25 @@ function AuthDebugger() {
                         </p>
                       </div>
                     </div>
-                    <button
-                      onClick={exportTrace}
-                      className="px-3 py-2 bg-surface hover:bg-surface-hover border border-border rounded-lg transition-colors flex items-center gap-2 text-sm"
-                    >
-                      <Download size={16} />
-                      Export
-                    </button>
+                    <div className="flex items-center gap-2">
+                      {debugResult.success && (
+                        <button
+                          onClick={saveSession}
+                          className="px-3 py-2 bg-primary/10 hover:bg-primary/20 border border-primary/30 text-primary rounded-lg transition-colors flex items-center gap-2 text-sm"
+                          title="Save this session"
+                        >
+                          <Bookmark size={16} />
+                          Save
+                        </button>
+                      )}
+                      <button
+                        onClick={exportTrace}
+                        className="px-3 py-2 bg-surface hover:bg-surface-hover border border-border rounded-lg transition-colors flex items-center gap-2 text-sm"
+                      >
+                        <Download size={16} />
+                        Export
+                      </button>
+                    </div>
                   </div>
 
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -1452,6 +1632,19 @@ function AuthDebugger() {
                       <div className="font-mono text-xs text-text-primary break-all">
                         {debugResult.token_preview}
                       </div>
+                    </div>
+                  )}
+
+                  {/* Open in MCP Explorer button */}
+                  {debugResult.success && (
+                    <div className="mt-4">
+                      <button
+                        onClick={() => navigate('/')}
+                        className="px-4 py-2 bg-success hover:bg-success/90 text-white rounded-lg transition-colors flex items-center gap-2 text-sm font-medium"
+                      >
+                        <ExternalLink size={16} />
+                        Open in MCP Explorer
+                      </button>
                     </div>
                   )}
 
@@ -1504,6 +1697,31 @@ function AuthDebugger() {
                     </div>
                   )}
                 </div>
+
+                {/* Security Analysis */}
+                {securityHints.length > 0 && (
+                  <div className="bg-surface-elevated rounded-xl border border-border p-5">
+                    <h3 className="text-sm font-semibold text-text-primary flex items-center gap-2 mb-3">
+                      <Shield size={16} className="text-primary" />
+                      Security Analysis
+                    </h3>
+                    <div className="space-y-2">
+                      {securityHints.map((hint, idx) => (
+                        <div
+                          key={idx}
+                          className={`flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium ${
+                            hint.level === 'red'
+                              ? 'bg-error/10 border border-error/30 text-error'
+                              : 'bg-yellow-500/10 border border-yellow-500/30 text-yellow-600 dark:text-yellow-400'
+                          }`}
+                        >
+                          <AlertCircle size={14} className="flex-shrink-0" />
+                          {hint.message}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
 
                 {/* Steps */}
                 <div className="bg-surface-elevated rounded-xl border border-border p-6">

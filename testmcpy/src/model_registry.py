@@ -21,6 +21,7 @@ class Provider(str, Enum):
     GOOGLE = "google"
     GEMINI = "gemini"  # Alias for google
     GEMINI_CLI = "gemini-cli"  # Gemini CLI tool
+    GEMINI_SDK = "gemini-sdk"  # Google ADK with native MCP
     CODEX_CLI = "codex-cli"  # OpenAI Codex via Agents SDK
     OLLAMA = "ollama"
     BEDROCK = "bedrock"  # AWS Bedrock (Anthropic models via AWS)
@@ -800,6 +801,88 @@ CODEX_CLI_MODELS: list[ModelInfo] = [
 ]
 
 # ============================================================
+# Gemini SDK Models (Google ADK)
+# ============================================================
+
+GEMINI_SDK_MODELS: list[ModelInfo] = [
+    ModelInfo(
+        id="gemini-sdk-flash",
+        name="Gemini SDK 2.5 Flash",
+        provider=Provider.GEMINI_SDK,
+        description="Gemini 2.5 Flash via Google ADK — fast, MCP-native agentic execution",
+        context_window=1_000_000,
+        max_output_tokens=65_536,
+        input_price_per_1m=0.15,
+        output_price_per_1m=0.60,
+        capabilities=[
+            ModelCapability.TOOL_CALLING,
+            ModelCapability.STREAMING,
+            ModelCapability.VISION,
+            ModelCapability.LONG_CONTEXT,
+            ModelCapability.REASONING,
+        ],
+        family="gemini-sdk",
+        is_default=True,
+        aliases=["gemini-sdk", "gsdk-flash", "gsdk-2.5-flash"],
+    ),
+    ModelInfo(
+        id="gemini-sdk-pro",
+        name="Gemini SDK 2.5 Pro",
+        provider=Provider.GEMINI_SDK,
+        description="Gemini 2.5 Pro via Google ADK — strongest reasoning, higher cost",
+        context_window=1_000_000,
+        max_output_tokens=65_536,
+        input_price_per_1m=1.25,
+        output_price_per_1m=10.00,
+        capabilities=[
+            ModelCapability.TOOL_CALLING,
+            ModelCapability.STREAMING,
+            ModelCapability.VISION,
+            ModelCapability.LONG_CONTEXT,
+            ModelCapability.REASONING,
+        ],
+        family="gemini-sdk",
+        aliases=["gsdk-pro", "gsdk-2.5-pro"],
+    ),
+    ModelInfo(
+        id="gemini-sdk-flash-8b",
+        name="Gemini SDK 2.5 Flash-8B",
+        provider=Provider.GEMINI_SDK,
+        description="Gemini 2.5 Flash-8B via Google ADK — ultrafast, lowest cost",
+        context_window=1_000_000,
+        max_output_tokens=65_536,
+        input_price_per_1m=0.037,
+        output_price_per_1m=0.15,
+        capabilities=[
+            ModelCapability.TOOL_CALLING,
+            ModelCapability.STREAMING,
+            ModelCapability.VISION,
+            ModelCapability.LONG_CONTEXT,
+        ],
+        family="gemini-sdk",
+        aliases=["gsdk-flash-8b", "gsdk-8b"],
+    ),
+    ModelInfo(
+        id="gemini-sdk-2.0-flash",
+        name="Gemini SDK 2.0 Flash",
+        provider=Provider.GEMINI_SDK,
+        description="Gemini 2.0 Flash via Google ADK — previous generation",
+        context_window=1_000_000,
+        max_output_tokens=8_192,
+        input_price_per_1m=0.10,
+        output_price_per_1m=0.40,
+        capabilities=[
+            ModelCapability.TOOL_CALLING,
+            ModelCapability.STREAMING,
+            ModelCapability.VISION,
+            ModelCapability.LONG_CONTEXT,
+        ],
+        family="gemini-sdk",
+        aliases=["gsdk-2.0-flash"],
+    ),
+]
+
+# ============================================================
 # Model Registry
 # ============================================================
 
@@ -809,6 +892,7 @@ ALL_MODELS: list[ModelInfo] = (
     + GEMINI_MODELS
     + CLAUDE_SDK_MODELS
     + GEMINI_CLI_MODELS
+    + GEMINI_SDK_MODELS
     + CODEX_CLI_MODELS
     + GROK_MODELS
     + OPENROUTER_MODELS

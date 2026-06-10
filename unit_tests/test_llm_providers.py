@@ -20,6 +20,8 @@ from testmcpy.src.llm_integration import (
     AssistantProvider,
     ClaudeSDKProvider,
     CodexSDKProvider,
+    GeminiProvider,
+    GeminiSDKProvider,
     LLMResult,
     OpenAIProvider,
     OpenRouterProvider,
@@ -430,6 +432,102 @@ class TestCodexSDKProvider:
         )
         await p.initialize()
         assert p._mcp_headers == {"Authorization": "Bearer bearer-tok-789"}
+
+
+# ---------------------------------------------------------------------------
+# GeminiProvider env-var fix tests
+# ---------------------------------------------------------------------------
+
+
+class TestGeminiProviderNoEnvRead:
+    """GeminiProvider must no longer read env vars in __init__."""
+
+    def test_no_api_key_defaults_empty(self) -> None:
+        p = GeminiProvider(model="gemini-2.5-flash", api_key=None)
+        assert p.api_key == ""
+
+    def test_api_key_from_constructor(self) -> None:
+        p = GeminiProvider(model="gemini-2.5-flash", api_key="AIza-explicit")
+        assert p.api_key == "AIza-explicit"
+
+
+# ---------------------------------------------------------------------------
+# GeminiSDKProvider tests
+# ---------------------------------------------------------------------------
+
+
+class TestGeminiSDKProvider:
+    """Cover GeminiSDKProvider construction, auth resolution, and factory alias."""
+
+    def test_factory_alias_gemini_sdk(self) -> None:
+        p = create_llm_provider("gemini-sdk", "gemini-sdk-flash", api_key="AIza-test")
+        assert isinstance(p, GeminiSDKProvider)
+
+    def test_model_id_remapped_flash(self) -> None:
+        p = GeminiSDKProvider(model="gemini-sdk-flash", api_key="AIza-test")
+        assert p.model == "gemini-2.5-flash"
+
+    def test_model_id_remapped_pro(self) -> None:
+        p = GeminiSDKProvider(model="gemini-sdk-pro", api_key="AIza-test")
+        assert p.model == "gemini-2.5-pro"
+
+    def test_model_id_remapped_default_alias(self) -> None:
+        p = GeminiSDKProvider(model="gemini-sdk", api_key="AIza-test")
+        assert p.model == "gemini-2.5-flash"
+
+    def test_model_id_passthrough_for_unknown(self) -> None:
+        p = GeminiSDKProvider(model="gemini-1.5-pro", api_key="AIza-test")
+        assert p.model == "gemini-1.5-pro"
+
+    def test_api_key_from_constructor(self) -> None:
+        p = GeminiSDKProvider(model="gemini-sdk-flash", api_key="AIza-explicit")
+        assert p.api_key == "AIza-explicit"
+
+    def test_no_api_key_defaults_empty(self) -> None:
+        p = GeminiSDKProvider(model="gemini-sdk-flash")
+        assert p.api_key == ""
+
+    @pytest.mark.asyncio
+    async def test_initialize_missing_package_raises(self, monkeypatch) -> None:
+        import sys
+
+        monkeypatch.setitem(sys.modules, "google.adk", None)
+        p = GeminiSDKProvider(model="gemini-sdk-flash", api_key="AIza-test")
+        with pytest.raises(ValueError, match="google-adk"):
+            await p.initialize()
+
+    @pytest.mark.asyncio
+    async def test_initialize_no_key_raises(self, monkeypatch) -> None:
+        """No api_key must raise ValueError immediately."""
+        import sys
+        import types
+
+        fake_adk = types.ModuleType("google.adk")
+        fake_adk.Agent = object
+        monkeypatch.setitem(sys.modules, "google.adk", fake_adk)
+
+        p = GeminiSDKProvider(model="gemini-sdk-flash")
+        with pytest.raises(ValueError, match="api_key"):
+            await p.initialize()
+
+    @pytest.mark.asyncio
+    async def test_initialize_bearer_auth_sets_mcp_header(self, monkeypatch) -> None:
+        """Bearer auth config must set Authorization header."""
+        import sys
+        import types
+
+        fake_adk = types.ModuleType("google.adk")
+        fake_adk.Agent = object
+        monkeypatch.setitem(sys.modules, "google.adk", fake_adk)
+
+        p = GeminiSDKProvider(
+            model="gemini-sdk-flash",
+            mcp_url="https://mcp.example.com/mcp",
+            auth={"type": "bearer", "token": "bearer-gemini-xyz"},
+            api_key="AIza-test",
+        )
+        await p.initialize()
+        assert p._mcp_headers == {"Authorization": "Bearer bearer-gemini-xyz"}
 
 
 # ---------------------------------------------------------------------------

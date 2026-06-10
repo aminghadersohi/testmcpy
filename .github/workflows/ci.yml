@@ -168,3 +168,39 @@ jobs:
           import claude_agent_sdk, fastmcp, mcp
           print('coexistence with claude-agent-sdk OK')
           "
+
+  docker-gemini-sdk:
+    # Guards the google-adk transitive dependency set introduced by
+    # GeminiSDKProvider.  google-adk>=2.0.0,<3.0.0 pulls google-genai>=2.4,<3
+    # and mcp>=1.24,<2 (already pinned) — a resolver conflict would be caught
+    # here rather than at runtime.
+    name: Docker build (google-adk dep smoke)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Build default image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: testmcpy:gadk-ci
+      - name: Verify no resolver conflict (pip check)
+        run: docker run --rm testmcpy:gadk-ci pip check
+      - name: Verify google-adk import paths exist at pinned version
+        run: |
+          docker run --rm testmcpy:gadk-ci python -c "
+          import google.adk
+          from google.adk import Agent, Runner
+          from google.adk.runners import InMemoryRunner
+          from google.adk.tools.mcp_tool.mcp_toolset import McpToolset
+          from google.adk.tools.mcp_tool.mcp_session_manager import StreamableHTTPConnectionParams
+          from google.adk.models.google_llm import Gemini
+          import google.genai
+          print('google-adk', google.adk.__version__, 'import paths OK')
+          print('google-genai', google.genai.__version__)
+          import claude_agent_sdk, agents, fastmcp, mcp
+          print('coexistence with claude-agent-sdk and openai-agents OK')
+          "

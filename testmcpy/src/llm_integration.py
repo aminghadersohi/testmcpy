@@ -2883,9 +2883,7 @@ class GeminiProvider(LLMProvider):
     ):
         self.model = model
         config = get_config()
-        self.api_key = (
-            api_key or config.get("GOOGLE_API_KEY", "") or config.get("GEMINI_API_KEY", "")
-        )
+        self.api_key = api_key or ""
         self.base_url = "https://generativelanguage.googleapis.com/v1beta"
         self.client = httpx.AsyncClient(timeout=60.0)
         # Use MCP_URL and auth from default profile if not provided
@@ -2902,7 +2900,7 @@ class GeminiProvider(LLMProvider):
         """Initialize Gemini provider."""
         if not self.api_key:
             raise ValueError(
-                "Google API key not provided. Set GOOGLE_API_KEY or GEMINI_API_KEY in ~/.testmcpy, .env, or environment."
+                "Google API key not provided. Supply api_key in the LLM profile (.llm_providers.yaml)."
             )
 
         # Try to pre-discover tools
@@ -3797,6 +3795,280 @@ User request: {prompt}"""
         await self.tool_discovery.close()
 
 
+# ---------------------------------------------------------------------------
+# Gemini SDK Provider (google-adk with native MCP)
+# ---------------------------------------------------------------------------
+
+_gemini_sdk_logger = logging.getLogger(__name__ + ".GeminiSDKProvider")
+
+# Maps testmcpy model IDs to real Gemini model identifiers.
+_GEMINI_SDK_MODEL_MAP: dict[str, str] = {
+    "gemini-sdk": "gemini-2.5-flash",
+    "gemini-sdk-flash": "gemini-2.5-flash",
+    "gemini-sdk-pro": "gemini-2.5-pro",
+    "gemini-sdk-flash-8b": "gemini-2.5-flash-8b",
+    "gemini-sdk-2.0-flash": "gemini-2.0-flash",
+}
+
+_GEMINI_SDK_SYSTEM_PROMPT = (
+    "You are a test executor. Your ONLY job is to call the MCP tools provided "
+    "to fulfil the user's request, then report the results.\n\n"
+    "IMPORTANT RULES:\n"
+    "1. Use ONLY the MCP server tools. Do NOT use any other tools or built-ins.\n"
+    "2. The MCP server uses a gateway pattern: real tools like list_dashboards, "
+    "get_chart_info, etc. are accessed via call_tool(name='tool_name', arguments={...}).\n"
+    "3. For simple tools like health_check and get_instance_info, call them directly.\n"
+    "4. Do NOT call search_tools — the tool name is always specified in the request.\n"
+    "5. Do NOT call any authentication, login, or credential tool.\n"
+    "6. Always include the actual data from tool results in your response.\n"
+    "7. Be concise and factual — include key data points from the tool output."
+)
+
+
+class GeminiSDKProvider(LLMProvider):
+    """Google ADK provider with native MCP integration.
+
+    Uses the google-adk Python package (analogous to ClaudeSDKProvider/CodexSDKProvider).
+    ``api_key`` must be supplied via the constructor (resolved from .llm_providers.yaml).
+    MCP via McpToolset + StreamableHTTPConnectionParams; same bearer/jwt/oauth auth
+    pattern as ClaudeSDKProvider.
+    """
+
+    def __init__(
+        self,
+        model: str,
+        mcp_url: str | None = None,
+        auth: dict[str, Any] | None = None,
+        api_key: str | None = None,
+    ):
+        self.model = _GEMINI_SDK_MODEL_MAP.get(model, model)
+        self.api_key = api_key or ""
+        config = get_config()
+
+        if mcp_url is None:
+            mcp_url = config.get_mcp_url()
+        self.mcp_url = mcp_url
+
+        if auth is None:
+            default_mcp = config.get_default_mcp_server()
+            if default_mcp and default_mcp.auth:
+                auth = default_mcp.auth.to_dict()
+        self.auth_config = auth
+
+        self._mcp_headers: dict[str, str] = {}
+
+    async def initialize(self) -> None:
+        """Validate google-adk is installed, check api_key, and build MCP auth."""
+        try:
+            from google.adk import Agent  # noqa: F401
+        except ImportError:
+            raise ValueError(
+                "google-adk package not installed. Install with: pip install google-adk"
+            )
+
+        if not self.api_key:
+            raise ValueError(
+                "No Google API key. Supply api_key in the LLM profile (.llm_providers.yaml)."
+            )
+
+        # Resolve MCP Bearer token from auth config (same pattern as ClaudeSDKProvider).
+        token: str | None = None
+        if self.auth_config:
+            auth_type = self.auth_config.get("type", "")
+            if auth_type == "bearer":
+                token = self.auth_config.get("token", "")
+            elif auth_type == "jwt":
+                token = await self._fetch_jwt_token()
+            elif auth_type == "oauth":
+                if self.auth_config.get("oauth_auto_discover"):
+                    token = await self._read_cached_oauth_token()
+                    if not token:
+                        raise ValueError(
+                            f"No usable cached OAuth token for {self.mcp_url}. "
+                            "Authenticate the MCP profile first, then re-run the test."
+                        )
+                else:
+                    token = await self._fetch_oauth_token()
+
+        if token:
+            self._mcp_headers = {"Authorization": f"Bearer {token}"}
+            _gemini_sdk_logger.info("[GeminiSDK] MCP server configured with auth token")
+        else:
+            _gemini_sdk_logger.info("[GeminiSDK] MCP server configured without auth")
+
+        _gemini_sdk_logger.info("[GeminiSDK] MCP server ready: %s", self.mcp_url)
+
+    async def _fetch_jwt_token(self) -> str | None:
+        """Fetch JWT bearer token from the configured API endpoint."""
+        if not self.auth_config:
+            return None
+        api_url = self.auth_config.get("api_url", "")
+        api_token = self.auth_config.get("api_token", "")
+        api_secret = self.auth_config.get("api_secret", "")
+        if not all([api_url, api_token, api_secret]):
+            _gemini_sdk_logger.warning("[GeminiSDK] JWT auth config incomplete")
+            return None
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                api_url,
+                json={"token": api_token, "secret": api_secret},
+                timeout=30,
+            )
+            resp.raise_for_status()
+            return resp.json().get("access_token") or resp.json().get("token")
+
+    async def _fetch_oauth_token(self) -> str | None:
+        """Fetch OAuth token via client_credentials grant."""
+        if not self.auth_config:
+            return None
+        client_id = self.auth_config.get("client_id", "")
+        client_secret = self.auth_config.get("client_secret", "")
+        token_url = self.auth_config.get("token_url", "")
+        if not all([client_id, client_secret, token_url]):
+            _gemini_sdk_logger.warning("[GeminiSDK] OAuth client_credentials config incomplete")
+            return None
+        scopes = self.auth_config.get("scopes", [])
+        data: dict[str, Any] = {
+            "grant_type": "client_credentials",
+            "client_id": client_id,
+            "client_secret": client_secret,
+        }
+        if scopes:
+            data["scope"] = " ".join(scopes)
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(token_url, data=data, timeout=30)
+            resp.raise_for_status()
+            return resp.json().get("access_token")
+
+    async def _read_cached_oauth_token(self) -> str | None:
+        """Read cached fastmcp OAuth token from ~/.fastmcp/oauth-mcp-client-cache/."""
+        cache_dir = Path.home() / ".fastmcp" / "oauth-mcp-client-cache"
+        if not cache_dir.exists():
+            return None
+        try:
+            server_key = urllib.parse.quote(self.mcp_url, safe="")
+            token_file = cache_dir / f"{server_key}.json"
+            if not token_file.exists():
+                alt_url = self.mcp_url.rstrip("/")
+                token_file = cache_dir / f"{urllib.parse.quote(alt_url, safe='')}.json"
+            if not token_file.exists():
+                return None
+            data = json.loads(token_file.read_text())
+            return data.get("access_token")
+        except (json.JSONDecodeError, OSError) as e:
+            _gemini_sdk_logger.warning("[GeminiSDK] Could not read cached OAuth token: %s", e)
+            return None
+
+    async def generate_with_tools(
+        self,
+        prompt: str,
+        tools: list[dict[str, Any]],
+        timeout: float = 120.0,
+        messages: list[dict[str, Any]] | None = None,
+    ) -> LLMResult:
+        """Generate a response using google-adk with native MCP tool access."""
+        # google-adk is an optional dependency; initialize() has already validated it.
+        from google.adk import Agent  # noqa: PLC0415
+        from google.adk.models.google_llm import Gemini  # noqa: PLC0415
+        from google.adk.runners import Runner  # noqa: PLC0415
+        from google.adk.sessions.in_memory_session_service import (  # noqa: PLC0415
+            InMemorySessionService,
+        )
+        from google.adk.tools.mcp_tool.mcp_session_manager import (  # noqa: PLC0415
+            StreamableHTTPConnectionParams,
+        )
+        from google.adk.tools.mcp_tool.mcp_toolset import McpToolset  # noqa: PLC0415
+        from google.genai import types as genai_types  # noqa: PLC0415
+
+        start_time = time.time()
+
+        # Subclass Gemini to inject our explicit API key — the documented way to
+        # customise the underlying genai.Client without environment variables.
+        api_key_capture = self.api_key
+
+        class _GeminiWithKey(Gemini):
+            @property  # @property avoids asyncio cached_property lock contention
+            def api_client(self):
+                from google.genai import Client  # noqa: PLC0415
+
+                return Client(api_key=api_key_capture)
+
+        params: dict[str, Any] = {"url": self.mcp_url}
+        if self._mcp_headers:
+            params["headers"] = self._mcp_headers
+
+        try:
+            mcp_toolset = McpToolset(connection_params=StreamableHTTPConnectionParams(**params))
+            agent = Agent(
+                name="testmcpy-gemini-agent",
+                model=_GeminiWithKey(model=self.model),
+                instruction=_GEMINI_SDK_SYSTEM_PROMPT,
+                tools=[mcp_toolset],
+            )
+            session_service = InMemorySessionService()
+            runner = Runner(
+                agent=agent,
+                app_name="testmcpy",
+                session_service=session_service,
+                auto_create_session=True,
+            )
+            new_message = genai_types.Content(
+                role="user",
+                parts=[genai_types.Part(text=prompt)],
+            )
+
+            tool_calls: list[dict[str, Any]] = []
+            response_parts: list[str] = []
+
+            async with asyncio.timeout(timeout):
+                async for event in runner.run_async(
+                    user_id="testmcpy",
+                    session_id=uuid.uuid4().hex,
+                    new_message=new_message,
+                ):
+                    # Collect tool calls from function-call events.
+                    for fc in event.get_function_calls():
+                        tool_calls.append(
+                            {
+                                "name": fc.name,
+                                "arguments": dict(fc.args) if fc.args else {},
+                            }
+                        )
+                    # Collect final response text.
+                    if event.is_final_response() and event.content:
+                        for part in event.content.parts or []:
+                            if getattr(part, "text", None):
+                                response_parts.append(part.text)
+
+            return LLMResult(
+                response=" ".join(response_parts),
+                tool_calls=tool_calls,
+                token_usage=None,
+                cost=0.0,
+                duration=time.time() - start_time,
+                raw_response={"parts": response_parts},
+            )
+
+        except asyncio.TimeoutError:
+            return LLMResult(
+                response=f"Error: GeminiSDK timed out after {timeout}s",
+                tool_calls=[],
+                duration=time.time() - start_time,
+            )
+        except Exception as e:
+            # generate_with_tools must never raise — the eval harness expects an
+            # LLMResult so the test run keeps going and records a clean failure.
+            _gemini_sdk_logger.warning("[GeminiSDK] generate_with_tools failed: %s", e)
+            return LLMResult(
+                response=f"Error: {e}",
+                tool_calls=[],
+                duration=time.time() - start_time,
+            )
+
+    async def close(self) -> None:
+        """No persistent connections to close (MCP session is per-request)."""
+
+
 def create_llm_provider(provider: str, model: str, **kwargs) -> LLMProvider:
     """
     Create an LLM provider instance.
@@ -3830,6 +4102,7 @@ def create_llm_provider(provider: str, model: str, **kwargs) -> LLMProvider:
         "codex-cli": CodexSDKProvider,  # Alias → codex-sdk
         "codex": CodexSDKProvider,  # Alias → codex-sdk
         "gemini-cli": GeminiCLIProvider,
+        "gemini-sdk": GeminiSDKProvider,  # Google ADK with native MCP
         "xai": XAIProvider,  # xAI (Grok models)
         "grok": XAIProvider,  # Alias → xai
     }

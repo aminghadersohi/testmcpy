@@ -716,6 +716,28 @@ function decodeJwtPayload(token) {
   }
 }
 
+// Deep-scrub token-bearing fields before persisting a debug trace.
+// The backend sanitizer redacts some keys (client_secret, token, access_token)
+// but misses refresh_token/id_token, skips lists, and leaves tokens embedded
+// in raw response strings — so never trust the trace for persistence.
+const SECRET_KEYS = new Set([
+  'access_token', 'refresh_token', 'id_token', 'token',
+  'client_secret', 'api_secret', 'authorization', 'bearer', 'password',
+])
+const JWT_RE = /eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]*/g
+function scrubSecrets(value) {
+  if (Array.isArray(value)) return value.map(scrubSecrets)
+  if (value && typeof value === 'object') {
+    const out = {}
+    for (const key of Object.keys(value)) {
+      out[key] = SECRET_KEYS.has(key.toLowerCase()) ? '[REDACTED]' : scrubSecrets(value[key])
+    }
+    return out
+  }
+  if (typeof value === 'string') return value.replace(JWT_RE, '[REDACTED-JWT]')
+  return value
+}
+
 function AuthDebugger() {
   const { jsonTheme } = useEditorTheme()
   const navigate = useNavigate()
@@ -851,7 +873,7 @@ function AuthDebugger() {
       name,
       timestamp,
       config: safeConfig,
-      result: debugResult,
+      result: scrubSecrets(debugResult),
     }
 
     const updated = [session, ...savedSessions]
@@ -872,7 +894,8 @@ function AuthDebugger() {
     setMcpUrl(cfg.mcp_url || '')
     setOauthAutoDiscover(cfg.oauth_auto_discover || false)
     setApiUrl(cfg.api_url || '')
-    setDebugResult(session.result || null)
+    // Scrub defensively on load too — covers sessions saved before scrubbing existed
+    setDebugResult(session.result ? scrubSecrets(session.result) : null)
     if (session.result?.steps) {
       setExpandedSteps(new Set(session.result.steps.map((_, i) => i)))
     }

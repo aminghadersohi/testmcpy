@@ -3278,10 +3278,19 @@ _codex_sdk_logger = logging.getLogger(__name__ + ".CodexSDKProvider")
 
 # Maps testmcpy model IDs to real OpenAI model identifiers.
 _CODEX_MODEL_MAP: dict[str, str] = {
-    "codex": "o3",
-    "codex-o3": "o3",
+    # Friendly registry IDs → real OpenAI model identifiers
+    "codex": "o4-mini",
+    "codex-latest": "o4-mini",
+    "codex-sdk": "o4-mini",
     "codex-o4-mini": "o4-mini",
+    "codex-o4mini": "o4-mini",
+    "codex-mini": "o4-mini",
+    "codex-o3": "o3",
+    "codex-o3-full": "o3",
+    "codex-o3-mini": "o3-mini",
+    "codex-o3mini": "o3-mini",
     "codex-gpt-4o": "gpt-4o",
+    "codex-4o": "gpt-4o",
 }
 
 _CODEX_SYSTEM_PROMPT = (

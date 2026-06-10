@@ -122,11 +122,17 @@ function MCPExplorer({ selectedProfiles = [] }) {
     return () => window.removeEventListener('keydown', handleKeyPress)
   }, [showShortcuts, searchQuery])
 
-  const fetchWithRetry = async (url, retries = 10, delay = 2000) => {
+  // Retry with exponential backoff. Kept local (rather than useSafeFetch)
+  // because it carries OAuth-specific behavior: 401/403 flips the loading
+  // phase to 'authenticating' and waits longer for the OAuth popup.
+  // Prefer useSafeFetch for new code without that requirement.
+  const fetchWithRetry = async (url, retries = 6) => {
     let needsAuth = false
     for (let i = 0; i < retries; i++) {
+      const controller = new AbortController()
+      const timeoutId = setTimeout(() => controller.abort(), 15000)
       try {
-        const response = await fetch(url)
+        const response = await fetch(url, { signal: controller.signal })
         if (response.status === 401 || response.status === 403) {
           if (!needsAuth) {
             needsAuth = true
@@ -142,10 +148,13 @@ function MCPExplorer({ selectedProfiles = [] }) {
         return response
       } catch (error) {
         if (i === retries - 1) throw error
-        // Longer delay during auth (OAuth popup takes time)
-        const waitTime = needsAuth ? 3000 : delay
+        const backoff = Math.min(1000 * 2 ** i, 8000)
+        // OAuth popups take time — never poll faster than every 3s during auth
+        const waitTime = needsAuth ? Math.max(backoff, 3000) : backoff
         console.log(`Retry ${i + 1}/${retries} for ${url} (${needsAuth ? 'auth' : 'connect'})...`)
         await new Promise(resolve => setTimeout(resolve, waitTime))
+      } finally {
+        clearTimeout(timeoutId)
       }
     }
   }

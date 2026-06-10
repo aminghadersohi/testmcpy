@@ -396,14 +396,14 @@ class TestCodexSDKProvider:
     def test_tool_call_extraction_from_raw_item(self) -> None:
         """tool_calls must be populated from ToolCallItem.raw_item, not .arguments."""
         pytest.importorskip("agents", reason="openai-agents not installed")
-        import types
-
         from agents.items import ToolCallItem
 
-        # RunItemBase stores a weakref to agent; SimpleNamespace supports weakrefs.
-        fake_agent = types.SimpleNamespace()
+        # RunItemBase stores a weakref to agent; a plain class instance supports it.
+        class _FakeAgent:
+            pass
+
         raw = {"name": "list_dashboards", "arguments": '{"page": 1}', "call_id": "c1"}
-        item = ToolCallItem(raw_item=raw, agent=fake_agent)  # type: ignore[arg-type]
+        item = ToolCallItem(raw_item=raw, agent=_FakeAgent())  # type: ignore[arg-type]
 
         assert item.tool_name == "list_dashboards"
         # Confirm .arguments does NOT exist on ToolCallItem (the bug this guards).

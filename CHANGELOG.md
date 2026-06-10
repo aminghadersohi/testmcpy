@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.26] - 2026-06-09
+
+### Fixed
+- **Docker server image can't run Claude Agent SDK (agentic) tests
+  out of the box** (follow-up to v0.7.25's CLI-bake work). Two
+  coupled issues:
+
+  1. **Missing dependency.** The Dockerfile installs only
+     `pip install .[server]`, but `claude-agent-sdk` lived only in
+     the `sdk` and `all` extras. The server's test runner
+     (`testmcpy/src/test_runner.py`) imports `claude_agent_sdk` for
+     any test using the Claude SDK provider, so the published image
+     crashed with `ModuleNotFoundError: No module named
+     'claude_agent_sdk'` (raised as a `ValueError` from
+     `testmcpy/src/llm_integration.py:1421`). The SDK is now part of
+     the `server` extra so `pip install testmcpy[server]` (and the
+     Docker image) include it. Anyone running the server can run
+     agentic tests without a separate install.
+
+  2. **Version conflict between `fastmcp` and `claude-agent-sdk`.**
+     `fastmcp 2.12.5` pinned `mcp<1.17.0`, while
+     `claude-agent-sdk 0.2.x` requires `mcp>=1.23`. Installing both
+     produced a `pip` resolver warning and a fragile environment.
+     Bumped `fastmcp>=2.14.5,<3.0.0` (first 2.x line that allows
+     `mcp>=1.24`), tightened `claude-agent-sdk>=0.2.0,<1.0.0`. The
+     two pins are now co-locked — a clean `pip install` produces a
+     conflict-free environment.
+
+  As a bonus, `claude-agent-sdk` 0.2.x's wheel already bundles a
+  platform-appropriate `claude` CLI binary at
+  `claude_agent_sdk/_bundled/claude` (~250 MB on linux x86_64), and
+  the SDK's CLI lookup finds the bundled copy before falling back
+  to PATH. So agentic tests run end-to-end on the default image —
+  no `INSTALL_CLAUDE_CLI=true` required. The v0.7.25 build-arg
+  remains, repositioned as the separate "I want
+  `docker exec <container> claude`" / "I want a specific Claude
+  Code version that differs from what the SDK bundles" use case.
+
+  CI now runs `pip check`, `import claude_agent_sdk, fastmcp, mcp`,
+  AND drives the SDK's own CLI-lookup + a `--version` invocation
+  through the located binary, so a future SDK wheel that fails to
+  bundle the binary, a resolver conflict, or a binary that can't
+  link on `python:3.11-slim`'s libc all fail CI rather than ship.
+
 ## [0.7.25] - 2026-06-09
 
 ### Added

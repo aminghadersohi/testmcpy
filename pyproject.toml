@@ -93,7 +93,7 @@ testmcpy = [
 
 [project]
 name = "testmcpy"
-version = "0.7.25"
+version = "0.7.26"
 description = "A comprehensive testing framework for validating LLM tool calling capabilities with MCP services"
 authors = [{name = "Amin Ghadersohi"}]
 license = "Apache-2.0"
@@ -115,7 +115,21 @@ dependencies = [
     "aiohttp>=3.8.0,<4.0.0",
     "ollama>=0.1.0",
     "anthropic>=0.39.0,<1.0.0",
-    "fastmcp>=2.0.0,<3.0.0",
+    # fastmcp >=2.14.5 is required to stay co-installable with
+    # claude-agent-sdk: <=2.12.5 pins mcp<1.17, but claude-agent-sdk
+    # 0.2.x requires mcp>=1.23. fastmcp 2.14.5+ permits mcp>=1.24, so
+    # the resolver picks a single coherent mcp version. Don't loosen
+    # the lower bound without also re-verifying the agentic smoke test
+    # in CI (.github/workflows/ci.yml :: docker-claude-cli).
+    "fastmcp>=2.14.5,<3.0.0",
+    # Explicit direct bound on `mcp` so the intersection between
+    # fastmcp's and claude-agent-sdk's transitive pins is documented in
+    # one place. Without this, mcp's acceptable window is implicit in
+    # whatever each parent currently ships, and a future bump that
+    # breaks the intersection would only surface at install time via a
+    # resolver backtrack message — slow and hard to diagnose. The CI
+    # `pip check` is the second line of defence; this is the first.
+    "mcp>=1.24,<2.0",
     "httpx>=0.27.0,<1.0.0",
     "python-dotenv>=1.0.0,<2.0.0",
     "click>=8.0.0,<9.0.0",
@@ -142,10 +156,24 @@ dev = [
 server = [
     "fastapi>=0.104.0,<1.0.0",
     "uvicorn[standard]>=0.24.0,<1.0.0",
-    "websockets>=14.0,<15.0",
+    # websockets>=15.0.1 is required by fastmcp>=2.14 — keep the
+    # upper bound generous so we don't have to drag this pin every
+    # time uvicorn/fastmcp bumps a minor.
+    "websockets>=14.0,<17.0",
+    # testmcpy/server/websocket.py routes test runs through
+    # testmcpy/src/test_runner.py, which imports claude_agent_sdk
+    # for any test using the Claude Agent SDK provider. Without it,
+    # those tests crash with ModuleNotFoundError at runtime — so the
+    # SDK belongs in `server`, not only in `sdk`.
+    #
+    # 0.2.x is the first line that requires mcp>=1.23 (co-pinned with
+    # fastmcp>=2.14.5 above). Keep this tight so a future SDK release
+    # that bumps mcp out of fastmcp's range fails at install time
+    # instead of at first agentic test run.
+    "claude-agent-sdk>=0.2.0,<1.0.0",
 ]
 sdk = [
-    "claude-agent-sdk>=0.1.0",
+    "claude-agent-sdk>=0.2.0,<1.0.0",
 ]
 tui = [
     "textual>=0.85.0",
@@ -163,8 +191,11 @@ bedrock = [
 all = [
     "fastapi>=0.104.0,<1.0.0",
     "uvicorn[standard]>=0.24.0,<1.0.0",
-    "websockets>=14.0,<15.0",
-    "claude-agent-sdk>=0.1.0",
+    # websockets>=15.0.1 is required by fastmcp>=2.14 — keep the
+    # upper bound generous so we don't have to drag this pin every
+    # time uvicorn/fastmcp bumps a minor.
+    "websockets>=14.0,<17.0",
+    "claude-agent-sdk>=0.2.0,<1.0.0",
     "textual>=0.85.0",
     "boto3>=1.28.0",
 ]

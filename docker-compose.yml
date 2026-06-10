@@ -2,12 +2,21 @@ services:
   testmcpy:
     build:
       context: .
-      # Opt in to baking the Claude Code CLI into the image with:
-      #   INSTALL_CLAUDE_CLI=true docker compose build
-      # (or `up -d --build`). Defaults to false so the published image
-      # stays lean. Optionally pin a specific Claude Code version with
-      #   CLAUDE_CLI_VERSION=2.1.170 — recommended for reproducibility
-      # since install.sh otherwise tracks `latest`. SC-108437.
+      # Agentic tests (Claude Agent SDK provider) work OUT OF THE BOX
+      # on the default image: pyproject.toml's `server` extra pulls in
+      # `claude-agent-sdk`, whose wheel already bundles a platform-
+      # appropriate `claude` CLI binary at
+      # `claude_agent_sdk/_bundled/claude`. The SDK looks there first
+      # before falling back to PATH, so no separate CLI install is
+      # required for tests to run end-to-end.
+      #
+      # INSTALL_CLAUDE_CLI=true is for the SEPARATE use case of
+      # `docker exec <container> claude` direct CLI use, or for
+      # pinning a specific Claude Code version that differs from
+      # whatever the SDK currently bundles. Optionally pair with
+      # CLAUDE_CLI_VERSION (install.sh otherwise tracks `latest`):
+      #   CLAUDE_CLI_VERSION=2.1.170 INSTALL_CLAUDE_CLI=true \
+      #       docker compose build
       args:
         INSTALL_CLAUDE_CLI: ${INSTALL_CLAUDE_CLI:-false}
         CLAUDE_CLI_VERSION: ${CLAUDE_CLI_VERSION:-}

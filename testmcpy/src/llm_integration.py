@@ -3860,7 +3860,10 @@ class GeminiSDKProvider(LLMProvider):
     async def initialize(self) -> None:
         """Validate google-adk is installed, check api_key, and build MCP auth."""
         try:
-            from google.adk import Agent  # noqa: F401
+            # Import the root package only — keeps unit-test fixtures simple
+            # (a single sys.modules["google.adk"] stub is enough). The deeper
+            # imports are guarded by initialize() having completed first.
+            import google.adk  # noqa: F401
         except ImportError:
             raise ValueError(
                 "google-adk package not installed. Install with: pip install google-adk"
@@ -3968,7 +3971,11 @@ class GeminiSDKProvider(LLMProvider):
     ) -> LLMResult:
         """Generate a response using google-adk with native MCP tool access."""
         # google-adk is an optional dependency; initialize() has already validated it.
-        from google.adk import Agent  # noqa: PLC0415
+        # NOTE: import LlmAgent (the underlying class) rather than the ``Agent``
+        # re-export from ``google.adk`` so unit tests can patch this name
+        # reliably (the re-export captures the original class at google.adk
+        # import time and is not affected by patches on the source module).
+        from google.adk.agents.llm_agent import LlmAgent  # noqa: PLC0415
         from google.adk.models.google_llm import Gemini  # noqa: PLC0415
         from google.adk.runners import Runner  # noqa: PLC0415
         from google.adk.sessions.in_memory_session_service import (  # noqa: PLC0415
@@ -4004,7 +4011,7 @@ class GeminiSDKProvider(LLMProvider):
 
         mcp_toolset = McpToolset(connection_params=StreamableHTTPConnectionParams(**params))
         try:
-            agent = Agent(
+            agent = LlmAgent(
                 name="testmcpy-gemini-agent",
                 model=_GeminiWithKey(model=self.model),
                 instruction=_GEMINI_SDK_SYSTEM_PROMPT,

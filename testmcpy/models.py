@@ -181,6 +181,7 @@ class QuestionResultModel(Base):
     cost_usd: Mapped[float] = mapped_column(Float, default=0.0)  # Per-eval cost in USD
     tool_call_counts: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     false_positive_rate: Mapped[float] = mapped_column(Float, default=0.0)
+    manual_false_positive: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, default=lambda: datetime.now(timezone.utc)
     )

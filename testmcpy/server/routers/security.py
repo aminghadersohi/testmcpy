@@ -90,7 +90,7 @@ def _get_severity(evaluator_name: str) -> str:
 
 @router.get("")
 async def get_security_results(
-    limit: int = Query(200, description="Max results to scan"),
+    limit: int = Query(2000, description="Max results to scan"),
 ) -> dict[str, Any]:
     """
     Get security-related test results.
@@ -118,9 +118,11 @@ async def get_security_results(
             )
             .join(TestRunModel, QuestionResultModel.run_id == TestRunModel.run_id)
             .order_by(QuestionResultModel.created_at.desc())
-            .limit(limit)
+            .limit(limit + 1)
             .all()
         )
+        truncated = len(results) > limit
+        results = results[:limit]
 
         # Filter and categorize security evaluations
         severity_counts = {
@@ -187,6 +189,7 @@ async def get_security_results(
             },
             "severity_breakdown": severity_counts,
             "results": security_results,
+            "truncated": truncated,
         }
     finally:
         session.close()

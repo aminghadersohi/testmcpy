@@ -12,7 +12,20 @@ import {
   Filter,
   Calendar,
   Cpu,
+  AlertTriangle,
 } from 'lucide-react'
+import {
+  LineChart,
+  Line,
+  BarChart,
+  Bar,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  Legend,
+  ResponsiveContainer,
+} from 'recharts'
 
 function formatNumber(n) {
   if (n >= 1000000) return `${(n / 1000000).toFixed(1)}M`
@@ -32,61 +45,6 @@ function formatMs(ms) {
   return `${Math.round(ms)}ms`
 }
 
-// Simple SVG bar chart component
-function BarChartSVG({ data, dataKey, color = '#6366f1', label = '' }) {
-  if (!data.length) return <div className="text-xs text-text-tertiary text-center py-8">No data</div>
-
-  const maxVal = Math.max(...data.map(d => d[dataKey] || 0), 1)
-  const barWidth = Math.max(12, Math.floor(600 / data.length) - 4)
-  const chartWidth = Math.max(600, data.length * (barWidth + 4))
-  const chartHeight = 160
-
-  return (
-    <div className="overflow-x-auto">
-      <svg width={chartWidth} height={chartHeight + 40} className="w-full" viewBox={`0 0 ${chartWidth} ${chartHeight + 40}`} preserveAspectRatio="xMinYMid meet">
-        {/* Bars */}
-        {data.map((d, i) => {
-          const val = d[dataKey] || 0
-          const h = (val / maxVal) * chartHeight
-          const x = i * (barWidth + 4) + 2
-          const y = chartHeight - h
-          return (
-            <g key={i}>
-              <rect
-                x={x}
-                y={y}
-                width={barWidth}
-                height={h}
-                fill={color}
-                opacity={0.8}
-                rx={2}
-              >
-                <title>{`${d.period}: ${typeof val === 'number' && val % 1 !== 0 ? val.toFixed(1) : val}`}</title>
-              </rect>
-              {/* X-axis label */}
-              {data.length <= 14 && (
-                <text
-                  x={x + barWidth / 2}
-                  y={chartHeight + 14}
-                  textAnchor="middle"
-                  className="fill-text-tertiary"
-                  fontSize="9"
-                >
-                  {(d.period || '').slice(-5)}
-                </text>
-              )}
-            </g>
-          )
-        })}
-        {/* Y-axis labels */}
-        <text x={4} y={12} className="fill-text-tertiary" fontSize="9">{typeof maxVal === 'number' && maxVal % 1 !== 0 ? maxVal.toFixed(1) : maxVal}</text>
-        <text x={4} y={chartHeight} className="fill-text-tertiary" fontSize="9">0</text>
-      </svg>
-      {label && <div className="text-xs text-text-tertiary text-center mt-1">{label}</div>}
-    </div>
-  )
-}
-
 function MetricsDashboard() {
   const [metrics, setMetrics] = useState(null)
   const [loading, setLoading] = useState(true)
@@ -95,6 +53,15 @@ function MetricsDashboard() {
   const [dateRange, setDateRange] = useState(30) // days
   const [providerFilter, setProviderFilter] = useState('')
   const [modelFilter, setModelFilter] = useState('')
+
+  const isHourlyDisabled = dateRange > 3
+
+  const handleDateRangeChange = (newRange) => {
+    setDateRange(Number(newRange))
+    if (Number(newRange) > 3 && granularity === 'hourly') {
+      setGranularity('daily')
+    }
+  }
 
   const loadMetrics = useCallback(async () => {
     setLoading(true)
@@ -136,6 +103,10 @@ function MetricsDashboard() {
   const timeSeries = metrics?.time_series || []
   const modelBreakdown = metrics?.model_breakdown || []
 
+  const fpRate = summary.false_positive_rate || 0
+  const fpCount = summary.false_positive_count || 0
+  const fpIsZero = fpRate === 0 && fpCount === 0
+
   return (
     <div className="h-full flex flex-col bg-background">
       {/* Header */}
@@ -156,9 +127,12 @@ function MetricsDashboard() {
               <Calendar size={14} className="text-text-tertiary" />
               <select
                 value={dateRange}
-                onChange={(e) => setDateRange(Number(e.target.value))}
+                onChange={(e) => handleDateRangeChange(e.target.value)}
                 className="bg-transparent text-sm text-text-primary outline-none cursor-pointer"
               >
+                <option value={1}>1 day</option>
+                <option value={2}>2 days</option>
+                <option value={3}>3 days</option>
                 <option value={7}>7 days</option>
                 <option value={14}>14 days</option>
                 <option value={30}>30 days</option>
@@ -175,6 +149,13 @@ function MetricsDashboard() {
                 onChange={(e) => setGranularity(e.target.value)}
                 className="bg-transparent text-sm text-text-primary outline-none cursor-pointer"
               >
+                <option
+                  value="hourly"
+                  disabled={isHourlyDisabled}
+                  title={isHourlyDisabled ? 'Only available for date ranges of 3 days or less' : ''}
+                >
+                  Hourly{isHourlyDisabled ? ' (unavailable)' : ''}
+                </option>
                 <option value="daily">Daily</option>
                 <option value="weekly">Weekly</option>
               </select>
@@ -218,7 +199,7 @@ function MetricsDashboard() {
         )}
 
         {/* Summary Cards */}
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+        <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
           <div className="p-4 rounded-xl bg-surface border border-border">
             <div className="flex items-center gap-2 text-text-tertiary text-xs font-medium uppercase tracking-wide mb-2">
               <TrendingUp size={14} />
@@ -261,6 +242,20 @@ function MetricsDashboard() {
             <div className="text-2xl font-bold text-text-primary">{formatMs(summary.avg_latency_ms)}</div>
             <div className="text-xs text-text-tertiary mt-1">{formatNumber(summary.total_tokens || 0)} tokens total</div>
           </div>
+
+          {/* False Positive Rate card */}
+          <div className={`p-4 rounded-xl border ${fpIsZero ? 'bg-surface border-border' : 'bg-amber-50 border-amber-200'}`}>
+            <div className={`flex items-center gap-2 text-xs font-medium uppercase tracking-wide mb-2 ${fpIsZero ? 'text-text-tertiary' : 'text-amber-700'}`}>
+              <AlertTriangle size={14} />
+              False Positives
+            </div>
+            <div className={`text-2xl font-bold ${fpIsZero ? 'text-text-tertiary' : 'text-amber-700'}`}>
+              {fpIsZero ? '—' : `${fpRate}%`}
+            </div>
+            <div className={`text-xs mt-1 ${fpIsZero ? 'text-text-disabled' : 'text-amber-700'}`}>
+              {fpIsZero ? 'None flagged' : `${fpCount} flagged`}
+            </div>
+          </div>
         </div>
 
         {/* Charts */}
@@ -268,22 +263,54 @@ function MetricsDashboard() {
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
             <div className="p-4 rounded-xl bg-surface border border-border">
               <h3 className="text-sm font-semibold text-text-primary mb-3">Pass Rate Over Time (%)</h3>
-              <BarChartSVG data={timeSeries} dataKey="pass_rate" color="#22c55e" />
+              <ResponsiveContainer width="100%" height={220}>
+                <LineChart data={timeSeries}>
+                  <XAxis dataKey="period" tick={{ fontSize: 11 }} />
+                  <YAxis tick={{ fontSize: 11 }} />
+                  <CartesianGrid strokeDasharray="3 3" />
+                  <Tooltip />
+                  <Line type="monotone" dataKey="pass_rate" stroke="#4ade80" name="Pass Rate %" dot={false} />
+                </LineChart>
+              </ResponsiveContainer>
             </div>
 
             <div className="p-4 rounded-xl bg-surface border border-border">
               <h3 className="text-sm font-semibold text-text-primary mb-3">Cost Over Time ($)</h3>
-              <BarChartSVG data={timeSeries} dataKey="cost" color="#f59e0b" />
+              <ResponsiveContainer width="100%" height={220}>
+                <BarChart data={timeSeries}>
+                  <XAxis dataKey="period" tick={{ fontSize: 11 }} />
+                  <YAxis tick={{ fontSize: 11 }} />
+                  <CartesianGrid strokeDasharray="3 3" />
+                  <Tooltip />
+                  <Bar dataKey="cost" fill="#60a5fa" name="Cost ($)" />
+                </BarChart>
+              </ResponsiveContainer>
             </div>
 
             <div className="p-4 rounded-xl bg-surface border border-border">
               <h3 className="text-sm font-semibold text-text-primary mb-3">Avg Latency Over Time (ms)</h3>
-              <BarChartSVG data={timeSeries} dataKey="avg_latency_ms" color="#6366f1" />
+              <ResponsiveContainer width="100%" height={220}>
+                <BarChart data={timeSeries}>
+                  <XAxis dataKey="period" tick={{ fontSize: 11 }} />
+                  <YAxis tick={{ fontSize: 11 }} />
+                  <CartesianGrid strokeDasharray="3 3" />
+                  <Tooltip />
+                  <Bar dataKey="avg_latency_ms" fill="#f59e0b" name="Latency (ms)" />
+                </BarChart>
+              </ResponsiveContainer>
             </div>
 
             <div className="p-4 rounded-xl bg-surface border border-border">
               <h3 className="text-sm font-semibold text-text-primary mb-3">Questions Over Time</h3>
-              <BarChartSVG data={timeSeries} dataKey="questions" color="#06b6d4" />
+              <ResponsiveContainer width="100%" height={220}>
+                <BarChart data={timeSeries}>
+                  <XAxis dataKey="period" tick={{ fontSize: 11 }} />
+                  <YAxis tick={{ fontSize: 11 }} />
+                  <CartesianGrid strokeDasharray="3 3" />
+                  <Tooltip />
+                  <Bar dataKey="questions" fill="#a78bfa" name="Questions" />
+                </BarChart>
+              </ResponsiveContainer>
             </div>
           </div>
         )}

@@ -4,6 +4,18 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import TraceView from '../components/TraceView'
 import {
+  LineChart,
+  Line,
+  BarChart,
+  Bar,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  Legend,
+  ResponsiveContainer,
+} from 'recharts'
+import {
   FileText,
   CheckCircle,
   XCircle,
@@ -26,6 +38,7 @@ import {
   Link2,
   Download,
   CheckSquare,
+  TrendingUp,
 } from 'lucide-react'
 
 const AUTO_REFRESH_INTERVAL = 10000
@@ -292,9 +305,10 @@ function RerunModal({ result, onClose }) {
 }
 
 // Per-test expandable card
-function TestResultCard({ result, providerHint }) {
+function TestResultCard({ result, providerHint, onFpToggle }) {
   const [expanded, setExpanded] = useState(!result.passed)
   const [showRerun, setShowRerun] = useState(false)
+  const [fpLoading, setFpLoading] = useState(false)
   const score = result.score !== undefined ? result.score : (result.passed ? 1.0 : 0.0)
   const toolCalls = result.tool_calls || []
   const evaluations = result.evaluations || []
@@ -315,6 +329,29 @@ function TestResultCard({ result, providerHint }) {
   const costNotTracked = isChatbotProvider && (!result.cost || result.cost === 0)
   const tokensNotTracked = isChatbotProvider && !tokenUsage
   const hasResponse = !!(result.response || result.llm_response)
+
+  // False positive state (optimistic)
+  const [isFp, setIsFp] = useState(!!(result.manual_false_positive))
+  const [fpRate, setFpRate] = useState(result.false_positive_rate ?? 0)
+  const showFpBadge = isFp
+
+  const handleFpToggle = async (e) => {
+    e.stopPropagation()
+    if (!result.id && !result.question_id) return
+    const questionId = result.id || result.question_id
+    const newValue = !isFp
+    setIsFp(newValue)
+    setFpLoading(true)
+    try {
+      await fetch(`/api/metrics/question/${questionId}/false-positive?is_false_positive=${newValue}`, { method: 'PATCH' })
+      if (onFpToggle) onFpToggle(questionId, newValue)
+    } catch (err) {
+      // revert on error
+      setIsFp(!newValue)
+    } finally {
+      setFpLoading(false)
+    }
+  }
 
   return (
     <div className={`border rounded-lg overflow-hidden ${result.passed ? 'border-border' : 'border-error/50 bg-error/5'}`}>
@@ -338,6 +375,11 @@ function TestResultCard({ result, providerHint }) {
               <XCircle size={10} /> FAIL
             </span>
           )}
+          {showFpBadge && (
+            <span className="text-xs px-1.5 py-0.5 rounded bg-yellow-500/20 text-yellow-600 dark:text-yellow-400 flex-shrink-0 font-semibold">
+              FP
+            </span>
+          )}
         </div>
         <div className="flex items-center gap-3 text-xs text-text-tertiary flex-shrink-0 ml-2">
           <span
@@ -359,6 +401,20 @@ function TestResultCard({ result, providerHint }) {
             <span className="font-mono text-text-disabled" title="Token counts not reported by the chatbot/assistant provider">— tokens</span>
           ) : null}
           <span title="Wall-clock duration of the test (excluding wait times)">{formatDuration(result.duration)}</span>
+          {(result.id || result.question_id) && (
+            <button
+              onClick={handleFpToggle}
+              disabled={fpLoading}
+              className={`px-2 py-0.5 rounded text-[10px] font-medium transition-colors ${
+                isFp
+                  ? 'bg-yellow-500/20 text-yellow-600 dark:text-yellow-400 hover:bg-yellow-500/30'
+                  : 'bg-surface border border-border text-text-disabled hover:text-text-secondary'
+              }`}
+              title={isFp ? 'Unmark as False Positive' : 'Mark as False Positive'}
+            >
+              {fpLoading ? '...' : isFp ? 'Unmark FP' : 'Mark as FP'}
+            </button>
+          )}
           <button
             onClick={(e) => { e.stopPropagation(); setShowRerun(true) }}
             className="px-2 py-0.5 rounded bg-primary/10 text-primary hover:bg-primary/20 transition-colors text-[10px] font-medium"
@@ -648,6 +704,260 @@ function SmokeTestResultCard({ result }) {
           )}
         </div>
       )}
+    </div>
+  )
+}
+
+// Trends Tab Component
+const TREND_COLORS = ["#4ade80", "#60a5fa", "#f59e0b", "#f87171", "#a78bfa"]
+
+function TrendsTab({ testRuns }) {
+  // Helper: truncate a timestamp to date string YYYY-MM-DD
+  const toDateStr = (timestamp) => {
+    if (!timestamp) return null
+    try {
+      return new Date(timestamp).toISOString().slice(0, 10)
+    } catch {
+      return null
+    }
+  }
+
+  // 5a. Pass rate over time per test file
+  const passRateData = React.useMemo(() => {
+    // Get up to 5 unique test files
+    const fileSet = new Set()
+    testRuns.forEach(r => { if (r.test_file) fileSet.add(r.test_file) })
+    const files = Array.from(fileSet).slice(0, 5)
+
+    // Group by date
+    const byDate = {}
+    testRuns.forEach(run => {
+      const date = toDateStr(run.timestamp)
+      if (!date) return
+      if (!byDate[date]) byDate[date] = {}
+      const file = run.test_file
+      if (!file || !files.includes(file)) return
+      if (!byDate[date][file]) byDate[date][file] = { passed: 0, total: 0 }
+      byDate[date][file].passed += run.passed || 0
+      byDate[date][file].total += run.total_tests || 0
+    })
+
+    return {
+      files,
+      data: Object.entries(byDate)
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([date, fileData]) => {
+          const row = { date }
+          files.forEach(f => {
+            const fd = fileData[f]
+            row[f] = fd && fd.total > 0 ? Math.round((fd.passed / fd.total) * 100) : null
+          })
+          return row
+        }),
+    }
+  }, [testRuns])
+
+  // 5b. Cost per run over time
+  const costData = React.useMemo(() => {
+    const byDate = {}
+    testRuns.forEach(run => {
+      const date = toDateStr(run.timestamp)
+      if (!date) return
+      if (!byDate[date]) byDate[date] = 0
+      byDate[date] += run.total_cost || 0
+    })
+    return Object.entries(byDate)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([date, cost]) => ({ date, cost: parseFloat(cost.toFixed(4)) }))
+  }, [testRuns])
+
+  // 5c. Most variable test files
+  const variabilityData = React.useMemo(() => {
+    const fileStats = {}
+    testRuns.forEach(run => {
+      const file = run.test_file
+      if (!file) return
+      const rate = run.total_tests > 0 ? (run.passed / run.total_tests) * 100 : 0
+      if (!fileStats[file]) fileStats[file] = { rates: [] }
+      fileStats[file].rates.push(rate)
+    })
+    return Object.entries(fileStats)
+      .map(([file, stats]) => {
+        const min = Math.min(...stats.rates)
+        const max = Math.max(...stats.rates)
+        return {
+          file: file.split('/').pop(),
+          min: Math.round(min),
+          max: Math.round(max),
+          variance: Math.round(max - min),
+          count: stats.rates.length,
+        }
+      })
+      .sort((a, b) => b.variance - a.variance)
+      .slice(0, 10)
+  }, [testRuns])
+
+  // 5d. Slowest test files
+  const slowestData = React.useMemo(() => {
+    const fileStats = {}
+    testRuns.forEach(run => {
+      const file = run.test_file
+      if (!file || !run.total_duration) return
+      if (!fileStats[file]) fileStats[file] = { durations: [] }
+      fileStats[file].durations.push(run.total_duration)
+    })
+    return Object.entries(fileStats)
+      .map(([file, stats]) => {
+        const avg = stats.durations.reduce((a, b) => a + b, 0) / stats.durations.length
+        return {
+          file: file.split('/').pop(),
+          avgDuration: avg,
+          count: stats.durations.length,
+        }
+      })
+      .sort((a, b) => b.avgDuration - a.avgDuration)
+      .slice(0, 10)
+  }, [testRuns])
+
+  if (testRuns.length === 0) {
+    return (
+      <div className="flex items-center justify-center h-full p-12 text-center">
+        <div>
+          <TrendingUp size={48} className="mx-auto mb-3 text-text-disabled opacity-50" />
+          <p className="text-text-tertiary">No test runs to analyze</p>
+          <p className="text-text-disabled text-sm mt-1">Run some tests to see trends</p>
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="p-6 space-y-8">
+      {/* Pass rate over time */}
+      <div>
+        <h3 className="text-base font-semibold text-text-primary mb-4 flex items-center gap-2">
+          <TrendingUp size={16} className="text-primary" />
+          Pass Rate Over Time (per test file)
+        </h3>
+        {passRateData.data.length === 0 ? (
+          <p className="text-xs text-text-tertiary">Not enough dated data.</p>
+        ) : (
+          <ResponsiveContainer width="100%" height={260}>
+            <LineChart data={passRateData.data} margin={{ top: 8, right: 16, left: 0, bottom: 8 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border, #374151)" />
+              <XAxis dataKey="date" tick={{ fontSize: 11 }} stroke="var(--color-text-tertiary, #6b7280)" />
+              <YAxis domain={[0, 100]} tickFormatter={v => `${v}%`} tick={{ fontSize: 11 }} stroke="var(--color-text-tertiary, #6b7280)" />
+              <Tooltip formatter={(value) => value !== null ? `${value}%` : 'N/A'} />
+              <Legend wrapperStyle={{ fontSize: 11 }} />
+              {passRateData.files.map((file, idx) => (
+                <Line
+                  key={file}
+                  type="monotone"
+                  dataKey={file}
+                  name={file.split('/').pop()}
+                  stroke={TREND_COLORS[idx % TREND_COLORS.length]}
+                  strokeWidth={2}
+                  dot={{ r: 3 }}
+                  connectNulls
+                />
+              ))}
+            </LineChart>
+          </ResponsiveContainer>
+        )}
+      </div>
+
+      {/* Cost per run over time */}
+      <div>
+        <h3 className="text-base font-semibold text-text-primary mb-4 flex items-center gap-2">
+          <DollarSign size={16} className="text-primary" />
+          Cost per Day
+        </h3>
+        {costData.length === 0 ? (
+          <p className="text-xs text-text-tertiary">No cost data available.</p>
+        ) : (
+          <ResponsiveContainer width="100%" height={220}>
+            <BarChart data={costData} margin={{ top: 8, right: 16, left: 0, bottom: 8 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border, #374151)" />
+              <XAxis dataKey="date" tick={{ fontSize: 11 }} stroke="var(--color-text-tertiary, #6b7280)" />
+              <YAxis tickFormatter={v => `$${v}`} tick={{ fontSize: 11 }} stroke="var(--color-text-tertiary, #6b7280)" />
+              <Tooltip formatter={(v) => `$${v}`} />
+              <Bar dataKey="cost" fill="#60a5fa" radius={[3, 3, 0, 0]} />
+            </BarChart>
+          </ResponsiveContainer>
+        )}
+      </div>
+
+      {/* Most variable test files */}
+      <div>
+        <h3 className="text-base font-semibold text-text-primary mb-4 flex items-center gap-2">
+          <BarChart3 size={16} className="text-primary" />
+          Most Variable Test Files
+        </h3>
+        {variabilityData.length === 0 ? (
+          <p className="text-xs text-text-tertiary">No variability data.</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-border">
+                  <th className="text-left py-2 px-3 text-text-secondary font-medium">Test File</th>
+                  <th className="text-center py-2 px-3 text-text-secondary font-medium">Min Rate</th>
+                  <th className="text-center py-2 px-3 text-text-secondary font-medium">Max Rate</th>
+                  <th className="text-center py-2 px-3 text-text-secondary font-medium">Variance</th>
+                  <th className="text-center py-2 px-3 text-text-secondary font-medium"># Runs</th>
+                </tr>
+              </thead>
+              <tbody>
+                {variabilityData.map((row, idx) => (
+                  <tr key={idx} className="border-b border-border/50 hover:bg-surface-hover">
+                    <td className="py-2 px-3 font-mono text-xs text-text-primary">{row.file}</td>
+                    <td className="text-center py-2 px-3 text-xs font-mono text-text-secondary">{row.min}%</td>
+                    <td className="text-center py-2 px-3 text-xs font-mono text-text-secondary">{row.max}%</td>
+                    <td className="text-center py-2 px-3">
+                      <span className={`text-xs font-mono font-semibold ${row.variance > 30 ? 'text-error' : row.variance > 10 ? 'text-warning' : 'text-success'}`}>
+                        {row.variance}%
+                      </span>
+                    </td>
+                    <td className="text-center py-2 px-3 text-xs text-text-tertiary">{row.count}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {/* Slowest test files */}
+      <div>
+        <h3 className="text-base font-semibold text-text-primary mb-4 flex items-center gap-2">
+          <Clock size={16} className="text-primary" />
+          Slowest Test Files (avg duration)
+        </h3>
+        {slowestData.length === 0 ? (
+          <p className="text-xs text-text-tertiary">No duration data.</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-border">
+                  <th className="text-left py-2 px-3 text-text-secondary font-medium">Test File</th>
+                  <th className="text-center py-2 px-3 text-text-secondary font-medium">Avg Duration</th>
+                  <th className="text-center py-2 px-3 text-text-secondary font-medium"># Runs</th>
+                </tr>
+              </thead>
+              <tbody>
+                {slowestData.map((row, idx) => (
+                  <tr key={idx} className="border-b border-border/50 hover:bg-surface-hover">
+                    <td className="py-2 px-3 font-mono text-xs text-text-primary">{row.file}</td>
+                    <td className="text-center py-2 px-3 text-xs font-mono text-text-secondary">{formatDuration(row.avgDuration)}</td>
+                    <td className="text-center py-2 px-3 text-xs text-text-tertiary">{row.count}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
     </div>
   )
 }
@@ -1337,259 +1647,282 @@ function Reports() {
               {smokeReports.length}
             </span>
           </button>
+          <button
+            onClick={() => setActiveTab('trends')}
+            className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors flex items-center gap-2 ${
+              activeTab === 'trends'
+                ? 'bg-primary text-white'
+                : 'bg-surface hover:bg-surface-hover text-text-secondary'
+            }`}
+          >
+            <TrendingUp size={16} />
+            Trends
+          </button>
         </div>
 
-        {/* Filter bar */}
-        <div className="flex items-center gap-3 mt-3 flex-wrap">
-          <input
-            type="text"
-            value={filterSearch}
-            onChange={(e) => setFilterSearch(e.target.value)}
-            placeholder="Search..."
-            className="input text-xs py-1.5 px-3 w-36"
-          />
-          {filterOptions.models.length > 1 && (
-            <select
-              value={filterModel}
-              onChange={(e) => setFilterModel(e.target.value)}
-              className="input text-xs py-1.5 px-2"
-            >
-              <option value="">All Models</option>
-              {filterOptions.models.map(m => <option key={m} value={m}>{m}</option>)}
-            </select>
-          )}
-          {filterOptions.providers.length > 1 && (
-            <select
-              value={filterProvider}
-              onChange={(e) => setFilterProvider(e.target.value)}
-              className="input text-xs py-1.5 px-2"
-            >
-              <option value="">All Providers</option>
-              {filterOptions.providers.map(p => <option key={p} value={p}>{p}</option>)}
-            </select>
-          )}
-          {filterOptions.test_files.length > 1 && (
-            <select
-              value={filterTestFile}
-              onChange={(e) => setFilterTestFile(e.target.value)}
-              className="input text-xs py-1.5 px-2"
-            >
-              <option value="">All Test Files</option>
-              {filterOptions.test_files.map(f => <option key={f} value={f}>{f.split('/').pop()}</option>)}
-            </select>
-          )}
-          <div className="flex items-center gap-1">
-            {['all', 'pass', 'fail'].map(status => (
+        {/* Filter bar — only shown for tests/smoke tabs */}
+        {activeTab !== 'trends' && (
+          <div className="flex items-center gap-3 mt-3 flex-wrap">
+            <input
+              type="text"
+              value={filterSearch}
+              onChange={(e) => setFilterSearch(e.target.value)}
+              placeholder="Search..."
+              className="input text-xs py-1.5 px-3 w-36"
+            />
+            {filterOptions.models.length > 1 && (
+              <select
+                value={filterModel}
+                onChange={(e) => setFilterModel(e.target.value)}
+                className="input text-xs py-1.5 px-2"
+              >
+                <option value="">All Models</option>
+                {filterOptions.models.map(m => <option key={m} value={m}>{m}</option>)}
+              </select>
+            )}
+            {filterOptions.providers.length > 1 && (
+              <select
+                value={filterProvider}
+                onChange={(e) => setFilterProvider(e.target.value)}
+                className="input text-xs py-1.5 px-2"
+              >
+                <option value="">All Providers</option>
+                {filterOptions.providers.map(p => <option key={p} value={p}>{p}</option>)}
+              </select>
+            )}
+            {filterOptions.test_files.length > 1 && (
+              <select
+                value={filterTestFile}
+                onChange={(e) => setFilterTestFile(e.target.value)}
+                className="input text-xs py-1.5 px-2"
+              >
+                <option value="">All Test Files</option>
+                {filterOptions.test_files.map(f => <option key={f} value={f}>{f.split('/').pop()}</option>)}
+              </select>
+            )}
+            <div className="flex items-center gap-1">
+              {['all', 'pass', 'fail'].map(status => (
+                <button
+                  key={status}
+                  onClick={() => setFilterStatus(status)}
+                  className={`px-2.5 py-1 rounded text-xs font-medium transition-colors ${
+                    filterStatus === status
+                      ? status === 'pass' ? 'bg-success/20 text-success' : status === 'fail' ? 'bg-error/20 text-error' : 'bg-primary/20 text-primary'
+                      : 'bg-surface hover:bg-surface-hover text-text-secondary'
+                  }`}
+                >
+                  {status === 'all' ? 'All' : status === 'pass' ? 'Passed' : 'Failed'}
+                </button>
+              ))}
+            </div>
+            <div className="flex items-center gap-1 ml-auto">
               <button
-                key={status}
-                onClick={() => setFilterStatus(status)}
+                onClick={() => {
+                  setCompareMode(!compareMode)
+                  if (compareMode) {
+                    setSelectedForCompare(new Set())
+                    setShowCompare(false)
+                    setCompareData(null)
+                  }
+                }}
                 className={`px-2.5 py-1 rounded text-xs font-medium transition-colors ${
-                  filterStatus === status
-                    ? status === 'pass' ? 'bg-success/20 text-success' : status === 'fail' ? 'bg-error/20 text-error' : 'bg-primary/20 text-primary'
-                    : 'bg-surface hover:bg-surface-hover text-text-secondary'
+                  compareMode ? 'bg-primary/20 text-primary' : 'bg-surface hover:bg-surface-hover text-text-secondary'
                 }`}
               >
-                {status === 'all' ? 'All' : status === 'pass' ? 'Passed' : 'Failed'}
+                {compareMode ? 'Cancel Compare' : 'Compare'}
               </button>
-            ))}
-          </div>
-          <div className="flex items-center gap-1 ml-auto">
-            <button
-              onClick={() => {
-                setCompareMode(!compareMode)
-                if (compareMode) {
-                  setSelectedForCompare(new Set())
-                  setShowCompare(false)
-                  setCompareData(null)
-                }
-              }}
-              className={`px-2.5 py-1 rounded text-xs font-medium transition-colors ${
-                compareMode ? 'bg-primary/20 text-primary' : 'bg-surface hover:bg-surface-hover text-text-secondary'
-              }`}
-            >
-              {compareMode ? 'Cancel Compare' : 'Compare'}
-            </button>
-            {compareMode && selectedForCompare.size >= 2 && (
+              {compareMode && selectedForCompare.size >= 2 && (
+                <button
+                  onClick={loadComparison}
+                  className="px-2.5 py-1 rounded text-xs font-medium bg-primary text-white"
+                >
+                  Compare {selectedForCompare.size} runs
+                </button>
+              )}
+            </div>
+            {(filterModel || filterProvider || filterTestFile) && (
               <button
-                onClick={loadComparison}
-                className="px-2.5 py-1 rounded text-xs font-medium bg-primary text-white"
+                onClick={() => { setFilterModel(''); setFilterProvider(''); setFilterTestFile('') }}
+                className="text-xs text-text-tertiary hover:text-text-secondary"
               >
-                Compare {selectedForCompare.size} runs
+                Clear filters
               </button>
             )}
           </div>
-          {(filterModel || filterProvider || filterTestFile) && (
-            <button
-              onClick={() => { setFilterModel(''); setFilterProvider(''); setFilterTestFile('') }}
-              className="text-xs text-text-tertiary hover:text-text-secondary"
-            >
-              Clear filters
-            </button>
-          )}
-        </div>
+        )}
       </div>
 
-      {/* Content */}
-      <div className="flex-1 flex flex-col md:flex-row overflow-hidden">
-        {/* List Panel */}
-        <div className={`w-full md:w-96 flex-shrink-0 border-b md:border-b-0 md:border-r border-border overflow-auto bg-surface-elevated ${selectedRun ? 'hidden md:block' : 'block'}`}>
-          {loading ? (
-            <div className="flex items-center justify-center h-full">
-              <Loader2 className="animate-spin text-primary" size={32} />
-            </div>
-          ) : activeTab === 'tests' ? (
-            testRuns.length === 0 ? (
-              <div className="p-8 text-center">
-                <FileText size={48} className="mx-auto mb-3 text-text-disabled opacity-50" />
-                <p className="text-text-tertiary">No test runs found</p>
-                <p className="text-text-disabled text-sm mt-1">Run some tests to see results here</p>
+      {/* Trends tab — full-width, no list panel */}
+      {activeTab === 'trends' && (
+        <div className="flex-1 overflow-auto bg-background">
+          <TrendsTab testRuns={testRuns} />
+        </div>
+      )}
+
+      {/* Content — list + detail panel for tests/smoke */}
+      {activeTab !== 'trends' && (
+        <div className="flex-1 flex flex-col md:flex-row overflow-hidden">
+          {/* List Panel */}
+          <div className={`w-full md:w-96 flex-shrink-0 border-b md:border-b-0 md:border-r border-border overflow-auto bg-surface-elevated ${selectedRun ? 'hidden md:block' : 'block'}`}>
+            {loading ? (
+              <div className="flex items-center justify-center h-full">
+                <Loader2 className="animate-spin text-primary" size={32} />
               </div>
-            ) : (
-              <div>
-                {/* Bulk-select toolbar */}
-                {selectMode ? (
-                  <div className="flex items-center justify-between px-3 py-2 border-b border-border bg-surface sticky top-0 z-10">
-                    <div className="flex items-center gap-2">
-                      <input
-                        type="checkbox"
-                        checked={selectedRuns.size === filteredTestRuns.length && filteredTestRuns.length > 0}
-                        ref={el => { if (el) el.indeterminate = selectedRuns.size > 0 && selectedRuns.size < filteredTestRuns.length }}
-                        onChange={toggleSelectAll}
-                        className="accent-primary"
-                      />
-                      <span className="text-xs text-text-secondary">
-                        {selectedRuns.size > 0 ? `${selectedRuns.size} selected` : 'Select all'}
-                      </span>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      {selectedRuns.size > 0 && (
+            ) : activeTab === 'tests' ? (
+              testRuns.length === 0 ? (
+                <div className="p-8 text-center">
+                  <FileText size={48} className="mx-auto mb-3 text-text-disabled opacity-50" />
+                  <p className="text-text-tertiary">No test runs found</p>
+                  <p className="text-text-disabled text-sm mt-1">Run some tests to see results here</p>
+                </div>
+              ) : (
+                <div>
+                  {/* Bulk-select toolbar */}
+                  {selectMode ? (
+                    <div className="flex items-center justify-between px-3 py-2 border-b border-border bg-surface sticky top-0 z-10">
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="checkbox"
+                          checked={selectedRuns.size === filteredTestRuns.length && filteredTestRuns.length > 0}
+                          ref={el => { if (el) el.indeterminate = selectedRuns.size > 0 && selectedRuns.size < filteredTestRuns.length }}
+                          onChange={toggleSelectAll}
+                          className="accent-primary"
+                        />
+                        <span className="text-xs text-text-secondary">
+                          {selectedRuns.size > 0 ? `${selectedRuns.size} selected` : 'Select all'}
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        {selectedRuns.size > 0 && (
+                          <button
+                            onClick={deleteSelected}
+                            className="flex items-center gap-1 px-2 py-1 text-xs bg-error text-white rounded hover:bg-error/90 transition-colors"
+                          >
+                            <Trash2 size={12} />
+                            Delete {selectedRuns.size}
+                          </button>
+                        )}
                         <button
-                          onClick={deleteSelected}
-                          className="flex items-center gap-1 px-2 py-1 text-xs bg-error text-white rounded hover:bg-error/90 transition-colors"
+                          onClick={toggleSelectMode}
+                          className="text-xs text-text-secondary hover:text-text-primary px-2 py-1 rounded hover:bg-surface-hover transition-colors"
                         >
-                          <Trash2 size={12} />
-                          Delete {selectedRuns.size}
+                          Cancel
                         </button>
-                      )}
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="flex justify-end px-3 py-1.5 border-b border-border">
                       <button
                         onClick={toggleSelectMode}
-                        className="text-xs text-text-secondary hover:text-text-primary px-2 py-1 rounded hover:bg-surface-hover transition-colors"
+                        className="text-xs text-text-secondary hover:text-text-primary flex items-center gap-1 px-2 py-1 rounded hover:bg-surface-hover transition-colors"
                       >
-                        Cancel
+                        <CheckSquare size={12} />
+                        Select
                       </button>
                     </div>
+                  )}
+                  <div className="divide-y divide-border">
+                    {filteredTestRuns.map(renderRunListItem)}
                   </div>
-                ) : (
-                  <div className="flex justify-end px-3 py-1.5 border-b border-border">
-                    <button
-                      onClick={toggleSelectMode}
-                      className="text-xs text-text-secondary hover:text-text-primary flex items-center gap-1 px-2 py-1 rounded hover:bg-surface-hover transition-colors"
-                    >
-                      <CheckSquare size={12} />
-                      Select
-                    </button>
-                  </div>
-                )}
+                </div>
+              )
+            ) : (
+              smokeReports.length === 0 ? (
+                <div className="p-8 text-center">
+                  <Zap size={48} className="mx-auto mb-3 text-text-disabled opacity-50" />
+                  <p className="text-text-tertiary">No smoke test reports found</p>
+                  <p className="text-text-disabled text-sm mt-1">Run a smoke test to see results here</p>
+                </div>
+              ) : (
                 <div className="divide-y divide-border">
-                  {filteredTestRuns.map(renderRunListItem)}
+                  {filteredSmokeReports.map((report) => (
+                    <div
+                      key={report.report_id}
+                      className={`p-4 cursor-pointer transition-colors group ${
+                        selectedRun?.id === report.report_id
+                          ? 'bg-primary/10 border-l-2 border-l-primary'
+                          : 'hover:bg-surface border-l-2 border-l-transparent'
+                      }`}
+                      onClick={() => selectRun(report.report_id, 'smoke')}
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2">
+                            {report.failed === 0 ? (
+                              <CheckCircle size={14} className="text-success flex-shrink-0" />
+                            ) : (
+                              <XCircle size={14} className="text-error flex-shrink-0" />
+                            )}
+                            <span className="font-medium text-text-primary truncate">
+                              {report.profile_id || 'Smoke Test'}
+                            </span>
+                          </div>
+                          <div className="flex items-center gap-2 mt-1">
+                            <span className={`text-xs px-1.5 py-0.5 rounded ${
+                              report.failed === 0 ? 'bg-success/20 text-success' : 'bg-error/20 text-error'
+                            }`}>
+                              {report.passed}/{report.total_tests} passed
+                            </span>
+                            <span className="text-xs text-text-tertiary">
+                              {report.success_rate?.toFixed(0)}%
+                            </span>
+                          </div>
+                          <div className="flex items-center gap-3 mt-2 text-xs text-text-disabled">
+                            <span className="flex items-center gap-1">
+                              <Server size={10} />
+                              {report.server_url?.split('/').pop() || 'MCP Server'}
+                            </span>
+                            <span>{formatDuration(report.duration_ms / 1000)}</span>
+                          </div>
+                          <div className="text-xs text-text-disabled mt-1">
+                            {formatDate(report.timestamp)}
+                          </div>
+                        </div>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            deleteRun(report.report_id, 'smoke')
+                          }}
+                          className="p-1 hover:bg-error/20 rounded opacity-0 group-hover:opacity-100 transition-opacity"
+                        >
+                          <Trash2 size={14} className="text-error" />
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )
+            )}
+          </div>
+
+          {/* Details Panel */}
+          <div className={`flex-1 overflow-auto bg-background ${selectedRun ? 'block' : 'hidden md:block'}`}>
+            {selectedRun && (
+              <button onClick={() => { setSelectedRun(null); setRunDetails(null) }} className="md:hidden flex items-center gap-2 px-4 py-3 text-sm text-text-secondary hover:text-text-primary border-b border-border w-full">
+                <ChevronRight size={16} className="rotate-180" />
+                <span>Back to list</span>
+              </button>
+            )}
+            {loadingDetails ? (
+              <div className="flex items-center justify-center h-full">
+                <Loader2 className="animate-spin text-primary" size={32} />
+              </div>
+            ) : !runDetails ? (
+              <div className="flex items-center justify-center h-full">
+                <div className="text-center">
+                  <FileText size={48} className="mx-auto mb-3 text-text-disabled opacity-50" />
+                  <p className="text-text-tertiary">Select a report to view details</p>
                 </div>
               </div>
-            )
-          ) : (
-            smokeReports.length === 0 ? (
-              <div className="p-8 text-center">
-                <Zap size={48} className="mx-auto mb-3 text-text-disabled opacity-50" />
-                <p className="text-text-tertiary">No smoke test reports found</p>
-                <p className="text-text-disabled text-sm mt-1">Run a smoke test to see results here</p>
-              </div>
+            ) : selectedRun?.type === 'tests' ? (
+              renderTestRunDetails()
             ) : (
-              <div className="divide-y divide-border">
-                {filteredSmokeReports.map((report) => (
-                  <div
-                    key={report.report_id}
-                    className={`p-4 cursor-pointer transition-colors group ${
-                      selectedRun?.id === report.report_id
-                        ? 'bg-primary/10 border-l-2 border-l-primary'
-                        : 'hover:bg-surface border-l-2 border-l-transparent'
-                    }`}
-                    onClick={() => selectRun(report.report_id, 'smoke')}
-                  >
-                    <div className="flex items-start justify-between gap-2">
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2">
-                          {report.failed === 0 ? (
-                            <CheckCircle size={14} className="text-success flex-shrink-0" />
-                          ) : (
-                            <XCircle size={14} className="text-error flex-shrink-0" />
-                          )}
-                          <span className="font-medium text-text-primary truncate">
-                            {report.profile_id || 'Smoke Test'}
-                          </span>
-                        </div>
-                        <div className="flex items-center gap-2 mt-1">
-                          <span className={`text-xs px-1.5 py-0.5 rounded ${
-                            report.failed === 0 ? 'bg-success/20 text-success' : 'bg-error/20 text-error'
-                          }`}>
-                            {report.passed}/{report.total_tests} passed
-                          </span>
-                          <span className="text-xs text-text-tertiary">
-                            {report.success_rate?.toFixed(0)}%
-                          </span>
-                        </div>
-                        <div className="flex items-center gap-3 mt-2 text-xs text-text-disabled">
-                          <span className="flex items-center gap-1">
-                            <Server size={10} />
-                            {report.server_url?.split('/').pop() || 'MCP Server'}
-                          </span>
-                          <span>{formatDuration(report.duration_ms / 1000)}</span>
-                        </div>
-                        <div className="text-xs text-text-disabled mt-1">
-                          {formatDate(report.timestamp)}
-                        </div>
-                      </div>
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation()
-                          deleteRun(report.report_id, 'smoke')
-                        }}
-                        className="p-1 hover:bg-error/20 rounded opacity-0 group-hover:opacity-100 transition-opacity"
-                      >
-                        <Trash2 size={14} className="text-error" />
-                      </button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )
-          )}
+              renderSmokeDetails()
+            )}
+          </div>
         </div>
+      )}
 
-        {/* Details Panel */}
-        <div className={`flex-1 overflow-auto bg-background ${selectedRun ? 'block' : 'hidden md:block'}`}>
-          {selectedRun && (
-            <button onClick={() => { setSelectedRun(null); setRunDetails(null) }} className="md:hidden flex items-center gap-2 px-4 py-3 text-sm text-text-secondary hover:text-text-primary border-b border-border w-full">
-              <ChevronRight size={16} className="rotate-180" />
-              <span>Back to list</span>
-            </button>
-          )}
-          {loadingDetails ? (
-            <div className="flex items-center justify-center h-full">
-              <Loader2 className="animate-spin text-primary" size={32} />
-            </div>
-          ) : !runDetails ? (
-            <div className="flex items-center justify-center h-full">
-              <div className="text-center">
-                <FileText size={48} className="mx-auto mb-3 text-text-disabled opacity-50" />
-                <p className="text-text-tertiary">Select a report to view details</p>
-              </div>
-            </div>
-          ) : selectedRun?.type === 'tests' ? (
-            renderTestRunDetails()
-          ) : (
-            renderSmokeDetails()
-          )}
-        </div>
-      </div>
       {/* Comparison Modal */}
       {showCompare && compareData && (
         <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">

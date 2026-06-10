@@ -15,7 +15,10 @@ from testmcpy.mcp_profiles import get_profile_config
 router = APIRouter(prefix="/api/health", tags=["health"])
 
 # Timeout for individual server pings (seconds)
-PING_TIMEOUT = 10.0
+PING_TIMEOUT = 15.0
+
+# Track last successful ping time per server key "{profile_id}:{server_name}"
+_last_success: dict[str, str] = {}
 
 
 async def _ping_server(mcp_server, profile_id: str, profile_name: str) -> dict[str, Any]:
@@ -31,9 +34,12 @@ async def _ping_server(mcp_server, profile_id: str, profile_name: str) -> dict[s
         "response_time_ms": None,
         "tool_count": None,
         "error": None,
+        "error_class": None,
+        "last_success_at": None,
         "checked_at": None,
     }
 
+    server_key = f"{profile_id}:{mcp_server.name}"
     start = time.time()
     client = None
     try:
@@ -47,6 +53,14 @@ async def _ping_server(mcp_server, profile_id: str, profile_name: str) -> dict[s
         result["status"] = "healthy"
         result["response_time_ms"] = round(elapsed_ms, 1)
         result["tool_count"] = len(tools)
+
+        from datetime import datetime, timezone
+
+        result["checked_at"] = datetime.now(timezone.utc).isoformat()
+        _last_success[server_key] = result["checked_at"]
+        result["last_success_at"] = result["checked_at"]
+        return result
+
     except asyncio.TimeoutError:
         elapsed_ms = (time.time() - start) * 1000
         result["status"] = "timeout"
@@ -58,10 +72,53 @@ async def _ping_server(mcp_server, profile_id: str, profile_name: str) -> dict[s
         result["response_time_ms"] = round(elapsed_ms, 1)
         result["error"] = str(e)
     except (RuntimeError, ValueError, TypeError, AttributeError) as e:
-        elapsed_ms = (time.time() - start) * 1000
-        result["status"] = "error"
-        result["response_time_ms"] = round(elapsed_ms, 1)
-        result["error"] = str(e)
+        error_class = type(e).__name__
+        result["error_class"] = error_class
+
+        # Retry once after a short delay — auth servers may need warmup
+        await asyncio.sleep(2.0)
+
+        retry_client = None
+        try:
+            auth_dict = mcp_server.auth.to_dict() if mcp_server.auth else None
+            retry_client = MCPClient(mcp_server.mcp_url, auth=auth_dict)
+
+            await asyncio.wait_for(retry_client.initialize(), timeout=PING_TIMEOUT)
+            tools = await asyncio.wait_for(retry_client.list_tools(), timeout=PING_TIMEOUT)
+
+            elapsed_ms = (time.time() - start) * 1000
+            result["status"] = "healthy"
+            result["response_time_ms"] = round(elapsed_ms, 1)
+            result["tool_count"] = len(tools)
+            result["error_class"] = None
+
+            from datetime import datetime, timezone
+
+            result["checked_at"] = datetime.now(timezone.utc).isoformat()
+            _last_success[server_key] = result["checked_at"]
+            result["last_success_at"] = result["checked_at"]
+            return result
+
+        except (
+            RuntimeError,
+            ValueError,
+            TypeError,
+            AttributeError,
+            asyncio.TimeoutError,
+            ConnectionError,
+            OSError,
+        ) as retry_e:
+            elapsed_ms = (time.time() - start) * 1000
+            result["status"] = "error"
+            result["response_time_ms"] = round(elapsed_ms, 1)
+            result["error"] = str(retry_e)
+            result["error_class"] = error_class
+        finally:
+            if retry_client is not None:
+                try:
+                    await retry_client.close()
+                except (ConnectionError, OSError, RuntimeError):
+                    pass
     finally:
         if client is not None:
             try:
@@ -72,6 +129,7 @@ async def _ping_server(mcp_server, profile_id: str, profile_name: str) -> dict[s
     from datetime import datetime, timezone
 
     result["checked_at"] = datetime.now(timezone.utc).isoformat()
+    result["last_success_at"] = _last_success.get(server_key)
     return result
 
 

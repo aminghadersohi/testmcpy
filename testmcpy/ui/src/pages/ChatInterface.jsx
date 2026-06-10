@@ -97,6 +97,8 @@ function ChatInterface({ selectedProfiles = [], selectedLlmProfile, llmProfiles 
   const [editingText, setEditingText] = useState('')
   const [systemPrompt, setSystemPrompt] = useState('')
   const [showSystemPrompt, setShowSystemPrompt] = useState(false)
+  const [collapsedThinking, setCollapsedThinking] = useState({})
+  const [expandedToolCalls, setExpandedToolCalls] = useState({})
 
   // For Chat, only use the first selected profile (single MCP at a time)
   const activeProfile = selectedProfiles.length > 0 ? selectedProfiles[0] : null
@@ -853,16 +855,22 @@ ${evaluators}
 
       {/* Messages */}
       <div className="flex-1 overflow-auto p-4 bg-background-subtle" role="log" aria-live="polite" aria-label="Chat messages">
-        {messages.length === 0 ? (
-          <div className="flex items-center justify-center h-full">
+        {messages.length === 0 && !loading ? (
+          <div className="flex flex-col items-center justify-center h-full gap-6 p-8">
             <div className="text-center">
-              <div className="w-16 h-16 bg-surface-elevated rounded-2xl flex items-center justify-center mx-auto mb-4 border border-border">
-                <Send size={28} className="text-text-tertiary" />
-              </div>
-              <p className="text-xl font-medium text-text-secondary mb-2">Start a conversation</p>
-              <p className="text-sm text-text-tertiary max-w-md">
-                Ask questions and the LLM will use MCP tools to help you accomplish your tasks
-              </p>
+              <h2 className="text-xl font-semibold text-text-secondary mb-2">Chat with your MCP tools</h2>
+              <p className="text-text-tertiary text-sm">Send a message to start a conversation with your configured MCP servers</p>
+            </div>
+            <div className="flex flex-wrap gap-2 justify-center max-w-lg">
+              {["List all available tools", "What can you help me with?", "Run a health check", "Show available resources"].map(examplePrompt => (
+                <button
+                  key={examplePrompt}
+                  onClick={() => setInput(examplePrompt)}
+                  className="px-3 py-2 text-sm bg-surface-elevated border border-border rounded-lg hover:bg-surface-hover text-text-secondary cursor-pointer"
+                >
+                  {examplePrompt}
+                </button>
+              ))}
             </div>
           </div>
         ) : (
@@ -956,38 +964,46 @@ ${evaluators}
                           streaming={message.streaming}
                         />
                       )}
-                      <div className="prose dark:prose-invert prose-sm max-w-none leading-relaxed prose-p:my-2 prose-pre:bg-background-subtle prose-pre:border prose-pre:border-border prose-code:text-primary-light prose-a:text-primary-light prose-a:no-underline hover:prose-a:underline prose-strong:text-text-primary prose-headings:text-text-primary">
-                        <ReactMarkdown
-                          remarkPlugins={[remarkGfm]}
-                          components={{
-                            // Custom code block styling
-                            code({node, inline, className, children, ...props}) {
-                              return inline ? (
-                                <code className="bg-background-subtle px-1.5 py-0.5 rounded text-primary-light" {...props}>
-                                  {children}
-                                </code>
-                              ) : (
-                                <code className={className} {...props}>
-                                  {children}
-                                </code>
-                              )
-                            },
-                            // Custom link styling to open in new tab
-                            a({node, children, href, ...props}) {
-                              return (
-                                <a href={href} target="_blank" rel="noopener noreferrer" {...props}>
-                                  {children}
-                                </a>
-                              )
-                            }
-                          }}
-                        >
-                          {message.content || ''}
-                        </ReactMarkdown>
-                        {message.streaming && message.content && (
-                          <span className="inline-block w-2 h-4 bg-primary animate-pulse ml-0.5 align-text-bottom" />
-                        )}
-                      </div>
+                      {message.streaming && !message.content && idx === messages.length - 1 ? (
+                        <div className="flex gap-1 items-center p-3">
+                          <div className="w-2 h-2 rounded-full bg-text-disabled animate-bounce [animation-delay:-0.3s]" />
+                          <div className="w-2 h-2 rounded-full bg-text-disabled animate-bounce [animation-delay:-0.15s]" />
+                          <div className="w-2 h-2 rounded-full bg-text-disabled animate-bounce" />
+                        </div>
+                      ) : (
+                        <div className="prose dark:prose-invert prose-sm max-w-none leading-relaxed prose-p:my-2 prose-pre:bg-background-subtle prose-pre:border prose-pre:border-border prose-code:text-primary-light prose-a:text-primary-light prose-a:no-underline hover:prose-a:underline prose-strong:text-text-primary prose-headings:text-text-primary">
+                          <ReactMarkdown
+                            remarkPlugins={[remarkGfm]}
+                            components={{
+                              // Custom code block styling
+                              code({node, inline, className, children, ...props}) {
+                                return inline ? (
+                                  <code className="bg-background-subtle px-1.5 py-0.5 rounded text-primary-light" {...props}>
+                                    {children}
+                                  </code>
+                                ) : (
+                                  <code className={className} {...props}>
+                                    {children}
+                                  </code>
+                                )
+                              },
+                              // Custom link styling to open in new tab
+                              a({node, children, href, ...props}) {
+                                return (
+                                  <a href={href} target="_blank" rel="noopener noreferrer" {...props}>
+                                    {children}
+                                  </a>
+                                )
+                              }
+                            }}
+                          >
+                            {message.content || ''}
+                          </ReactMarkdown>
+                          {message.streaming && message.content && (
+                            <span className="inline-block w-2 h-4 bg-primary animate-pulse ml-0.5 align-text-bottom" />
+                          )}
+                        </div>
+                      )}
                     </>
                   ) : (
                     editingMessageIdx === idx ? (
@@ -1065,9 +1081,20 @@ ${evaluators}
                           <div className="text-xs text-text-tertiary mb-2 flex items-center gap-2">
                             <Wrench size={12} />
                             <span className="font-medium">Tool Calls ({message.tool_calls.length})</span>
+                            {message.tool_calls.length > 3 && (
+                              <button
+                                onClick={() => setExpandedToolCalls(prev => ({ ...prev, [idx]: !prev[idx] }))}
+                                className="ml-auto text-[10px] text-primary-light hover:underline"
+                              >
+                                {expandedToolCalls[idx] ? 'Hide' : 'Show all'}
+                              </button>
+                            )}
                           </div>
                           <div className="space-y-2">
-                            {message.tool_calls.map((call, callIdx) => (
+                            {(message.tool_calls.length > 3 && !expandedToolCalls[idx]
+                              ? message.tool_calls.slice(0, 3)
+                              : message.tool_calls
+                            ).map((call, callIdx) => (
                               <div key={callIdx} className="bg-surface-hover rounded p-2">
                                 <div className="flex items-center gap-2 mb-1">
                                   <span className="font-mono text-[11px] text-primary-light font-semibold">
@@ -1094,6 +1121,11 @@ ${evaluators}
                                 )}
                               </div>
                             ))}
+                            {message.tool_calls.length > 3 && !expandedToolCalls[idx] && (
+                              <div className="text-[10px] text-text-tertiary text-center py-1">
+                                +{message.tool_calls.length - 3} more tool call{message.tool_calls.length - 3 !== 1 ? 's' : ''}
+                              </div>
+                            )}
                           </div>
                         </div>
                       )}

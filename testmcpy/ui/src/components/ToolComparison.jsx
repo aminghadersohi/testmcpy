@@ -1,8 +1,26 @@
 import React, { useState } from 'react'
 import { Download, CheckCircle2, XCircle, Clock, Zap, TrendingUp, TrendingDown, Minus, AlertCircle } from 'lucide-react'
+import {
+  BarChart,
+  Bar,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  Legend,
+  ResponsiveContainer,
+} from 'recharts'
+
+const median = (arr) => {
+  const s = [...arr].sort((a, b) => a - b)
+  const m = Math.floor(s.length / 2)
+  return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2
+}
 
 const ToolComparison = ({ comparisonResults }) => {
   const [showRawOutputs, setShowRawOutputs] = useState(true)
+  // Track expanded state per iteration index per profile
+  const [expandedOutputs, setExpandedOutputs] = useState({})
 
   if (!comparisonResults) {
     return null
@@ -47,6 +65,19 @@ const ToolComparison = ({ comparisonResults }) => {
   const successRate1 = (results1.filter(r => r.success).length / results1.length) * 100
   const successRate2 = (results2.filter(r => r.success).length / results2.length) * 100
 
+  // Median latencies
+  const durations1 = results1.map(r => r.duration_ms || 0)
+  const durations2 = results2.map(r => r.duration_ms || 0)
+  const medianTime1 = durations1.length > 0 ? median(durations1) : 0
+  const medianTime2 = durations2.length > 0 ? median(durations2) : 0
+
+  // Per-iteration latency chart data
+  const latencyChartData = results1.map((r1, idx) => ({
+    iteration: `#${idx + 1}`,
+    [profile1]: r1.duration_ms || 0,
+    [profile2]: (results2[idx] && results2[idx].duration_ms) || 0,
+  }))
+
   const downloadResults = () => {
     const dataStr = JSON.stringify(comparisonResults, null, 2)
     const blob = new Blob([dataStr], { type: 'application/json' })
@@ -58,6 +89,38 @@ const ToolComparison = ({ comparisonResults }) => {
     link.click()
     document.body.removeChild(link)
     URL.revokeObjectURL(url)
+  }
+
+  const toggleOutputExpand = (key) => {
+    setExpandedOutputs(prev => ({ ...prev, [key]: !prev[key] }))
+  }
+
+  const renderOutput = (result, expandKey) => {
+    if (!result.success) {
+      return (
+        <div className="bg-danger/10 border border-danger/30 rounded p-3">
+          <p className="text-sm text-danger">{result.error || 'Unknown error'}</p>
+        </div>
+      )
+    }
+    const text = formatJSON(result.result)
+    const isLong = text.length > 500
+    const isExpanded = expandedOutputs[expandKey]
+    return (
+      <div className="bg-surface rounded border border-border p-3">
+        <pre className={`text-xs text-text-primary overflow-auto font-mono whitespace-pre-wrap break-words ${isExpanded ? '' : 'max-h-48'}`}>
+          {text}
+        </pre>
+        {isLong && (
+          <button
+            onClick={() => toggleOutputExpand(expandKey)}
+            className="mt-2 text-xs text-primary hover:underline"
+          >
+            {isExpanded ? 'Collapse' : 'Expand'}
+          </button>
+        )}
+      </div>
+    )
   }
 
   return (
@@ -98,6 +161,7 @@ const ToolComparison = ({ comparisonResults }) => {
                   </span>
                 )}
               </div>
+              <div className="text-xs text-text-tertiary mt-1">Median: {formatTime(medianTime1)}</div>
             </div>
             <div>
               <div className="text-xs text-text-tertiary mb-1">Success Rate</div>
@@ -132,6 +196,7 @@ const ToolComparison = ({ comparisonResults }) => {
                   </span>
                 )}
               </div>
+              <div className="text-xs text-text-tertiary mt-1">Median: {formatTime(medianTime2)}</div>
               {(() => {
                 const indicator = getFasterIndicator(avgTime2, avgTime1)
                 return (
@@ -158,6 +223,24 @@ const ToolComparison = ({ comparisonResults }) => {
           </div>
         </div>
       </div>
+
+      {/* Per-iteration latency chart */}
+      {latencyChartData.length > 0 && (
+        <div className="bg-surface-elevated border border-border rounded-lg p-4">
+          <h3 className="font-semibold text-text-primary mb-3 text-sm">Per-Iteration Latency</h3>
+          <ResponsiveContainer width="100%" height={180}>
+            <BarChart data={latencyChartData} margin={{ top: 4, right: 16, left: 0, bottom: 4 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.08)" />
+              <XAxis dataKey="iteration" tick={{ fontSize: 11, fill: 'currentColor' }} />
+              <YAxis tick={{ fontSize: 11, fill: 'currentColor' }} unit="ms" />
+              <Tooltip formatter={(value) => [`${value.toFixed(0)}ms`, '']} />
+              <Legend wrapperStyle={{ fontSize: 11 }} />
+              <Bar dataKey={profile1} fill="#6366f1" radius={[3, 3, 0, 0]} />
+              <Bar dataKey={profile2} fill="#f59e0b" radius={[3, 3, 0, 0]} />
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+      )}
 
       {/* Toggle for raw outputs */}
       <div className="flex items-center gap-2">
@@ -224,18 +307,7 @@ const ToolComparison = ({ comparisonResults }) => {
                         )}
                       </div>
                     </div>
-
-                    {result1.success ? (
-                      <div className="bg-surface rounded border border-border p-3">
-                        <pre className="text-xs text-text-primary overflow-x-auto whitespace-pre-wrap break-words font-mono">
-                          {formatJSON(result1.result)}
-                        </pre>
-                      </div>
-                    ) : (
-                      <div className="bg-danger/10 border border-danger/30 rounded p-3">
-                        <p className="text-sm text-danger">{result1.error || 'Unknown error'}</p>
-                      </div>
-                    )}
+                    {renderOutput(result1, `p1-${idx}`)}
                   </div>
 
                   {/* Profile 2 Result */}
@@ -265,18 +337,7 @@ const ToolComparison = ({ comparisonResults }) => {
                         )}
                       </div>
                     </div>
-
-                    {result2.success ? (
-                      <div className="bg-surface rounded border border-border p-3">
-                        <pre className="text-xs text-text-primary overflow-x-auto whitespace-pre-wrap break-words font-mono">
-                          {formatJSON(result2.result)}
-                        </pre>
-                      </div>
-                    ) : (
-                      <div className="bg-danger/10 border border-danger/30 rounded p-3">
-                        <p className="text-sm text-danger">{result2.error || 'Unknown error'}</p>
-                      </div>
-                    )}
+                    {renderOutput(result2, `p2-${idx}`)}
                   </div>
                 </div>
               </div>

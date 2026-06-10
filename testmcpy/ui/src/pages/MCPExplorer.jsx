@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useRef } from 'react'
 import { ChevronDown, ChevronRight, Copy, Check, EyeOff, Sparkles, Code2, Search, Command, HelpCircle, CheckSquare, Square, MessageSquare, Wand2, TestTube2, Play, Clock, Bug, AlertCircle, GitCompare, LayoutList, LayoutGrid, History, Diff } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import ReactJson from '@microlink/react-json-view'
@@ -36,6 +36,11 @@ function MCPExplorer({ selectedProfiles = [] }) {
   const [viewMode, setViewMode] = useState(() => localStorage.getItem('explorerViewMode') || 'grid') // 'list' or 'grid'
   const [expandedToolModal, setExpandedToolModal] = useState(null) // Tool object for expanded modal in grid view
   const [codeViewerSchema, setCodeViewerSchema] = useState({}) // Map of tool name -> 'request' or 'response'
+  const [batchGenProgress, setBatchGenProgress] = useState('') // Progress text for batch generation
+
+  // Tools cache: profileId -> { tools: [...], loadedAt: timestamp }
+  const toolsCacheRef = useRef({})
+  const CACHE_TTL_MS = 60000
 
   // Smoke test state
   const [smokeTestReport, setSmokeTestReport] = useState(null)
@@ -166,14 +171,28 @@ function MCPExplorer({ selectedProfiles = [] }) {
       }
       const queryString = params.toString() ? `?${params.toString()}` : ''
 
-      const [toolsRes, resourcesRes, promptsRes] = await Promise.all([
-        fetchWithRetry(`/api/mcp/tools${queryString}`),
+      // Check tools cache before fetching
+      const cacheKey = activeProfile || '__default__'
+      const cached = toolsCacheRef.current[cacheKey]
+      const now = new Date().getTime()
+      let toolsData = null
+      if (cached && (now - cached.loadedAt) < CACHE_TTL_MS) {
+        toolsData = cached.tools
+      }
+
+      const [resourcesRes, promptsRes] = await Promise.all([
         fetchWithRetry(`/api/mcp/resources${queryString}`),
         fetchWithRetry(`/api/mcp/prompts${queryString}`),
       ])
 
+      if (toolsData === null) {
+        const toolsRes = await fetchWithRetry(`/api/mcp/tools${queryString}`)
+        toolsData = await toolsRes.json()
+        toolsCacheRef.current[cacheKey] = { tools: toolsData, loadedAt: new Date().getTime() }
+      }
+
       setLoadingPhase('loaded')
-      setTools(await toolsRes.json())
+      setTools(toolsData)
       setResources(await resourcesRes.json())
       setPrompts(await promptsRes.json())
     } catch (err) {
@@ -426,17 +445,59 @@ function MCPExplorer({ selectedProfiles = [] }) {
     setSelectedTools(new Set())
   }
 
-  const generateBatchTests = () => {
+  const generateBatchTests = async () => {
     if (selectedTools.size === 0) {
       alert('Please select at least one tool')
       return
     }
-    // For now, open modal for first selected tool
-    // TODO: Implement proper batch generation
-    const firstTool = tools.find(t => selectedTools.has(t.name))
-    if (firstTool) {
-      setSelectedToolForGeneration(firstTool)
+
+    const selectedToolList = tools.filter(t => selectedTools.has(t.name))
+    const total = selectedToolList.length
+
+    if (total === 1) {
+      // Single tool: open modal as before
+      setSelectedToolForGeneration(selectedToolList[0])
+      return
     }
+
+    // Multiple tools: generate sequentially
+    const results = []
+    for (let i = 0; i < selectedToolList.length; i++) {
+      const tool = selectedToolList[i]
+      setBatchGenProgress(`Generating for tool ${i + 1} of ${total}: ${tool.name}...`)
+      try {
+        const profileId = activeProfile ? activeProfile.split(':')[0] : null
+        const res = await fetch('/api/tests/generate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            tool_name: tool.name,
+            tool_description: tool.description,
+            tool_schema: tool.input_schema,
+            profile_id: profileId,
+          }),
+        })
+        if (res.ok) {
+          const data = await res.json()
+          results.push({ tool: tool.name, success: true, count: data.test_count, file: data.filename })
+        } else {
+          const err = await res.json().catch(() => ({}))
+          results.push({ tool: tool.name, success: false, error: err.detail || 'Unknown error' })
+        }
+      } catch (err) {
+        results.push({ tool: tool.name, success: false, error: err.message })
+      }
+    }
+
+    setBatchGenProgress('')
+    const succeeded = results.filter(r => r.success)
+    const failed = results.filter(r => !r.success)
+    let msg = `Batch generation complete!\n${succeeded.length}/${total} tools succeeded.`
+    if (failed.length > 0) {
+      msg += '\n\nFailed:\n' + failed.map(r => `- ${r.tool}: ${r.error}`).join('\n')
+    }
+    alert(msg)
+    loadToolTests()
   }
 
   // Toggle view mode between list and grid
@@ -835,12 +896,15 @@ function MCPExplorer({ selectedProfiles = [] }) {
               </button>
               <button
                 onClick={generateBatchTests}
-                disabled={selectedTools.size === 0}
+                disabled={selectedTools.size === 0 || !!batchGenProgress}
                 className="btn btn-primary text-xs px-3 py-1 flex items-center gap-1.5"
               >
                 <Sparkles size={14} />
                 <span>Generate Tests ({selectedTools.size})</span>
               </button>
+              {batchGenProgress && (
+                <span className="text-xs text-text-secondary ml-1">{batchGenProgress}</span>
+              )}
             </div>
           )}
         </div>

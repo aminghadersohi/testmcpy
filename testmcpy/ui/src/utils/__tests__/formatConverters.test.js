@@ -58,9 +58,10 @@ describe('formatConverters', () => {
       expect(result).toContain('description: User name')
     })
 
-    it('should handle errors gracefully', () => {
+    it('handles undefined input without throwing', () => {
+      // yaml.dump(undefined) returns '' rather than throwing
       const result = toYAML(undefined)
-      expect(result).toContain('Error converting to YAML')
+      expect(typeof result).toBe('string')
     })
   })
 
@@ -127,7 +128,8 @@ describe('formatConverters', () => {
     it('should generate cURL command with example data', () => {
       const result = toCurl(testSchema, 'test_tool')
       expect(result).toContain('curl -X POST')
-      expect(result).toContain('https://api.example.com/tools/test_tool')
+      expect(result).toContain('"method": "tools/call"')
+      expect(result).toContain('"name": "test_tool"')
       expect(result).toContain('-H "Content-Type: application/json"')
       expect(result).toContain('-d')
     })

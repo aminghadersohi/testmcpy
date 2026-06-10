@@ -41,7 +41,7 @@ async def get_metrics(
     mcp_profile: str | None = Query(None, description="Filter by MCP profile ID"),
     llm_provider: str | None = Query(None, description="Filter by LLM provider"),
     model: str | None = Query(None, description="Filter by model name"),
-    granularity: str = Query("daily", description="Time grouping: daily or weekly"),
+    granularity: str = Query("daily", description="Time grouping: hourly, daily, or weekly"),
 ) -> dict[str, Any]:
     """
     Get aggregate metrics over time.
@@ -118,9 +118,29 @@ async def get_metrics(
             "date_to": to_str,
         }
 
+        # --- False positive aggregation ---
+        fp_count = 0
+        total_failed_local = total_questions - total_passed
+        if run_ids and total_failed_local > 0:
+            fp_stats = (
+                session.query(func.count(QuestionResultModel.id).label("fp_count"))
+                .filter(QuestionResultModel.run_id.in_(run_ids))
+                .filter(~QuestionResultModel.passed)
+                .filter(QuestionResultModel.manual_false_positive == True)  # noqa: E712
+                .one()
+            )
+            fp_count = fp_stats.fp_count or 0
+
+        summary["false_positive_count"] = fp_count
+        summary["false_positive_rate"] = round(
+            (fp_count / total_failed_local * 100) if total_failed_local > 0 else 0, 1
+        )
+
         # --- Time series ---
         if granularity == "weekly":
             date_expr = func.strftime("%Y-W%W", TestRunModel.started_at)
+        elif granularity == "hourly":
+            date_expr = func.strftime("%Y-%m-%dT%H:00", TestRunModel.started_at)
         else:
             date_expr = func.date(TestRunModel.started_at)
 
@@ -209,6 +229,29 @@ async def get_metrics(
             "summary": summary,
             "time_series": time_series,
             "model_breakdown": model_breakdown,
+        }
+    finally:
+        session.close()
+
+
+@router.patch("/question/{question_id}/false-positive")
+async def set_false_positive(question_id: int, is_false_positive: bool = True) -> dict:
+    """Mark or unmark a question result as a false positive."""
+    from fastapi import HTTPException
+
+    session = _get_session()
+    try:
+        qr = (
+            session.query(QuestionResultModel).filter(QuestionResultModel.id == question_id).first()
+        )
+        if not qr:
+            raise HTTPException(status_code=404, detail="Question result not found")
+        qr.manual_false_positive = is_false_positive
+        session.commit()
+        return {
+            "success": True,
+            "id": question_id,
+            "manual_false_positive": qr.manual_false_positive,
         }
     finally:
         session.close()

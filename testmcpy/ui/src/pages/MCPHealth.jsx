@@ -11,6 +11,8 @@ import {
   Wrench,
   Wifi,
   WifiOff,
+  X,
+  Info,
 } from 'lucide-react'
 
 function formatMs(ms) {
@@ -24,7 +26,21 @@ function formatTime(isoStr) {
   return new Date(isoStr).toLocaleTimeString()
 }
 
-function getStatusColor(status) {
+function formatElapsed(isoStr) {
+  if (!isoStr) return null
+  const diffSec = Math.round((Date.now() - new Date(isoStr).getTime()) / 1000)
+  if (diffSec < 60) return `${diffSec}s ago`
+  return `${Math.floor(diffSec / 60)}m ago`
+}
+
+function isRecentSuccess(isoStr) {
+  if (!isoStr) return false
+  const diffSec = (Date.now() - new Date(isoStr).getTime()) / 1000
+  return diffSec <= 300 // within 5 minutes
+}
+
+function getStatusColor(status, lastSuccessAt) {
+  if (status === 'error' && isRecentSuccess(lastSuccessAt)) return 'text-warning'
   switch (status) {
     case 'healthy': return 'text-success'
     case 'timeout': return 'text-warning'
@@ -34,7 +50,8 @@ function getStatusColor(status) {
   }
 }
 
-function getStatusBg(status) {
+function getStatusBg(status, lastSuccessAt) {
+  if (status === 'error' && isRecentSuccess(lastSuccessAt)) return 'bg-warning/10 border-warning/30'
   switch (status) {
     case 'healthy': return 'bg-success/10 border-success/30'
     case 'timeout': return 'bg-warning/10 border-warning/30'
@@ -44,7 +61,10 @@ function getStatusBg(status) {
   }
 }
 
-function getStatusIcon(status) {
+function getStatusIcon(status, lastSuccessAt) {
+  if (status === 'error' && isRecentSuccess(lastSuccessAt)) {
+    return <AlertTriangle size={20} className="text-warning" />
+  }
   switch (status) {
     case 'healthy': return <CheckCircle size={20} className="text-success" />
     case 'timeout': return <AlertTriangle size={20} className="text-warning" />
@@ -61,6 +81,7 @@ function MCPHealth() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
   const [autoRefresh, setAutoRefresh] = useState(true)
+  const [bannerDismissed, setBannerDismissed] = useState(false)
   const intervalRef = useRef(null)
 
   const checkHealth = useCallback(async (showSpinner = true) => {
@@ -146,6 +167,23 @@ function MCPHealth() {
 
       {/* Content */}
       <div className="flex-1 overflow-auto p-4 md:p-6">
+        {/* Info banner */}
+        {!bannerDismissed && (
+          <div className="flex items-start gap-3 p-3 mb-4 bg-info/10 border border-info/30 rounded-lg text-sm text-text-secondary">
+            <Info size={16} className="text-info flex-shrink-0 mt-0.5" />
+            <span className="flex-1">
+              Tip: First connections may take a moment due to auth setup. If servers appear failed just after configuration, try clicking Refresh.
+            </span>
+            <button
+              onClick={() => setBannerDismissed(true)}
+              className="text-text-tertiary hover:text-text-secondary flex-shrink-0"
+              aria-label="Dismiss"
+            >
+              <X size={14} />
+            </button>
+          </div>
+        )}
+
         {error && (
           <div className="p-4 bg-error/10 border border-error/30 rounded-lg text-error text-sm mb-4">
             {error}
@@ -170,17 +208,17 @@ function MCPHealth() {
             {servers.map((server, idx) => (
               <div
                 key={idx}
-                className={`p-4 rounded-xl border transition-colors ${getStatusBg(server.status)}`}
+                className={`p-4 rounded-xl border transition-colors ${getStatusBg(server.status, server.last_success_at)}`}
               >
                 <div className="flex items-start justify-between mb-3">
                   <div className="flex items-center gap-2">
-                    {getStatusIcon(server.status)}
+                    {getStatusIcon(server.status, server.last_success_at)}
                     <div>
                       <div className="font-semibold text-text-primary text-sm">{server.server_name}</div>
                       <div className="text-xs text-text-tertiary">{server.profile_name}</div>
                     </div>
                   </div>
-                  <span className={`text-xs font-semibold uppercase px-2 py-0.5 rounded ${getStatusColor(server.status)} bg-surface/50`}>
+                  <span className={`text-xs font-semibold uppercase px-2 py-0.5 rounded ${getStatusColor(server.status, server.last_success_at)} bg-surface/50`}>
                     {server.status}
                   </span>
                 </div>
@@ -208,6 +246,15 @@ function MCPHealth() {
                   {server.error && (
                     <div className="p-2 bg-error/10 rounded text-error text-xs mt-2 break-words">
                       {server.error}
+                      {server.error_class && (
+                        <div className="text-text-tertiary mt-1">Error type: {server.error_class}</div>
+                      )}
+                    </div>
+                  )}
+
+                  {server.status !== 'healthy' && server.last_success_at && (
+                    <div className="text-text-tertiary text-[10px]">
+                      Last healthy: {formatElapsed(server.last_success_at)}
                     </div>
                   )}
 

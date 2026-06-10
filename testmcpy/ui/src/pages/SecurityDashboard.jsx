@@ -7,7 +7,16 @@ import {
   AlertTriangle,
   RefreshCw,
   Cpu,
+  Download,
 } from 'lucide-react'
+import {
+  PieChart,
+  Pie,
+  Cell,
+  Tooltip,
+  Legend,
+  ResponsiveContainer,
+} from 'recharts'
 
 const SEVERITY_COLORS = {
   critical: { bg: 'bg-error/20', text: 'text-error', border: 'border-error/30', fill: '#ef4444' },
@@ -16,9 +25,19 @@ const SEVERITY_COLORS = {
   low: { bg: 'bg-info-light/20', text: 'text-info-light', border: 'border-info-light/30', fill: '#06b6d4' },
 }
 
-// Simple donut chart using SVG
-function DonutChart({ data }) {
-  const total = Object.values(data).reduce((sum, s) => sum + s.total, 0)
+const SEVERITY_ORDER = ['critical', 'high', 'medium', 'low']
+
+function RechartDonut({ data }) {
+  const chartData = SEVERITY_ORDER
+    .filter(s => data[s]?.total > 0)
+    .map(s => ({
+      name: s.charAt(0).toUpperCase() + s.slice(1),
+      value: data[s].total,
+      fill: SEVERITY_COLORS[s].fill,
+    }))
+
+  const total = chartData.reduce((sum, d) => sum + d.value, 0)
+
   if (total === 0) {
     return (
       <div className="flex items-center justify-center h-48 text-text-tertiary text-sm">
@@ -27,63 +46,60 @@ function DonutChart({ data }) {
     )
   }
 
-  const radius = 60
-  const strokeWidth = 20
-  const circumference = 2 * Math.PI * radius
-  let offset = 0
-
-  const severityOrder = ['critical', 'high', 'medium', 'low']
-  const segments = severityOrder
-    .filter(s => data[s]?.total > 0)
-    .map(severity => {
-      const count = data[severity].total
-      const pct = count / total
-      const dashLen = circumference * pct
-      const dashOffset = circumference - offset
-      offset += dashLen
-      return { severity, count, pct, dashLen, dashOffset }
-    })
-
   return (
-    <div className="flex items-center gap-6">
-      <svg width="160" height="160" viewBox="0 0 160 160">
-        <circle cx="80" cy="80" r={radius} fill="none" stroke="currentColor" strokeWidth={strokeWidth} className="text-surface-elevated" />
-        {segments.map(seg => (
-          <circle
-            key={seg.severity}
-            cx="80"
-            cy="80"
-            r={radius}
-            fill="none"
-            stroke={SEVERITY_COLORS[seg.severity].fill}
-            strokeWidth={strokeWidth}
-            strokeDasharray={`${seg.dashLen} ${circumference - seg.dashLen}`}
-            strokeDashoffset={seg.dashOffset}
-            transform="rotate(-90 80 80)"
-          />
-        ))}
-        <text x="80" y="75" textAnchor="middle" className="fill-text-primary text-lg font-bold">{total}</text>
-        <text x="80" y="93" textAnchor="middle" className="fill-text-tertiary text-xs">checks</text>
-      </svg>
-
-      <div className="space-y-2">
-        {severityOrder.map(severity => {
-          const s = data[severity]
-          if (!s || s.total === 0) return null
-          const colors = SEVERITY_COLORS[severity]
-          return (
-            <div key={severity} className="flex items-center gap-2">
-              <span className={`w-3 h-3 rounded-full ${colors.bg} border ${colors.border}`} />
-              <span className={`text-sm font-medium capitalize ${colors.text}`}>{severity}</span>
-              <span className="text-xs text-text-tertiary">
-                {s.passed}/{s.total} passed
-              </span>
-            </div>
-          )
-        })}
-      </div>
-    </div>
+    <ResponsiveContainer width="100%" height={220}>
+      <PieChart>
+        <Pie
+          data={chartData}
+          cx="50%"
+          cy="50%"
+          innerRadius={60}
+          outerRadius={100}
+          paddingAngle={2}
+          dataKey="value"
+        >
+          {chartData.map((entry, index) => (
+            <Cell key={`cell-${index}`} fill={entry.fill} />
+          ))}
+        </Pie>
+        <Tooltip
+          formatter={(value, name) => [value, name]}
+          contentStyle={{ background: 'var(--color-surface, #1e1e2e)', border: '1px solid var(--color-border, #444)', borderRadius: 8 }}
+          labelStyle={{ color: 'var(--color-text-primary, #fff)' }}
+          itemStyle={{ color: 'var(--color-text-secondary, #ccc)' }}
+        />
+        <Legend
+          formatter={(value) => <span style={{ color: 'var(--color-text-secondary, #ccc)', fontSize: 12 }}>{value}</span>}
+        />
+      </PieChart>
+    </ResponsiveContainer>
   )
+}
+
+function exportCSV(results) {
+  const headers = ['status', 'evaluator', 'severity', 'model', 'reason']
+  const rows = results.map(r => [
+    r.passed ? 'passed' : 'failed',
+    r.evaluator ?? '',
+    r.severity ?? '',
+    r.model ?? '',
+    (r.reason ?? '').replace(/"/g, '""'),
+  ])
+
+  const csvContent = [
+    headers.join(','),
+    ...rows.map(row => row.map(cell => `"${cell}"`).join(',')),
+  ].join('\n')
+
+  const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.setAttribute('download', 'security_findings.csv')
+  document.body.appendChild(link)
+  link.click()
+  document.body.removeChild(link)
+  URL.revokeObjectURL(url)
 }
 
 function SecurityDashboard() {
@@ -114,6 +130,7 @@ function SecurityDashboard() {
   const summary = data?.summary || {}
   const breakdown = data?.severity_breakdown || {}
   const results = data?.results || []
+  const truncated = data?.truncated ?? false
 
   const filteredResults = severityFilter === 'all'
     ? results
@@ -133,14 +150,25 @@ function SecurityDashboard() {
               <p className="text-sm text-text-tertiary">Security-focused evaluator results</p>
             </div>
           </div>
-          <button
-            onClick={loadData}
-            className="btn btn-ghost"
-            disabled={loading}
-          >
-            <RefreshCw size={16} className={loading ? 'animate-spin' : ''} />
-            <span>Refresh</span>
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => exportCSV(results)}
+              className="btn btn-ghost"
+              disabled={results.length === 0}
+              title="Export findings as CSV"
+            >
+              <Download size={16} />
+              <span>Export CSV</span>
+            </button>
+            <button
+              onClick={loadData}
+              className="btn btn-ghost"
+              disabled={loading}
+            >
+              <RefreshCw size={16} className={loading ? 'animate-spin' : ''} />
+              <span>Refresh</span>
+            </button>
+          </div>
         </div>
       </div>
 
@@ -149,6 +177,13 @@ function SecurityDashboard() {
         {error && (
           <div className="p-4 bg-error/10 border border-error/30 rounded-lg text-error text-sm">
             {error}
+          </div>
+        )}
+
+        {truncated && (
+          <div className="flex items-center gap-2 p-3 bg-warning/10 border border-warning/30 rounded-lg text-warning text-sm">
+            <AlertTriangle size={16} className="flex-shrink-0" />
+            Results are limited to 2000 rows. Some older findings may not be shown.
           </div>
         )}
 
@@ -170,7 +205,7 @@ function SecurityDashboard() {
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
               <div className="p-4 rounded-xl bg-surface border border-border col-span-1 md:col-span-2">
                 <h3 className="text-sm font-semibold text-text-primary mb-3">Risk Summary</h3>
-                <DonutChart data={breakdown} />
+                <RechartDonut data={breakdown} />
               </div>
 
               <div className="space-y-3">

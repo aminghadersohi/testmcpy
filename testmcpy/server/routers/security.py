@@ -90,7 +90,7 @@ def _get_severity(evaluator_name: str) -> str:
 
 @router.get("")
 async def get_security_results(
-    limit: int = Query(200, description="Max results to scan"),
+    limit: int = Query(2000, description="Max results to scan"),
 ) -> dict[str, Any]:
     """
     Get security-related test results.
@@ -174,6 +174,7 @@ async def get_security_results(
         total_security = sum(s["total"] for s in severity_counts.values())
         total_passed = sum(s["passed"] for s in severity_counts.values())
         total_failed = sum(s["failed"] for s in severity_counts.values())
+        truncated = len(results) == limit
 
         return {
             "summary": {
@@ -187,6 +188,7 @@ async def get_security_results(
             },
             "severity_breakdown": severity_counts,
             "results": security_results,
+            "truncated": truncated,
         }
     finally:
         session.close()

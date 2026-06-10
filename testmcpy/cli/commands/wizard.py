@@ -222,7 +222,7 @@ def add_llm():
     console.print("\n[bold yellow]Step 1: Provider Type[/bold yellow]")
     provider = _choose(
         "Provider:",
-        ["anthropic", "openai", "google", "ollama", "claude-sdk", "claude-code"],
+        ["anthropic", "openai", "google", "ollama", "claude-sdk", "claude-code", "codex-sdk"],
         default="anthropic",
     )
 
@@ -277,6 +277,9 @@ def add_llm():
 
     if provider in ("claude-sdk", "claude-code"):
         console.print("[green]No API key needed - uses Claude Code authentication.[/green]")
+    elif provider == "codex-sdk":
+        console.print("[green]No API key needed if you have run `codex auth login`.[/green]")
+        console.print("[dim]Or set OPENAI_API_KEY in your environment for direct API access.[/dim]")
     else:
         console.print("Enter API key directly or specify an environment variable name.")
         api_key = _prompt("API key (leave empty to use env var)", password=True)

@@ -171,9 +171,14 @@ server = [
     # that bumps mcp out of fastmcp's range fails at install time
     # instead of at first agentic test run.
     "claude-agent-sdk>=0.2.0,<1.0.0",
+    # openai-agents provides CodexSDKProvider with native MCP support.
+    # Constraint starts at 0.0.17 (first public release with MCPServerStreamableHttp)
+    # and excludes 1.0 to avoid breaking API changes.
+    "openai-agents>=0.0.17,<1.0.0",
 ]
 sdk = [
     "claude-agent-sdk>=0.2.0,<1.0.0",
+    "openai-agents>=0.0.17,<1.0.0",
 ]
 tui = [
     "textual>=0.85.0",
@@ -196,6 +201,7 @@ all = [
     # time uvicorn/fastmcp bumps a minor.
     "websockets>=14.0,<17.0",
     "claude-agent-sdk>=0.2.0,<1.0.0",
+    "openai-agents>=0.0.17,<1.0.0",
     "textual>=0.85.0",
     "boto3>=1.28.0",
 ]

@@ -21,6 +21,7 @@ class Provider(str, Enum):
     GOOGLE = "google"
     GEMINI = "gemini"  # Alias for google
     GEMINI_CLI = "gemini-cli"  # Gemini CLI tool
+    CODEX_CLI = "codex-cli"  # OpenAI Codex via Agents SDK
     OLLAMA = "ollama"
     BEDROCK = "bedrock"  # AWS Bedrock (Anthropic models via AWS)
     CLAUDE_SDK = "claude-sdk"  # Claude Agent SDK (also handles claude-cli/claude-code)
@@ -668,6 +669,68 @@ OPENROUTER_MODELS: list[ModelInfo] = [
 ]
 
 # ============================================================
+# Codex CLI Models (OpenAI Agents SDK)
+# ============================================================
+
+CODEX_CLI_MODELS: list[ModelInfo] = [
+    ModelInfo(
+        id="codex-o3",
+        name="Codex o3",
+        provider=Provider.CODEX_CLI,
+        description="OpenAI o3 via Codex Agent SDK (subscription auth or API key)",
+        context_window=200_000,
+        max_output_tokens=100_000,
+        input_price_per_1m=2.00,
+        output_price_per_1m=8.00,
+        capabilities=[
+            ModelCapability.TOOL_CALLING,
+            ModelCapability.STREAMING,
+            ModelCapability.LONG_CONTEXT,
+            ModelCapability.REASONING,
+        ],
+        family="codex",
+        is_default=True,
+        aliases=["codex", "codex-sdk"],
+    ),
+    ModelInfo(
+        id="codex-o4-mini",
+        name="Codex o4-mini",
+        provider=Provider.CODEX_CLI,
+        description="OpenAI o4-mini via Codex Agent SDK — fast, lower cost",
+        context_window=200_000,
+        max_output_tokens=100_000,
+        input_price_per_1m=1.10,
+        output_price_per_1m=4.40,
+        capabilities=[
+            ModelCapability.TOOL_CALLING,
+            ModelCapability.STREAMING,
+            ModelCapability.LONG_CONTEXT,
+            ModelCapability.REASONING,
+        ],
+        family="codex",
+        aliases=["codex-mini", "codex-o4mini"],
+    ),
+    ModelInfo(
+        id="codex-gpt-4o",
+        name="Codex GPT-4o",
+        provider=Provider.CODEX_CLI,
+        description="OpenAI GPT-4o via Codex Agent SDK",
+        context_window=128_000,
+        max_output_tokens=16_384,
+        input_price_per_1m=2.50,
+        output_price_per_1m=10.00,
+        capabilities=[
+            ModelCapability.TOOL_CALLING,
+            ModelCapability.STREAMING,
+            ModelCapability.VISION,
+            ModelCapability.LONG_CONTEXT,
+        ],
+        family="codex",
+        aliases=["codex-4o"],
+    ),
+]
+
+# ============================================================
 # Model Registry
 # ============================================================
 
@@ -677,6 +740,7 @@ ALL_MODELS: list[ModelInfo] = (
     + GEMINI_MODELS
     + CLAUDE_SDK_MODELS
     + GEMINI_CLI_MODELS
+    + CODEX_CLI_MODELS
     + GROK_MODELS
     + OPENROUTER_MODELS
 )

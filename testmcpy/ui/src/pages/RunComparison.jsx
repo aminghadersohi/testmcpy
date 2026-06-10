@@ -15,7 +15,19 @@ import {
   Hash,
   Trophy,
   RefreshCw,
+  Share2,
+  Download,
 } from 'lucide-react'
+import {
+  BarChart,
+  Bar,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  Cell,
+  ResponsiveContainer,
+} from 'recharts'
 
 function formatDuration(ms) {
   if (!ms) return '-'
@@ -46,6 +58,28 @@ function RunComparison() {
   const [filterModel, setFilterModel] = useState('')
   const [filterTestFile, setFilterTestFile] = useState('')
   const [filterOptions, setFilterOptions] = useState({ models: [], providers: [], test_files: [] })
+
+  // Sort state
+  const [sortBy, setSortBy] = useState(null)
+  const [sortDir, setSortDir] = useState('desc')
+
+  // Regressions-only toggle
+  const [regressionsOnly, setRegressionsOnly] = useState(false)
+
+  // Share feedback
+  const [copiedShare, setCopiedShare] = useState(false)
+
+  // On mount, read ?runs= from URL and pre-populate selectedRunIds
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search)
+    const runsParam = params.get('runs')
+    if (runsParam) {
+      const ids = runsParam.split(',').filter(Boolean)
+      if (ids.length > 0) {
+        setSelectedRunIds(ids)
+      }
+    }
+  }, [])
 
   const loadFilterOptions = useCallback(async () => {
     try {
@@ -135,6 +169,62 @@ function RunComparison() {
     }
   }
 
+  const handleSortToggle = (field) => {
+    if (sortBy === field) {
+      setSortDir(d => d === 'desc' ? 'asc' : 'desc')
+    } else {
+      setSortBy(field)
+      setSortDir('desc')
+    }
+  }
+
+  const handleShare = () => {
+    const url = window.location.pathname + '?runs=' + selectedRunIds.join(',')
+    navigator.clipboard.writeText(window.location.origin + url).then(() => {
+      setCopiedShare(true)
+      setTimeout(() => setCopiedShare(false), 2000)
+    })
+  }
+
+  const handleExportCSV = () => {
+    if (!comparison) return
+    const runs = sortedRuns
+    const header = 'Test,' + runs.map(r => r.model || r.run_id).join(',')
+    const rows = comparison.rows.map(row => {
+      const cols = runs.map(r => {
+        const cell = row.cells[r.run_id]
+        return cell?.passed ? 'pass' : 'fail'
+      })
+      return [row.question_id, ...cols].join(',')
+    })
+    const csv = [header, ...rows].join('\n')
+    const blob = new Blob([csv], { type: 'text/csv' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `comparison-${Date.now()}.csv`
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    URL.revokeObjectURL(url)
+  }
+
+  // Derive sorted runs
+  const sortedRuns = comparison ? [...comparison.runs] : []
+  if (sortBy) {
+    sortedRuns.sort((a, b) => {
+      const va = a[sortBy] != null ? a[sortBy] : 0
+      const vb = b[sortBy] != null ? b[sortBy] : 0
+      return sortDir === 'desc' ? vb - va : va - vb
+    })
+  }
+
+  // Chart data
+  const chartData = (comparison?.runs || []).map(run => ({
+    name: run.model || (run.run_id ? run.run_id.slice(0, 8) : 'Run'),
+    pass_rate: run.pass_rate != null ? Math.round(run.pass_rate * 100) : 0,
+  }))
+
   return (
     <div className="h-full flex flex-col bg-background">
       {/* Header */}
@@ -150,6 +240,26 @@ function RunComparison() {
             </div>
           </div>
           <div className="flex items-center gap-2">
+            {comparison && (
+              <>
+                <button
+                  onClick={handleShare}
+                  className="btn btn-secondary text-xs"
+                  title="Copy shareable link"
+                >
+                  <Share2 size={14} />
+                  {copiedShare ? 'Copied!' : 'Share'}
+                </button>
+                <button
+                  onClick={handleExportCSV}
+                  className="btn btn-secondary text-xs"
+                  title="Export as CSV"
+                >
+                  <Download size={14} />
+                  Export CSV
+                </button>
+              </>
+            )}
             <button
               onClick={compareRuns}
               disabled={selectedRunIds.length < 2 || loading}
@@ -269,24 +379,69 @@ function RunComparison() {
 
         {/* Comparison matrix */}
         {comparison && (() => {
+          // Use sortedRuns for all column rendering
+          const runsToShow = sortedRuns.length > 0 ? sortedRuns : comparison.runs
+          // Build run_id -> column data map for quick lookup
+          const colMap = {}
+          comparison.columns.forEach(c => { colMap[c.run_id] = c })
+
           const bestPassRate = Math.max(...comparison.columns.map(c => c.pass_rate))
           const nonzeroCosts = comparison.columns.filter(c => c.total_cost > 0).map(c => Math.round(c.total_cost * 100))
           const minCostCents = nonzeroCosts.length > 0 ? Math.min(...nonzeroCosts) : null
           const isBestCol = (col) => col.pass_rate === bestPassRate
           const isCheapestCol = (col) => col.total_cost > 0 && minCostCents !== null && Math.round(col.total_cost * 100) === minCostCents
 
+          // Filter rows for regressions-only
+          const visibleRows = regressionsOnly
+            ? comparison.rows.filter(row => {
+                const statuses = runsToShow.map(r => row.cells[r.run_id]?.passed)
+                const hasPass = statuses.some(Boolean)
+                const hasFail = statuses.some(s => s === false)
+                return hasPass && hasFail
+              })
+            : comparison.rows
+
           return (
           <>
-            <div className="flex items-center justify-between">
+            {/* Pass Rate Chart */}
+            <div className="rounded-xl bg-surface border border-border p-4">
+              <h3 className="text-sm font-semibold text-text-primary mb-3">Pass Rate by Run</h3>
+              <ResponsiveContainer width="100%" height={160}>
+                <BarChart data={chartData} margin={{ top: 4, right: 16, left: 0, bottom: 4 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.08)" />
+                  <XAxis dataKey="name" tick={{ fontSize: 11, fill: 'currentColor' }} />
+                  <YAxis domain={[0, 100]} tick={{ fontSize: 11, fill: 'currentColor' }} unit="%" />
+                  <Tooltip formatter={(value) => [`${value}%`, 'Pass Rate']} />
+                  <Bar dataKey="pass_rate" radius={[4, 4, 0, 0]}>
+                    {chartData.map((entry, index) => (
+                      <Cell key={`cell-${index}`} fill="#22c55e" />
+                    ))}
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+
+            <div className="flex items-center justify-between flex-wrap gap-2">
               <h3 className="text-sm font-semibold text-text-primary">
                 Comparison Matrix ({comparison.total_questions} tests)
               </h3>
-              <button
-                onClick={() => setComparison(null)}
-                className="btn btn-ghost text-xs"
-              >
-                <RefreshCw size={14} /> New Comparison
-              </button>
+              <div className="flex items-center gap-2 flex-wrap">
+                <label className="flex items-center gap-1.5 text-xs text-text-secondary cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={regressionsOnly}
+                    onChange={(e) => setRegressionsOnly(e.target.checked)}
+                    className="rounded border-border"
+                  />
+                  Show differences only
+                </label>
+                <button
+                  onClick={() => setComparison(null)}
+                  className="btn btn-ghost text-xs"
+                >
+                  <RefreshCw size={14} /> New Comparison
+                </button>
+              </div>
             </div>
 
             <div className="rounded-xl bg-surface border border-border overflow-auto">
@@ -296,24 +451,39 @@ function RunComparison() {
                     <th className="p-3 text-left text-xs text-text-tertiary uppercase tracking-wide sticky left-0 bg-surface z-10">
                       Test Case
                     </th>
-                    {comparison.columns.map((col) => {
+                    {runsToShow.map((run) => {
+                      const col = colMap[run.run_id] || {}
                       const isBestPassRate = isBestCol(col)
                       const isCheapest = isCheapestCol(col)
                       return (
-                        <th key={col.run_id} className="p-3 text-center min-w-[160px]">
+                        <th key={run.run_id} className="p-3 text-center min-w-[160px]">
                           <div className="text-xs font-semibold text-text-primary">{col.model}</div>
                           <div className="text-[10px] text-text-tertiary">{col.provider}</div>
-                          <div className={`text-xs font-bold mt-1 ${
-                            col.pass_rate >= 90 ? 'text-success' :
-                            col.pass_rate >= 70 ? 'text-warning' : 'text-error'
-                          }`}>
+                          <div
+                            className={`text-xs font-bold mt-1 cursor-pointer hover:opacity-80 ${
+                              col.pass_rate >= 90 ? 'text-success' :
+                              col.pass_rate >= 70 ? 'text-warning' : 'text-error'
+                            }`}
+                            onClick={() => handleSortToggle('pass_rate')}
+                            title="Sort by pass rate"
+                          >
                             {isBestPassRate && <Trophy size={10} className="inline mr-0.5" />}
                             {col.pass_rate}%
+                            {sortBy === 'pass_rate' && (
+                              <span className="ml-0.5">{sortDir === 'desc' ? ' ↓' : ' ↑'}</span>
+                            )}
                           </div>
                           <div className="flex items-center justify-center gap-2 mt-1 text-[10px] text-text-tertiary">
                             {col.total_cost > 0 && (
-                              <span className={`flex items-center gap-0.5 ${isCheapest ? 'text-success font-semibold' : ''}`}>
+                              <span
+                                className={`flex items-center gap-0.5 cursor-pointer hover:opacity-80 ${isCheapest ? 'text-success font-semibold' : ''}`}
+                                onClick={() => handleSortToggle('total_cost')}
+                                title="Sort by cost"
+                              >
                                 <DollarSign size={8} />{formatCost(col.total_cost)}
+                                {sortBy === 'total_cost' && (
+                                  <span>{sortDir === 'desc' ? '↓' : '↑'}</span>
+                                )}
                               </span>
                             )}
                             {col.total_tokens > 0 && (
@@ -328,15 +498,15 @@ function RunComparison() {
                   </tr>
                 </thead>
                 <tbody>
-                  {comparison.rows.map((row, idx) => (
+                  {visibleRows.map((row, idx) => (
                     <tr key={row.question_id} className={idx % 2 === 0 ? '' : 'bg-surface-elevated/50'}>
                       <td className="p-3 text-text-primary font-medium text-xs sticky left-0 bg-inherit z-10 max-w-[200px] truncate">
                         {row.question_id}
                       </td>
-                      {comparison.columns.map(col => {
-                        const cell = row.cells[col.run_id]
+                      {runsToShow.map(run => {
+                        const cell = row.cells[run.run_id]
                         return (
-                          <td key={col.run_id} className={`p-3 text-center ${getCellStyle(cell)}`}>
+                          <td key={run.run_id} className={`p-3 text-center ${getCellStyle(cell)}`}>
                             <div className="flex items-center justify-center gap-1">
                               {cell?.status === 'pass' && <CheckCircle size={14} />}
                               {cell?.status === 'fail' && <XCircle size={14} />}
@@ -363,17 +533,25 @@ function RunComparison() {
                       })}
                     </tr>
                   ))}
+                  {visibleRows.length === 0 && (
+                    <tr>
+                      <td colSpan={runsToShow.length + 1} className="p-6 text-center text-text-tertiary text-xs">
+                        No rows match the current filter.
+                      </td>
+                    </tr>
+                  )}
                 </tbody>
                 <tfoot>
                   <tr className="border-t-2 border-border bg-surface-elevated">
                     <td className="p-3 text-xs font-semibold text-text-primary sticky left-0 bg-surface-elevated z-10">
                       Summary
                     </td>
-                    {comparison.columns.map(col => {
+                    {runsToShow.map(run => {
+                      const col = colMap[run.run_id] || {}
                       const isBest = isBestCol(col)
                       const isCheapest = isCheapestCol(col)
                       return (
-                        <td key={col.run_id} className="p-3 text-center">
+                        <td key={run.run_id} className="p-3 text-center">
                           <div className={`text-xs font-bold ${isBest ? 'text-success' : 'text-text-secondary'}`}>
                             {isBest && <Trophy size={10} className="inline mr-0.5" />}
                             {col.passed}/{col.total} ({col.pass_rate}%)

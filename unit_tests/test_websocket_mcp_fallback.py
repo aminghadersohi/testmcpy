@@ -16,27 +16,29 @@ from testmcpy.server.websocket import _derive_workspace_and_domain_from_mcp_url
 class TestDeriveWorkspaceAndDomain:
     """`workspace.domain.tld/path` → (workspace, domain.tld) decomposition."""
 
-    def test_preset_staging_url(self):
-        """Matches the URL shape the Preset MCP server uses in staging."""
+    def test_staging_url(self):
+        """Matches the URL shape a hosted MCP server uses in staging."""
         ws, dom = _derive_workspace_and_domain_from_mcp_url(
-            "https://ae9f22f4.us1a.app-stg.preset.io/mcp"
+            "https://ae9f22f4.us1a.app-stg.example.com/mcp"
         )
         assert ws == "ae9f22f4"
-        assert dom == "us1a.app-stg.preset.io"
+        assert dom == "us1a.app-stg.example.com"
 
-    def test_preset_prod_url(self):
-        """Production hostnames look the same (workspace.<domain>.preset.io)."""
+    def test_prod_url(self):
+        """Production hostnames look the same (workspace.<domain> shape)."""
         ws, dom = _derive_workspace_and_domain_from_mcp_url(
-            "https://deadbeef.us1a.app.preset.io/mcp"
+            "https://deadbeef.us1a.app.example.com/mcp"
         )
         assert ws == "deadbeef"
-        assert dom == "us1a.app.preset.io"
+        assert dom == "us1a.app.example.com"
 
     def test_url_with_port(self):
         """Ports must not bleed into the domain (urlparse strips them)."""
-        ws, dom = _derive_workspace_and_domain_from_mcp_url("https://abc123.app.preset.io:8443/mcp")
+        ws, dom = _derive_workspace_and_domain_from_mcp_url(
+            "https://abc123.app.example.com:8443/mcp"
+        )
         assert ws == "abc123"
-        assert dom == "app.preset.io"
+        assert dom == "app.example.com"
 
     def test_localhost_returns_none(self):
         """A bare host with no dot can't be split into workspace.domain —

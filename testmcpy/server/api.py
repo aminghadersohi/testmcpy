@@ -564,30 +564,19 @@ async def get_configuration():
 
 @app.get("/api/models")
 async def list_models():
-    """List available models for each provider."""
+    """List available models for each provider (sourced from the model registry)."""
+    from testmcpy.src.model_registry import get_models_by_provider  # noqa: PLC0415
+
+    def _entries(provider: str) -> list[dict[str, str]]:
+        return [
+            {"id": m.id, "name": m.name, "description": m.description}
+            for m in get_models_by_provider(provider)
+            if not m.is_deprecated
+        ]
+
     return {
-        "anthropic": [
-            {
-                "id": "claude-sonnet-4-5",
-                "name": "Claude Sonnet 4.5",
-                "description": "Latest Sonnet 4.5 (most capable)",
-            },
-            {
-                "id": "claude-haiku-4-5",
-                "name": "Claude Haiku 4.5",
-                "description": "Latest Haiku 4.5 (fast & efficient)",
-            },
-            {
-                "id": "claude-opus-4-1",
-                "name": "Claude Opus 4.1",
-                "description": "Latest Opus 4.1 (most powerful)",
-            },
-            {
-                "id": "claude-haiku-4-5",
-                "name": "Claude 3.5 Haiku",
-                "description": "Legacy Haiku 3.5",
-            },
-        ],
+        "anthropic": _entries("anthropic"),
+        # Ollama models are local installs, not in the registry
         "ollama": [
             {
                 "id": "llama3.1:8b",
@@ -606,20 +595,7 @@ async def list_models():
             },
             {"id": "mistral:7b", "name": "Mistral 7B", "description": "Mistral 7B (efficient)"},
         ],
-        "openai": [
-            {
-                "id": "gpt-4o",
-                "name": "GPT-4 Optimized",
-                "description": "GPT-4 Optimized (recommended)",
-            },
-            {"id": "gpt-4-turbo", "name": "GPT-4 Turbo", "description": "GPT-4 Turbo"},
-            {"id": "gpt-4", "name": "GPT-4", "description": "GPT-4 (original)"},
-            {
-                "id": "gpt-3.5-turbo",
-                "name": "GPT-3.5 Turbo",
-                "description": "GPT-3.5 Turbo (faster, cheaper)",
-            },
-        ],
+        "openai": _entries("openai"),
     }
 
 

@@ -347,6 +347,7 @@ function TestCaseWizard({ onComplete, onCancel }) {
                           setData(prev => ({ ...prev, tests: newTests }))
                         }}
                         className="p-1 hover:bg-error/20 rounded text-error flex-shrink-0"
+                        aria-label="Remove evaluator"
                       >
                         <X size={12} />
                       </button>
@@ -1409,6 +1410,7 @@ tests:
                     setNewFileName('')
                   }}
                   className="btn btn-secondary text-sm px-3"
+                  aria-label="Close dialog"
                 >
                   <X size={16} />
                 </button>
@@ -1438,7 +1440,7 @@ tests:
                       ? 'text-primary'
                       : 'text-text-tertiary group-hover:text-text-secondary'
                   }`} />
-                  <span className={`font-medium truncate ${
+                  <span title={file.relative_path || file.filename} className={`font-medium truncate ${
                     (selectedFile?.relative_path || selectedFile?.filename) === file.relative_path
                       ? 'text-text-primary'
                       : 'text-text-secondary'
@@ -1521,7 +1523,7 @@ tests:
                           ? 'text-primary'
                           : 'text-text-tertiary group-hover:text-text-secondary'
                       }`} />
-                      <span className={`text-sm truncate ${
+                      <span title={file.relative_path || file.filename} className={`text-sm truncate ${
                         (selectedFile?.relative_path || selectedFile?.filename) === file.relative_path
                           ? 'text-text-primary font-medium'
                           : 'text-text-secondary'
@@ -2265,6 +2267,7 @@ tests:
                       onClick={() => setAllLlmsResults(null)}
                       className="p-1.5 hover:bg-surface-hover rounded text-text-tertiary hover:text-text-primary transition-colors"
                       title="Close"
+                      aria-label="Close"
                     >
                       <X size={14} />
                     </button>

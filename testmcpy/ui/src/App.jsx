@@ -446,6 +446,7 @@ function AppContent() {
                 }
               }}
               className="p-1.5 hover:bg-surface-hover rounded-lg transition-all duration-200 text-text-tertiary hover:text-text-primary"
+              aria-label="Toggle sidebar"
             >
               {showLabels ? <X size={16} /> : <Menu size={18} />}
             </button>
@@ -513,7 +514,7 @@ function AppContent() {
                 {showLabels && (
                   <div className="flex-1 min-w-0 text-left">
                     <div className="flex items-center gap-1.5">
-                      <span className="text-xs font-semibold text-text-primary truncate">
+                      <span title={getSelectedMCPDisplay().profile} className="text-xs font-semibold text-text-primary truncate">
                         {getSelectedMCPDisplay().profile}
                       </span>
                       {selectedProfiles.length > 0 && (
@@ -522,7 +523,7 @@ function AppContent() {
                         </span>
                       )}
                     </div>
-                    <div className="text-[10px] text-text-tertiary truncate">
+                    <div title={getSelectedMCPDisplay().server} className="text-[10px] text-text-tertiary truncate">
                       {getSelectedMCPDisplay().server}
                     </div>
                   </div>
@@ -545,7 +546,7 @@ function AppContent() {
                 {showLabels && (
                   <div className="flex-1 min-w-0 text-left">
                     <div className="flex items-center gap-1.5">
-                      <span className="text-xs font-semibold text-text-primary truncate">
+                      <span title={getSelectedLLMDisplay().providerName} className="text-xs font-semibold text-text-primary truncate">
                         {getSelectedLLMDisplay().providerName}
                       </span>
                       {getSelectedLLMDisplay().isCliTool && (
@@ -558,7 +559,7 @@ function AppContent() {
                         <span className="px-1 py-0.5 text-[8px] bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 rounded font-semibold flex-shrink-0">API</span>
                       )}
                     </div>
-                    <div className="text-[10px] text-text-tertiary truncate">
+                    <div title={getSelectedLLMDisplay().profileName} className="text-[10px] text-text-tertiary truncate">
                       {getSelectedLLMDisplay().profileName}
                     </div>
                   </div>
@@ -587,6 +588,7 @@ function AppContent() {
             <button
               onClick={() => setMobileMenuOpen(true)}
               className="p-1.5 hover:bg-surface-hover rounded-lg transition-all duration-200 text-text-secondary hover:text-text-primary"
+              aria-label="Open menu"
             >
               <Menu size={20} />
             </button>

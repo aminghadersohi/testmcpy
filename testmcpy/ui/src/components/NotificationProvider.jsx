@@ -38,6 +38,7 @@ function Toast({ toast, onDismiss }) {
       <button
         onClick={() => onDismiss(toast.id)}
         className="flex-shrink-0 p-0.5 rounded hover:bg-surface-hover text-text-tertiary hover:text-text-primary transition-colors"
+        aria-label="Dismiss notification"
       >
         <X size={14} />
       </button>

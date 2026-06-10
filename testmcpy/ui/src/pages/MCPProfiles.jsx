@@ -902,7 +902,10 @@ function MCPWizard({ profiles, onComplete, onCancel }) {
             </div>
             <div className="flex justify-between">
               <span className="text-text-tertiary">{data.transport === 'stdio' ? 'Command' : 'URL'}</span>
-              <span className="font-mono text-xs truncate max-w-[250px]">
+              <span
+                title={data.transport === 'stdio' ? `${data.command} ${data.args}` : data.mcp_url}
+                className="font-mono text-xs truncate max-w-[250px]"
+              >
                 {data.transport === 'stdio' ? `${data.command} ${data.args}` : data.mcp_url}
               </span>
             </div>

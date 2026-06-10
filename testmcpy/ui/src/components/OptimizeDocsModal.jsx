@@ -224,6 +224,7 @@ function OptimizeDocsModal({ tool, onClose }) {
             onClick={handleClose}
             disabled={step === 'analyzing'}
             className="p-2 hover:bg-surface-hover rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            aria-label="Close"
           >
             <X size={20} className="text-text-secondary" />
           </button>

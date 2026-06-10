@@ -613,22 +613,24 @@ class TestGeminiSDKProvider:
         )
         p._mcp_headers = {}
 
+        # McpToolset etc. are deferred imports inside generate_with_tools, so
+        # patch the source modules, not testmcpy.src.llm_integration.*.
         with (
             patch(
-                "testmcpy.src.llm_integration.McpToolset",
+                "google.adk.tools.mcp_tool.mcp_toolset.McpToolset",
                 return_value=_FakeMcpToolset(),
             ),
             patch(
-                "testmcpy.src.llm_integration.InMemorySessionService",
+                "google.adk.sessions.in_memory_session_service.InMemorySessionService",
                 return_value=_FakeSessionService(),
             ),
             patch(
-                "testmcpy.src.llm_integration.Runner",
+                "google.adk.runners.Runner",
                 side_effect=lambda **kw: _FakeRunner(**kw),
             ),
-            patch("testmcpy.src.llm_integration.StreamableHTTPConnectionParams"),
-            patch("testmcpy.src.llm_integration.Agent"),
-            patch("testmcpy.src.llm_integration.Gemini"),
+            patch("google.adk.tools.mcp_tool.mcp_session_manager.StreamableHTTPConnectionParams"),
+            patch("google.adk.agents.llm_agent.LlmAgent"),
+            patch("google.adk.models.google_llm.Gemini"),
         ):
             result = await p.generate_with_tools("list dashboards", [], timeout=30.0)
 

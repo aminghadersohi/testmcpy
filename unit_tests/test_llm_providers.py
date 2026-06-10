@@ -534,7 +534,6 @@ class TestGeminiSDKProvider:
         """generate_with_tools must: populate tool_results, sum usage, compute cost,
         not re-execute tools, and close McpToolset on completion."""
         pytest.importorskip("google.adk", reason="google-adk not installed")
-        import types
         import uuid as _uuid
 
         from google.adk.events.event import Event

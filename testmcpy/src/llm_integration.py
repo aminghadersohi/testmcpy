@@ -9,9 +9,11 @@ import os
 import re
 import subprocess
 import time
+import urllib.parse
 import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -3064,7 +3066,10 @@ class GeminiProvider(LLMProvider):
 
 
 class CodexCLIProvider(LLMProvider):
-    """OpenAI Codex CLI provider via subprocess (similar to Claude Code)."""
+    """OpenAI Codex CLI provider via subprocess (similar to Claude Code).
+
+    Deprecated in favour of CodexSDKProvider — kept for backward compatibility.
+    """
 
     def __init__(
         self,
@@ -3073,6 +3078,8 @@ class CodexCLIProvider(LLMProvider):
         mcp_url: str | None = None,
         auth: dict[str, Any] | None = None,
     ):
+        if not re.match(r"^[a-zA-Z0-9._/-]+$", model):
+            raise ValueError(f"Invalid model identifier: {model}")
         self.model = model
         self.codex_cli_path = codex_cli_path or self._find_codex_cli()
         # Use MCP_URL and auth from default profile if not provided
@@ -3130,7 +3137,7 @@ class CodexCLIProvider(LLMProvider):
         try:
             await self.tool_discovery.discover_tools()
             print(f"✅ Successfully connected to MCP service at {self.tool_discovery.mcp_url}")
-        except Exception as e:
+        except (ConnectionError, TimeoutError, OSError, ValueError) as e:
             print(f"⚠️  Warning: Failed to initialize MCP tools: {e}")
             print(f"   MCP URL: {self.tool_discovery.mcp_url}")
             print("   The provider will work without MCP tools (direct API calls only)")
@@ -3207,7 +3214,7 @@ class CodexCLIProvider(LLMProvider):
                 tool_calls=[],
                 duration=time.time() - start_time,
             )
-        except Exception as e:
+        except (subprocess.SubprocessError, OSError, ValueError) as e:
             return LLMResult(
                 response=f"Error: {str(e)}", tool_calls=[], duration=time.time() - start_time
             )
@@ -3262,6 +3269,326 @@ User request: {prompt}"""
     async def close(self):
         """Close connections."""
         await self.tool_discovery.close()
+
+
+# ---------------------------------------------------------------------------
+# Codex SDK Provider (openai-agents with native MCP)
+# ---------------------------------------------------------------------------
+
+_codex_sdk_logger = logging.getLogger(__name__ + ".CodexSDKProvider")
+
+# Maps testmcpy model IDs to real OpenAI model identifiers.
+_CODEX_MODEL_MAP: dict[str, str] = {
+    # Friendly registry IDs → real OpenAI model identifiers
+    "codex": "o4-mini",
+    "codex-latest": "o4-mini",
+    "codex-sdk": "o4-mini",
+    "codex-o4-mini": "o4-mini",
+    "codex-o4mini": "o4-mini",
+    "codex-mini": "o4-mini",
+    "codex-o3": "o3",
+    "codex-o3-full": "o3",
+    "codex-o3-mini": "o3-mini",
+    "codex-o3mini": "o3-mini",
+    "codex-gpt-4o": "gpt-4o",
+    "codex-4o": "gpt-4o",
+}
+
+_CODEX_SYSTEM_PROMPT = (
+    "You are a test executor. Your ONLY job is to call the MCP tools provided "
+    "to fulfil the user's request, then report the results.\n\n"
+    "IMPORTANT RULES:\n"
+    "1. Use ONLY the MCP server tools. Do NOT use any other tools or built-ins.\n"
+    "2. The MCP server uses a gateway pattern: real tools like list_dashboards, "
+    "get_chart_info, etc. are accessed via call_tool(name='tool_name', arguments={...}).\n"
+    "3. For simple tools like health_check and get_instance_info, call them directly.\n"
+    "4. Do NOT call search_tools — the tool name is always specified in the request. "
+    "Use call_tool(name='tool_name', arguments={...}) directly without any prior discovery.\n"
+    "5. Do NOT call any authentication, login, or credential tool. "
+    "Skip it and proceed directly to the requested tool.\n"
+    "6. Always include the actual data from tool results in your response.\n"
+    "7. Be concise and factual — include key data points from the tool output."
+)
+
+
+class CodexSDKProvider(LLMProvider):
+    """OpenAI Agents SDK provider with native MCP integration.
+
+    Uses the openai-agents Python package (analogous to ClaudeSDKProvider).
+    Handles MCP tool discovery natively via MCPServerStreamableHttp — no manual
+    tool schema injection required.
+
+    ``openai_api_key`` must be supplied via the constructor (resolved from the
+    LLM profile in ``.llm_providers.yaml``) or left None to fall back to the
+    stored Codex CLI API key (``OPENAI_API_KEY`` field in ``~/.codex/auth.json``).
+
+    MCP server auth (bearer / jwt / oauth) follows the same pattern as
+    ClaudeSDKProvider: a Bearer token is resolved from the auth config and
+    forwarded as an ``Authorization`` header on every MCP request.
+    """
+
+    def __init__(
+        self,
+        model: str,
+        mcp_url: str | None = None,
+        auth: dict[str, Any] | None = None,
+        openai_api_key: str | None = None,
+    ):
+        self.model = _CODEX_MODEL_MAP.get(model, model)
+        self.openai_api_key = openai_api_key or ""
+        config = get_config()
+
+        if mcp_url is None:
+            mcp_url = config.get_mcp_url()
+        self.mcp_url = mcp_url
+
+        if auth is None:
+            default_mcp = config.get_default_mcp_server()
+            if default_mcp and default_mcp.auth:
+                auth = default_mcp.auth.to_dict()
+        self.auth_config = auth
+
+        self._mcp_headers: dict[str, str] = {}
+
+    async def initialize(self) -> None:
+        """Validate openai-agents is installed, resolve API key, and build MCP auth."""
+        try:
+            from agents import Agent, Runner  # noqa: F401
+        except ImportError:
+            raise ValueError(
+                "openai-agents package not installed. Install with: pip install openai-agents"
+            )
+
+        # Resolve OpenAI API key: explicit > env > Codex CLI OAuth cache
+        if not self.openai_api_key:
+            self.openai_api_key = self._read_cached_codex_token()
+        if not self.openai_api_key:
+            raise ValueError(
+                "No OpenAI API key. Supply api_key in the LLM profile "
+                "(.llm_providers.yaml) or configure the Codex CLI with an API key "
+                "so it is stored in ~/.codex/auth.json."
+            )
+
+        # Resolve MCP Bearer token from auth config
+        token: str | None = None
+        if self.auth_config:
+            auth_type = self.auth_config.get("type", "")
+            if auth_type == "jwt":
+                token = await self._fetch_jwt_token()
+            elif auth_type == "bearer":
+                token = self.auth_config.get("token", "")
+            elif auth_type == "oauth":
+                if self.auth_config.get("oauth_auto_discover"):
+                    token = await self._read_cached_oauth_token()
+                    if not token:
+                        raise ValueError(
+                            f"No usable cached OAuth token for {self.mcp_url}. "
+                            "Authenticate the MCP profile first, then re-run the test."
+                        )
+                else:
+                    token = await self._fetch_oauth_token()
+
+        if token:
+            self._mcp_headers = {"Authorization": f"Bearer {token}"}
+            _codex_sdk_logger.info("[CodexSDK] MCP server configured with auth token")
+        else:
+            _codex_sdk_logger.info("[CodexSDK] MCP server configured without auth")
+
+        _codex_sdk_logger.info("[CodexSDK] MCP server ready: %s", self.mcp_url)
+
+    def _read_cached_codex_token(self) -> str | None:
+        """Read the stored OpenAI API key from ~/.codex/auth.json.
+
+        The Codex CLI persists credentials as:
+          {"OPENAI_API_KEY": "sk-...", "tokens": {"access_token": "...", ...}}
+
+        The top-level ``OPENAI_API_KEY`` is an OpenAI Platform key usable with
+        api.openai.com.  The nested OAuth ``access_token`` is a ChatGPT-backend
+        token and does NOT work with the Platform API — don't read it here.
+        Returns None when the key is absent or null (e.g. after a pure OAuth
+        login where no API key was configured).
+        """
+        auth_path = Path.home() / ".codex" / "auth.json"
+        if not auth_path.exists():
+            return None
+        try:
+            data = json.loads(auth_path.read_text())
+            api_key = data.get("OPENAI_API_KEY")
+            return api_key if isinstance(api_key, str) and api_key else None
+        except (json.JSONDecodeError, OSError) as e:
+            _codex_sdk_logger.warning("[CodexSDK] Could not read %s: %s", auth_path, e)
+            return None
+
+    async def _fetch_jwt_token(self) -> str | None:
+        """Fetch JWT bearer token from the configured API endpoint."""
+        if not self.auth_config:
+            return None
+        api_url = self.auth_config.get("api_url", "")
+        api_token = self.auth_config.get("api_token", "")
+        api_secret = self.auth_config.get("api_secret", "")
+        if not all([api_url, api_token, api_secret]):
+            _codex_sdk_logger.warning("[CodexSDK] JWT auth config incomplete")
+            return None
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                api_url,
+                json={"token": api_token, "secret": api_secret},
+                timeout=30,
+            )
+            resp.raise_for_status()
+            return resp.json().get("access_token") or resp.json().get("token")
+
+    async def _fetch_oauth_token(self) -> str | None:
+        """Fetch OAuth token via client_credentials grant."""
+        if not self.auth_config:
+            return None
+        client_id = self.auth_config.get("client_id", "")
+        client_secret = self.auth_config.get("client_secret", "")
+        token_url = self.auth_config.get("token_url", "")
+        if not all([client_id, client_secret, token_url]):
+            _codex_sdk_logger.warning("[CodexSDK] OAuth client_credentials config incomplete")
+            return None
+        scopes = self.auth_config.get("scopes", [])
+        data: dict[str, Any] = {
+            "grant_type": "client_credentials",
+            "client_id": client_id,
+            "client_secret": client_secret,
+        }
+        if scopes:
+            data["scope"] = " ".join(scopes)
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(token_url, data=data, timeout=30)
+            resp.raise_for_status()
+            return resp.json().get("access_token")
+
+    async def _read_cached_oauth_token(self) -> str | None:
+        """Read cached fastmcp OAuth token from ~/.fastmcp/oauth-mcp-client-cache/."""
+        # Reuse the same logic as ClaudeSDKProvider — both read from fastmcp's token cache
+        # when oauth_auto_discover is True.
+        cache_dir = Path.home() / ".fastmcp" / "oauth-mcp-client-cache"
+        if not cache_dir.exists():
+            return None
+        try:
+            server_key = urllib.parse.quote(self.mcp_url, safe="")
+            token_file = cache_dir / f"{server_key}.json"
+            if not token_file.exists():
+                # Try without trailing slash variant
+                alt_url = self.mcp_url.rstrip("/")
+                token_file = cache_dir / f"{urllib.parse.quote(alt_url, safe='')}.json"
+            if not token_file.exists():
+                return None
+            data = json.loads(token_file.read_text())
+            return data.get("access_token")
+        except (json.JSONDecodeError, OSError) as e:
+            _codex_sdk_logger.warning("[CodexSDK] Could not read cached OAuth token: %s", e)
+            return None
+
+    async def generate_with_tools(
+        self,
+        prompt: str,
+        tools: list[dict[str, Any]],
+        timeout: float = 120.0,
+        messages: list[dict[str, Any]] | None = None,
+    ) -> LLMResult:
+        """Generate a response using openai-agents with native MCP tool access."""
+        # openai-agents is an optional dependency; initialize() has already
+        # validated it is installed, so these deferred imports are safe here.
+        from agents import Agent, Runner  # noqa: PLC0415
+        from agents.mcp import MCPServerStreamableHttp  # noqa: PLC0415
+        from agents.models.openai_provider import OpenAIProvider as OAIProvider  # noqa: PLC0415
+        from agents.run_config import RunConfig  # noqa: PLC0415
+
+        start_time = time.time()
+
+        params: dict[str, Any] = {"url": self.mcp_url}
+        if self._mcp_headers:
+            params["headers"] = self._mcp_headers
+
+        try:
+            async with MCPServerStreamableHttp(
+                params=params,
+                cache_tools_list=True,
+                name="testmcpy-mcp",
+            ) as mcp_server:
+                agent = Agent(
+                    name="testmcpy-codex-agent",
+                    model=self.model,
+                    instructions=_CODEX_SYSTEM_PROMPT,
+                    mcp_servers=[mcp_server],
+                )
+                run_config = RunConfig(
+                    model_provider=OAIProvider(api_key=self.openai_api_key),
+                )
+                result = await asyncio.wait_for(
+                    Runner.run(agent, prompt, run_config=run_config, max_turns=25),
+                    timeout=timeout,
+                )
+
+            response_text = str(result.final_output) if result.final_output is not None else ""
+
+            # Extract tool calls from the run's item trace.
+            from agents.items import ToolCallItem  # noqa: PLC0415
+
+            tool_calls: list[dict[str, Any]] = []
+            for item in result.new_items:
+                if isinstance(item, ToolCallItem) and item.tool_name:
+                    # ToolCallItem has no .arguments attribute; arguments live on
+                    # the raw_item (e.g. ResponseFunctionToolCall.arguments).
+                    raw = item.raw_item
+                    raw_args = (
+                        raw.get("arguments")
+                        if isinstance(raw, dict)
+                        else getattr(raw, "arguments", None)
+                    ) or "{}"
+                    try:
+                        args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+                    except json.JSONDecodeError:
+                        args = {}
+                    tool_calls.append({"name": item.tool_name, "arguments": args})
+
+            # Extract token usage when available; use the same key names as
+            # every other provider (prompt / completion / total).
+            usage = getattr(getattr(result, "context_wrapper", None), "usage", None)
+            input_tokens = getattr(usage, "input_tokens", None)
+            output_tokens = getattr(usage, "output_tokens", None)
+            token_usage = (
+                {
+                    "prompt": input_tokens,
+                    "completion": output_tokens,
+                    "total": (input_tokens or 0) + (output_tokens or 0),
+                }
+                if input_tokens is not None
+                else None
+            )
+
+            return LLMResult(
+                response=response_text,
+                tool_calls=tool_calls,
+                token_usage=token_usage,
+                cost=0.0,
+                duration=time.time() - start_time,
+                raw_response={"final_output": response_text},
+            )
+
+        except asyncio.TimeoutError:
+            return LLMResult(
+                response=f"Error: Codex SDK timed out after {timeout}s",
+                tool_calls=[],
+                duration=time.time() - start_time,
+            )
+        except Exception as e:  # openai.APIError, agents errors, MCP/httpx errors
+            # generate_with_tools must never raise — the eval harness expects an
+            # LLMResult even on auth/rate-limit/connection failures so the test
+            # run keeps going and records a clean failure result.
+            _codex_sdk_logger.warning("[CodexSDK] generate_with_tools failed: %s", e)
+            return LLMResult(
+                response=f"Error: {e}",
+                tool_calls=[],
+                duration=time.time() - start_time,
+            )
+
+    async def close(self) -> None:
+        """No persistent connections to close (MCP session is per-request)."""
 
 
 class GeminiCLIProvider(LLMProvider):
@@ -3475,7 +3802,9 @@ def create_llm_provider(provider: str, model: str, **kwargs) -> LLMProvider:
     Create an LLM provider instance.
 
     Args:
-        provider: Provider name (ollama, openai, openrouter, local, anthropic, bedrock, claude-sdk, claude-cli, claude-code, assistant, chatbot, codex-cli, gemini-cli)
+        provider: Provider name (ollama, openai, openrouter, local, anthropic, bedrock,
+                  claude-sdk, claude-cli, claude-code, assistant, chatbot,
+                  codex-sdk, codex-cli, codex, gemini-cli, xai, grok)
         model: Model name/path
         **kwargs: Additional provider-specific arguments
 
@@ -3497,8 +3826,9 @@ def create_llm_provider(provider: str, model: str, **kwargs) -> LLMProvider:
         "claude-code": ClaudeSDKProvider,  # Alias → claude-sdk
         "assistant": AssistantProvider,
         "chatbot": AssistantProvider,
-        "codex-cli": CodexCLIProvider,
-        "codex": CodexCLIProvider,  # Alias
+        "codex-sdk": CodexSDKProvider,  # OpenAI Agents SDK with native MCP
+        "codex-cli": CodexSDKProvider,  # Alias → codex-sdk
+        "codex": CodexSDKProvider,  # Alias → codex-sdk
         "gemini-cli": GeminiCLIProvider,
         "xai": XAIProvider,  # xAI (Grok models)
         "grok": XAIProvider,  # Alias → xai

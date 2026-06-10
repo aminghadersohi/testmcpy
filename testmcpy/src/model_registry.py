@@ -21,6 +21,7 @@ class Provider(str, Enum):
     GOOGLE = "google"
     GEMINI = "gemini"  # Alias for google
     GEMINI_CLI = "gemini-cli"  # Gemini CLI tool
+    CODEX_CLI = "codex-cli"  # OpenAI Codex via Agents SDK
     OLLAMA = "ollama"
     BEDROCK = "bedrock"  # AWS Bedrock (Anthropic models via AWS)
     CLAUDE_SDK = "claude-sdk"  # Claude Agent SDK (also handles claude-cli/claude-code)
@@ -325,6 +326,57 @@ OPENAI_MODELS: list[ModelInfo] = [
         ],
         family="o1",
         aliases=["openai-o1-mini"],
+    ),
+    ModelInfo(
+        id="o3",
+        name="o3",
+        provider=Provider.OPENAI,
+        description="OpenAI o3 — flagship reasoning model, strong on code and math",
+        context_window=200_000,
+        max_output_tokens=100_000,
+        input_price_per_1m=2.00,
+        output_price_per_1m=8.00,
+        capabilities=[
+            ModelCapability.TOOL_CALLING,
+            ModelCapability.LONG_CONTEXT,
+            ModelCapability.REASONING,
+        ],
+        family="o3",
+        aliases=["openai-o3"],
+    ),
+    ModelInfo(
+        id="o3-mini",
+        name="o3-mini",
+        provider=Provider.OPENAI,
+        description="Faster, cheaper o3 variant for high-volume reasoning tasks",
+        context_window=200_000,
+        max_output_tokens=100_000,
+        input_price_per_1m=1.10,
+        output_price_per_1m=4.40,
+        capabilities=[
+            ModelCapability.TOOL_CALLING,
+            ModelCapability.LONG_CONTEXT,
+            ModelCapability.REASONING,
+        ],
+        family="o3",
+        aliases=["openai-o3-mini"],
+    ),
+    ModelInfo(
+        id="o4-mini",
+        name="o4-mini",
+        provider=Provider.OPENAI,
+        description="Default Codex CLI model — fast reasoning at low cost",
+        context_window=200_000,
+        max_output_tokens=100_000,
+        input_price_per_1m=1.10,
+        output_price_per_1m=4.40,
+        capabilities=[
+            ModelCapability.TOOL_CALLING,
+            ModelCapability.LONG_CONTEXT,
+            ModelCapability.REASONING,
+        ],
+        family="o4",
+        aliases=["openai-o4-mini"],
     ),
 ]
 
@@ -668,6 +720,86 @@ OPENROUTER_MODELS: list[ModelInfo] = [
 ]
 
 # ============================================================
+# Codex CLI Models (OpenAI Agents SDK)
+# ============================================================
+
+CODEX_CLI_MODELS: list[ModelInfo] = [
+    ModelInfo(
+        id="codex-o4-mini",
+        name="Codex o4-mini",
+        provider=Provider.CODEX_CLI,
+        description="Default Codex CLI model — o4-mini, fast reasoning at low cost",
+        context_window=200_000,
+        max_output_tokens=100_000,
+        input_price_per_1m=1.10,
+        output_price_per_1m=4.40,
+        capabilities=[
+            ModelCapability.TOOL_CALLING,
+            ModelCapability.STREAMING,
+            ModelCapability.LONG_CONTEXT,
+            ModelCapability.REASONING,
+        ],
+        family="codex",
+        is_default=True,
+        aliases=["codex", "codex-sdk", "codex-latest", "codex-mini", "codex-o4mini"],
+    ),
+    ModelInfo(
+        id="codex-o3",
+        name="Codex o3",
+        provider=Provider.CODEX_CLI,
+        description="OpenAI o3 via Codex Agent SDK — stronger reasoning, higher cost",
+        context_window=200_000,
+        max_output_tokens=100_000,
+        input_price_per_1m=2.00,
+        output_price_per_1m=8.00,
+        capabilities=[
+            ModelCapability.TOOL_CALLING,
+            ModelCapability.STREAMING,
+            ModelCapability.LONG_CONTEXT,
+            ModelCapability.REASONING,
+        ],
+        family="codex",
+        aliases=["codex-o3-full"],
+    ),
+    ModelInfo(
+        id="codex-o3-mini",
+        name="Codex o3-mini",
+        provider=Provider.CODEX_CLI,
+        description="OpenAI o3-mini via Codex Agent SDK — balanced speed and reasoning",
+        context_window=200_000,
+        max_output_tokens=100_000,
+        input_price_per_1m=1.10,
+        output_price_per_1m=4.40,
+        capabilities=[
+            ModelCapability.TOOL_CALLING,
+            ModelCapability.STREAMING,
+            ModelCapability.LONG_CONTEXT,
+            ModelCapability.REASONING,
+        ],
+        family="codex",
+        aliases=["codex-o3mini"],
+    ),
+    ModelInfo(
+        id="codex-gpt-4o",
+        name="Codex GPT-4o",
+        provider=Provider.CODEX_CLI,
+        description="OpenAI GPT-4o via Codex Agent SDK — vision capable",
+        context_window=128_000,
+        max_output_tokens=16_384,
+        input_price_per_1m=2.50,
+        output_price_per_1m=10.00,
+        capabilities=[
+            ModelCapability.TOOL_CALLING,
+            ModelCapability.STREAMING,
+            ModelCapability.VISION,
+            ModelCapability.LONG_CONTEXT,
+        ],
+        family="codex",
+        aliases=["codex-4o"],
+    ),
+]
+
+# ============================================================
 # Model Registry
 # ============================================================
 
@@ -677,6 +809,7 @@ ALL_MODELS: list[ModelInfo] = (
     + GEMINI_MODELS
     + CLAUDE_SDK_MODELS
     + GEMINI_CLI_MODELS
+    + CODEX_CLI_MODELS
     + GROK_MODELS
     + OPENROUTER_MODELS
 )

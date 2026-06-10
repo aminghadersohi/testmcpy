@@ -9,7 +9,7 @@ import pytest
 
 from testmcpy.src.llm_integration import (
     ClaudeSDKProvider,
-    CodexCLIProvider,
+    CodexSDKProvider,
     GeminiCLIProvider,
     GeminiProvider,
     LocalModelProvider,
@@ -91,24 +91,18 @@ def _is_cli_not_found(exc: Exception) -> bool:
     return "not found" in msg or "no such file" in msg
 
 
-class TestCodexCLIProviderFactory:
-    def test_factory_creates(self):
-        try:
-            p = create_llm_provider("codex-cli", "codex")
-            assert isinstance(p, CodexCLIProvider)
-        except Exception as e:
-            if _is_cli_not_found(e):
-                pytest.skip("Codex CLI not installed")
-            raise
+class TestCodexSDKProviderFactory:
+    def test_factory_creates(self) -> None:
+        p = create_llm_provider("codex-sdk", "codex-o4-mini")
+        assert isinstance(p, CodexSDKProvider)
 
-    def test_codex_alias(self):
-        try:
-            p = create_llm_provider("codex", "codex")
-            assert isinstance(p, CodexCLIProvider)
-        except Exception as e:
-            if _is_cli_not_found(e):
-                pytest.skip("Codex CLI not installed")
-            raise
+    def test_codex_cli_alias(self) -> None:
+        p = create_llm_provider("codex-cli", "codex-o4-mini")
+        assert isinstance(p, CodexSDKProvider)
+
+    def test_codex_alias(self) -> None:
+        p = create_llm_provider("codex", "codex-o4-mini")
+        assert isinstance(p, CodexSDKProvider)
 
 
 class TestGeminiCLIProviderFactory:

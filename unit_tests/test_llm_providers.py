@@ -19,6 +19,7 @@ from testmcpy.src.llm_integration import (
     AnthropicProvider,
     AssistantProvider,
     ClaudeSDKProvider,
+    CodexSDKProvider,
     LLMResult,
     OpenAIProvider,
     OpenRouterProvider,
@@ -289,6 +290,146 @@ class TestClaudeSDKVerboseLogs:
         thinking_lines = [line for line in result.logs if "Thinking:" in line]
         assert len(thinking_lines) == 1
         assert "..." in thinking_lines[0]  # ellipsis because text > 100 chars
+
+
+# ---------------------------------------------------------------------------
+# CodexSDKProvider Tests
+# ---------------------------------------------------------------------------
+
+
+class TestCodexSDKProvider:
+    """Cover CodexSDKProvider construction, auth resolution, and factory aliases."""
+
+    def test_factory_alias_codex_sdk(self) -> None:
+        p = create_llm_provider("codex-sdk", "codex-o3", openai_api_key="sk-test")
+        assert isinstance(p, CodexSDKProvider)
+
+    def test_factory_alias_codex_cli(self) -> None:
+        p = create_llm_provider("codex-cli", "codex-o3", openai_api_key="sk-test")
+        assert isinstance(p, CodexSDKProvider)
+
+    def test_factory_alias_codex(self) -> None:
+        p = create_llm_provider("codex", "codex-o3", openai_api_key="sk-test")
+        assert isinstance(p, CodexSDKProvider)
+
+    def test_model_id_remapped(self) -> None:
+        p = CodexSDKProvider(model="codex-o3", openai_api_key="sk-test")
+        assert p.model == "o3"
+
+    def test_model_id_remapped_o4mini(self) -> None:
+        p = CodexSDKProvider(model="codex-o4-mini", openai_api_key="sk-test")
+        assert p.model == "o4-mini"
+
+    def test_model_id_passthrough_for_unknown(self) -> None:
+        # If user passes a raw OpenAI model ID, it is passed through unchanged.
+        p = CodexSDKProvider(model="gpt-4o-mini", openai_api_key="sk-test")
+        assert p.model == "gpt-4o-mini"
+
+    def test_api_key_from_constructor(self) -> None:
+        p = CodexSDKProvider(model="codex-o3", openai_api_key="sk-explicit")
+        assert p.openai_api_key == "sk-explicit"
+
+    def test_no_api_key_defaults_empty(self) -> None:
+        # Key comes from the LLM profile (resolved in .llm_providers.yaml),
+        # not from the environment — constructor with no key yields empty string.
+        p = CodexSDKProvider(model="codex-o3")
+        assert p.openai_api_key == ""
+
+    def test_read_cached_codex_token_present(self, tmp_path, monkeypatch) -> None:
+        auth_file = tmp_path / ".codex" / "auth.json"
+        auth_file.parent.mkdir(parents=True)
+        # Real Codex CLI schema: OPENAI_API_KEY at top level, OAuth tokens nested
+        auth_file.write_text(
+            '{"OPENAI_API_KEY": "sk-stored-key", "tokens": {"access_token": "oauth-only"}}'
+        )
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        p = CodexSDKProvider(model="codex-o3")
+        assert p._read_cached_codex_token() == "sk-stored-key"
+
+    def test_read_cached_codex_token_oauth_only_returns_none(self, tmp_path, monkeypatch) -> None:
+        # OAuth-only login: OPENAI_API_KEY is null — ChatGPT token can't hit Platform API
+        auth_file = tmp_path / ".codex" / "auth.json"
+        auth_file.parent.mkdir(parents=True)
+        auth_file.write_text('{"OPENAI_API_KEY": null, "tokens": {"access_token": "chatgpt-tok"}}')
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        p = CodexSDKProvider(model="codex-o3")
+        assert p._read_cached_codex_token() is None
+
+    def test_read_cached_codex_token_missing_file(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        p = CodexSDKProvider(model="codex-o3")
+        assert p._read_cached_codex_token() is None
+
+    def test_read_cached_codex_token_invalid_json(self, tmp_path, monkeypatch) -> None:
+        auth_file = tmp_path / ".codex" / "auth.json"
+        auth_file.parent.mkdir(parents=True)
+        auth_file.write_text("not-json{{")
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        p = CodexSDKProvider(model="codex-o3")
+        assert p._read_cached_codex_token() is None
+
+    @pytest.mark.asyncio
+    async def test_initialize_missing_package_raises(self, monkeypatch) -> None:
+        import sys
+
+        monkeypatch.setitem(sys.modules, "agents", None)
+        p = CodexSDKProvider(model="codex-o3", openai_api_key="sk-test")
+        with pytest.raises(ValueError, match="openai-agents"):
+            await p.initialize()
+
+    @pytest.mark.asyncio
+    async def test_initialize_no_key_raises(self, monkeypatch, tmp_path) -> None:
+        """No constructor key and no ~/.codex/auth.json must raise ValueError."""
+        import sys
+        import types
+
+        fake_agents = types.ModuleType("agents")
+        fake_agents.Agent = object
+        fake_agents.Runner = object
+        monkeypatch.setitem(sys.modules, "agents", fake_agents)
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+
+        p = CodexSDKProvider(model="codex-o3")  # no openai_api_key
+        with pytest.raises(ValueError, match="api_key"):
+            await p.initialize()
+
+    def test_tool_call_extraction_from_raw_item(self) -> None:
+        """tool_calls must be populated from ToolCallItem.raw_item, not .arguments."""
+        pytest.importorskip("agents", reason="openai-agents not installed")
+        from agents.items import ToolCallItem
+
+        # RunItemBase stores a weakref to agent; a plain class instance supports it.
+        class _FakeAgent:
+            pass
+
+        raw = {"name": "list_dashboards", "arguments": '{"page": 1}', "call_id": "c1"}
+        item = ToolCallItem(raw_item=raw, agent=_FakeAgent())  # type: ignore[arg-type]
+
+        assert item.tool_name == "list_dashboards"
+        # Confirm .arguments does NOT exist on ToolCallItem (the bug this guards).
+        assert not hasattr(item, "arguments")
+        # Arguments live on raw_item — our extraction code reads them correctly.
+        assert raw.get("arguments") == '{"page": 1}'
+
+    @pytest.mark.asyncio
+    async def test_initialize_bearer_auth_sets_mcp_header(self, monkeypatch) -> None:
+        """Bearer auth type must set Authorization header on MCP requests."""
+        import sys
+        import types
+
+        fake_agents = types.ModuleType("agents")
+        fake_agents.Agent = object
+        fake_agents.Runner = object
+        monkeypatch.setitem(sys.modules, "agents", fake_agents)
+
+        p = CodexSDKProvider(
+            model="codex-o3",
+            mcp_url="https://mcp.example.com/mcp",
+            auth={"type": "bearer", "token": "bearer-tok-789"},
+            openai_api_key="sk-test",
+        )
+        await p.initialize()
+        assert p._mcp_headers == {"Authorization": "Bearer bearer-tok-789"}
 
 
 # ---------------------------------------------------------------------------

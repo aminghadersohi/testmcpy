@@ -78,6 +78,38 @@ RUN if [ "$INSTALL_CLAUDE_CLI" = "true" ]; then \
         claude --version; \
     fi
 
+# Optionally bake the Codex CLI into the image for `codex auth login` and
+# direct CLI use inside the container.
+#
+# CodexSDKProvider (openai-agents Python SDK) does NOT require the Codex CLI
+# to be installed — it calls the OpenAI API directly. This layer is only
+# needed when you want `codex auth login` OAuth inside the container so that
+# ~/.codex/auth.json is available for CodexSDKProvider to pick up.
+#
+# Requires Node.js (~80 MB extra). Opt in with:
+#
+#     docker compose build --build-arg INSTALL_CODEX_CLI=true
+#
+# Pin a specific version for reproducibility:
+#
+#     docker compose build \
+#         --build-arg INSTALL_CODEX_CLI=true \
+#         --build-arg CODEX_CLI_VERSION=0.1.2
+#
+ARG INSTALL_CODEX_CLI=false
+ARG CODEX_CLI_VERSION=""
+RUN if [ "$INSTALL_CODEX_CLI" = "true" ]; then \
+        curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
+        apt-get install -y --no-install-recommends nodejs && \
+        rm -rf /var/lib/apt/lists/* && \
+        if [ -n "$CODEX_CLI_VERSION" ]; then \
+            npm install -g "@openai/codex@${CODEX_CLI_VERSION}"; \
+        else \
+            npm install -g @openai/codex; \
+        fi && \
+        codex --version; \
+    fi
+
 # Install Python dependencies
 COPY pyproject.toml .
 COPY testmcpy/ testmcpy/

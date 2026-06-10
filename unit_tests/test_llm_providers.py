@@ -653,6 +653,210 @@ class TestGeminiSDKProvider:
 
 
 # ---------------------------------------------------------------------------
+# BaseSDKProvider contract tests (Claude / Codex / Gemini)
+# ---------------------------------------------------------------------------
+
+
+class TestSDKProviderContract:
+    """Cover the contract :class:`BaseSDKProvider` enforces for every
+    SDK-backed provider. These are the drift points that have repeatedly
+    produced real eval-harness bugs — assert them once for the base and
+    parametrise across the three subclasses.
+
+    Specifically:
+
+    1. ``LLMResult.tool_results`` MUST be populated whenever the vendor SDK
+       executes tools natively. If empty when ``tool_calls`` is non-empty,
+       ``test_runner.py:598`` re-executes every call against MCP, which is
+       catastrophic for state-mutating tools.
+    2. ``token_usage`` MUST use ``{"prompt", "completion", "total"}``.
+    3. ``cost`` should come out non-zero when token_usage + model registry
+       pricing are available.
+    """
+
+    def _build_provider(self, provider_cls):
+        """Construct each provider with whatever vendor-specific kwarg it
+        needs to bypass credential validation. We don't call ``initialize``
+        — the test patches ``_run_agent`` directly."""
+        from testmcpy.src.llm_integration import (
+            ClaudeSDKProvider,
+            CodexSDKProvider,
+            GeminiSDKProvider,
+        )
+
+        if provider_cls is ClaudeSDKProvider:
+            return ClaudeSDKProvider(model="claude-sonnet-4-5")
+        if provider_cls is CodexSDKProvider:
+            # codex-o4-mini → registry entry has pricing → cost should be > 0.
+            return CodexSDKProvider(model="codex-o4-mini", openai_api_key="sk-test")
+        if provider_cls is GeminiSDKProvider:
+            return GeminiSDKProvider(model="gemini-sdk-flash", api_key="AIza-test")
+        raise AssertionError(f"unknown provider class {provider_cls}")
+
+    @pytest.mark.parametrize("provider_name", ["claude", "codex", "gemini"])
+    @pytest.mark.asyncio
+    async def test_tool_results_populated_when_sdk_executes_tools(self, provider_name) -> None:
+        """Contract: when ``_run_agent`` returns ``SDKRunResult`` with both
+        ``tool_calls`` and ``tool_results`` populated, the resulting
+        :class:`LLMResult` must carry both — so ``test_runner.py`` skips
+        re-execution. This is the exact drift bug that bit CodexSDKProvider
+        in PR #84.
+        """
+        from unittest.mock import AsyncMock, patch
+
+        from testmcpy.src.llm_integration import (
+            ClaudeSDKProvider,
+            CodexSDKProvider,
+            GeminiSDKProvider,
+            MCPToolResult,
+            SDKRunResult,
+        )
+
+        provider_cls = {
+            "claude": ClaudeSDKProvider,
+            "codex": CodexSDKProvider,
+            "gemini": GeminiSDKProvider,
+        }[provider_name]
+        provider = self._build_provider(provider_cls)
+
+        fake_run_result = SDKRunResult(
+            response_text="ok",
+            tool_calls=[{"id": "call-1", "name": "list_dashboards", "arguments": {}}],
+            tool_results=[
+                MCPToolResult(
+                    tool_call_id="call-1",
+                    tool_name="list_dashboards",
+                    content="[d1, d2]",
+                    is_error=False,
+                )
+            ],
+            token_usage={"prompt": 10, "completion": 5, "total": 15},
+        )
+
+        with patch.object(
+            provider_cls,
+            "_run_agent",
+            new=AsyncMock(return_value=fake_run_result),
+        ):
+            result = await provider.generate_with_tools("list dashboards", tools=[], timeout=30.0)
+
+        # Core contract: tool_results MUST be populated and pair with
+        # tool_calls so test_runner.py:598 short-circuits re-execution.
+        assert len(result.tool_results) == 1, (
+            f"{provider_cls.__name__} dropped tool_results — "
+            "test_runner will re-execute calls against MCP"
+        )
+        assert result.tool_results[0].tool_name == "list_dashboards"
+        assert len(result.tool_calls) == 1
+        # token_usage shape is the repo-standard one.
+        assert result.token_usage == {
+            "prompt": 10,
+            "completion": 5,
+            "total": 15,
+        }
+        assert result.response == "ok"
+
+    @pytest.mark.parametrize("provider_name", ["claude", "codex", "gemini"])
+    @pytest.mark.asyncio
+    async def test_warns_when_tool_results_missing(self, provider_name, caplog) -> None:
+        """When a subclass forgets to populate ``tool_results`` but does
+        report ``tool_calls``, :meth:`BaseSDKProvider.generate_with_tools`
+        emits a WARNING. This is the only signal a future-drift subclass
+        will have before the harness silently doubles MCP execution."""
+        import logging
+        from unittest.mock import AsyncMock, patch
+
+        from testmcpy.src.llm_integration import (
+            ClaudeSDKProvider,
+            CodexSDKProvider,
+            GeminiSDKProvider,
+            SDKRunResult,
+        )
+
+        provider_cls = {
+            "claude": ClaudeSDKProvider,
+            "codex": CodexSDKProvider,
+            "gemini": GeminiSDKProvider,
+        }[provider_name]
+        provider = self._build_provider(provider_cls)
+
+        fake_run_result = SDKRunResult(
+            response_text="ok",
+            tool_calls=[{"id": "call-1", "name": "list_dashboards", "arguments": {}}],
+            tool_results=[],  # subclass forgot to populate
+        )
+
+        with caplog.at_level(logging.WARNING):
+            with patch.object(
+                provider_cls,
+                "_run_agent",
+                new=AsyncMock(return_value=fake_run_result),
+            ):
+                await provider.generate_with_tools("list dashboards", tools=[], timeout=30.0)
+
+        joined = " ".join(rec.message for rec in caplog.records)
+        assert "Contract violation" in joined, (
+            "Expected base class to log a WARNING when tool_calls present but tool_results empty"
+        )
+        assert "tool_results" in joined
+
+    @pytest.mark.asyncio
+    async def test_cost_estimated_from_model_registry(self) -> None:
+        """When the SDK does not report cost directly but does report
+        ``token_usage`` AND the model registry has pricing for the
+        provider's registry id, the base must populate ``LLMResult.cost``
+        from registry per-1M pricing."""
+        from unittest.mock import AsyncMock, patch
+
+        from testmcpy.src.llm_integration import (
+            CodexSDKProvider,
+            SDKRunResult,
+        )
+
+        provider = CodexSDKProvider(model="codex-o4-mini", openai_api_key="sk-test")
+
+        fake_run_result = SDKRunResult(
+            response_text="ok",
+            tool_calls=[],
+            tool_results=[],
+            token_usage={"prompt": 1_000_000, "completion": 500_000, "total": 1_500_000},
+            cost=None,  # SDK did not report cost — base must estimate
+        )
+
+        with patch.object(
+            CodexSDKProvider,
+            "_run_agent",
+            new=AsyncMock(return_value=fake_run_result),
+        ):
+            result = await provider.generate_with_tools("ping", tools=[], timeout=30.0)
+
+        # 1M prompt * $1.10 + 500K completion * $4.40 = $1.10 + $2.20 = $3.30
+        assert result.cost > 0, "Cost should be estimated from registry pricing"
+
+    @pytest.mark.asyncio
+    async def test_programming_errors_propagate_not_swallowed(self) -> None:
+        """Unexpected exceptions (programming defects: AttributeError,
+        TypeError on wrong vendor kwargs, etc.) MUST propagate from
+        :meth:`generate_with_tools` rather than be converted into a silent
+        ``LLMResult(response='Error: ...')``. The latter is what caused
+        Codex/Gemini PRs to mask broken SDK call sites as 0-score eval
+        failures (see PR #82/#84 review comments)."""
+        from unittest.mock import AsyncMock, patch
+
+        from testmcpy.src.llm_integration import CodexSDKProvider
+
+        provider = CodexSDKProvider(model="codex-o4-mini", openai_api_key="sk-test")
+
+        with patch.object(
+            CodexSDKProvider,
+            "_run_agent",
+            new=AsyncMock(side_effect=AttributeError("bogus kwarg")),
+        ):
+            with pytest.raises(AttributeError, match="bogus kwarg"):
+                await provider.generate_with_tools("ping", tools=[], timeout=30.0)
+
+
+# ---------------------------------------------------------------------------
 # AssistantProvider SSE tool_call parsing tests
 # ---------------------------------------------------------------------------
 

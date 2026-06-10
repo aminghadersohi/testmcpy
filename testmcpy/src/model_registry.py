@@ -21,6 +21,7 @@ class Provider(str, Enum):
     GOOGLE = "google"
     GEMINI = "gemini"  # Alias for google
     GEMINI_CLI = "gemini-cli"  # Gemini CLI tool
+    GEMINI_SDK = "gemini-sdk"  # Google ADK with native MCP
     CODEX_CLI = "codex-cli"  # OpenAI Codex via Agents SDK
     OLLAMA = "ollama"
     BEDROCK = "bedrock"  # AWS Bedrock (Anthropic models via AWS)
@@ -800,6 +801,52 @@ CODEX_CLI_MODELS: list[ModelInfo] = [
 ]
 
 # ============================================================
+# Gemini SDK Models (Google ADK)
+# ============================================================
+
+GEMINI_SDK_MODELS: list[ModelInfo] = [
+    ModelInfo(
+        id="gemini-sdk-flash",
+        name="Gemini SDK 2.5 Flash",
+        provider=Provider.GEMINI_SDK,
+        description="Gemini 2.5 Flash via Google ADK — fast, MCP-native agentic execution",
+        context_window=1_000_000,
+        max_output_tokens=65_536,
+        input_price_per_1m=0.30,
+        output_price_per_1m=2.50,
+        capabilities=[
+            ModelCapability.TOOL_CALLING,
+            ModelCapability.STREAMING,
+            ModelCapability.VISION,
+            ModelCapability.LONG_CONTEXT,
+            ModelCapability.REASONING,
+        ],
+        family="gemini-sdk",
+        is_default=True,
+        aliases=["gemini-sdk", "gsdk-flash", "gsdk-2.5-flash"],
+    ),
+    ModelInfo(
+        id="gemini-sdk-pro",
+        name="Gemini SDK 2.5 Pro",
+        provider=Provider.GEMINI_SDK,
+        description="Gemini 2.5 Pro via Google ADK — strongest reasoning, higher cost",
+        context_window=1_000_000,
+        max_output_tokens=65_536,
+        input_price_per_1m=1.25,
+        output_price_per_1m=10.00,
+        capabilities=[
+            ModelCapability.TOOL_CALLING,
+            ModelCapability.STREAMING,
+            ModelCapability.VISION,
+            ModelCapability.LONG_CONTEXT,
+            ModelCapability.REASONING,
+        ],
+        family="gemini-sdk",
+        aliases=["gsdk-pro", "gsdk-2.5-pro"],
+    ),
+]
+
+# ============================================================
 # Model Registry
 # ============================================================
 
@@ -809,6 +856,7 @@ ALL_MODELS: list[ModelInfo] = (
     + GEMINI_MODELS
     + CLAUDE_SDK_MODELS
     + GEMINI_CLI_MODELS
+    + GEMINI_SDK_MODELS
     + CODEX_CLI_MODELS
     + GROK_MODELS
     + OPENROUTER_MODELS

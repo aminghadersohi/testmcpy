@@ -222,7 +222,16 @@ def add_llm():
     console.print("\n[bold yellow]Step 1: Provider Type[/bold yellow]")
     provider = _choose(
         "Provider:",
-        ["anthropic", "openai", "google", "ollama", "claude-sdk", "claude-code", "codex-sdk"],
+        [
+            "anthropic",
+            "openai",
+            "google",
+            "ollama",
+            "claude-sdk",
+            "claude-code",
+            "codex-sdk",
+            "gemini-sdk",
+        ],
         default="anthropic",
     )
 
@@ -281,13 +290,19 @@ def add_llm():
         console.print("[green]No API key needed if you have run `codex auth login`.[/green]")
         console.print("[dim]Or set OPENAI_API_KEY in your environment for direct API access.[/dim]")
     else:
-        console.print("Enter API key directly or specify an environment variable name.")
+        if provider == "gemini-sdk":
+            console.print(
+                "[green]Requires a Google API key — get one at https://aistudio.google.com[/green]"
+            )
+        else:
+            console.print("Enter API key directly or specify an environment variable name.")
         api_key = _prompt("API key (leave empty to use env var)", password=True)
         if not api_key:
             default_env = {
                 "anthropic": "ANTHROPIC_API_KEY",
                 "openai": "OPENAI_API_KEY",
                 "google": "GOOGLE_API_KEY",
+                "gemini-sdk": "GOOGLE_API_KEY",
             }.get(provider, "")
             api_key_env = _prompt("Environment variable name", default_env)
 

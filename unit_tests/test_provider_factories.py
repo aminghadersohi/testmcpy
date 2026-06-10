@@ -12,6 +12,7 @@ from testmcpy.src.llm_integration import (
     CodexSDKProvider,
     GeminiCLIProvider,
     GeminiProvider,
+    GeminiSDKProvider,
     LocalModelProvider,
     OllamaProvider,
     OpenRouterProvider,
@@ -124,6 +125,16 @@ class TestLocalModelProviderFactory:
     def test_model_set(self):
         p = create_llm_provider("local", "llama-7b")
         assert p.model == "llama-7b"
+
+
+class TestGeminiSDKProviderFactory:
+    def test_factory_creates(self) -> None:
+        p = create_llm_provider("gemini-sdk", "gemini-sdk-flash", api_key="AIza-test")
+        assert isinstance(p, GeminiSDKProvider)
+
+    def test_model_remapped(self) -> None:
+        p = create_llm_provider("gemini-sdk", "gemini-sdk-flash", api_key="AIza-test")
+        assert p.model == "gemini-2.5-flash"
 
 
 class TestUnknownProvider:

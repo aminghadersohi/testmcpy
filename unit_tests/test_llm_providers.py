@@ -20,6 +20,8 @@ from testmcpy.src.llm_integration import (
     AssistantProvider,
     ClaudeSDKProvider,
     CodexSDKProvider,
+    GeminiProvider,
+    GeminiSDKProvider,
     LLMResult,
     OpenAIProvider,
     OpenRouterProvider,
@@ -430,6 +432,224 @@ class TestCodexSDKProvider:
         )
         await p.initialize()
         assert p._mcp_headers == {"Authorization": "Bearer bearer-tok-789"}
+
+
+# ---------------------------------------------------------------------------
+# GeminiProvider env-var fix tests
+# ---------------------------------------------------------------------------
+
+
+class TestGeminiProviderNoEnvRead:
+    """GeminiProvider must no longer read env vars in __init__."""
+
+    def test_no_api_key_defaults_empty(self) -> None:
+        p = GeminiProvider(model="gemini-2.5-flash", api_key=None)
+        assert p.api_key == ""
+
+    def test_api_key_from_constructor(self) -> None:
+        p = GeminiProvider(model="gemini-2.5-flash", api_key="AIza-explicit")
+        assert p.api_key == "AIza-explicit"
+
+
+# ---------------------------------------------------------------------------
+# GeminiSDKProvider tests
+# ---------------------------------------------------------------------------
+
+
+class TestGeminiSDKProvider:
+    """Cover GeminiSDKProvider construction, auth resolution, and factory alias."""
+
+    def test_factory_alias_gemini_sdk(self) -> None:
+        p = create_llm_provider("gemini-sdk", "gemini-sdk-flash", api_key="AIza-test")
+        assert isinstance(p, GeminiSDKProvider)
+
+    def test_model_id_remapped_flash(self) -> None:
+        p = GeminiSDKProvider(model="gemini-sdk-flash", api_key="AIza-test")
+        assert p.model == "gemini-2.5-flash"
+
+    def test_model_id_remapped_pro(self) -> None:
+        p = GeminiSDKProvider(model="gemini-sdk-pro", api_key="AIza-test")
+        assert p.model == "gemini-2.5-pro"
+
+    def test_model_id_remapped_default_alias(self) -> None:
+        p = GeminiSDKProvider(model="gemini-sdk", api_key="AIza-test")
+        assert p.model == "gemini-2.5-flash"
+
+    def test_model_id_passthrough_for_unknown(self) -> None:
+        p = GeminiSDKProvider(model="gemini-1.5-pro", api_key="AIza-test")
+        assert p.model == "gemini-1.5-pro"
+
+    def test_api_key_from_constructor(self) -> None:
+        p = GeminiSDKProvider(model="gemini-sdk-flash", api_key="AIza-explicit")
+        assert p.api_key == "AIza-explicit"
+
+    def test_no_api_key_defaults_empty(self) -> None:
+        p = GeminiSDKProvider(model="gemini-sdk-flash")
+        assert p.api_key == ""
+
+    @pytest.mark.asyncio
+    async def test_initialize_missing_package_raises(self, monkeypatch) -> None:
+        import sys
+
+        monkeypatch.setitem(sys.modules, "google.adk", None)
+        p = GeminiSDKProvider(model="gemini-sdk-flash", api_key="AIza-test")
+        with pytest.raises(ValueError, match="google-adk"):
+            await p.initialize()
+
+    @pytest.mark.asyncio
+    async def test_initialize_no_key_raises(self, monkeypatch) -> None:
+        """No api_key must raise ValueError immediately."""
+        import sys
+        import types
+
+        fake_adk = types.ModuleType("google.adk")
+        fake_adk.Agent = object
+        monkeypatch.setitem(sys.modules, "google.adk", fake_adk)
+
+        p = GeminiSDKProvider(model="gemini-sdk-flash")
+        with pytest.raises(ValueError, match="api_key"):
+            await p.initialize()
+
+    @pytest.mark.asyncio
+    async def test_initialize_bearer_auth_sets_mcp_header(self, monkeypatch) -> None:
+        """Bearer auth config must set Authorization header."""
+        import sys
+        import types
+
+        fake_adk = types.ModuleType("google.adk")
+        fake_adk.Agent = object
+        monkeypatch.setitem(sys.modules, "google.adk", fake_adk)
+
+        p = GeminiSDKProvider(
+            model="gemini-sdk-flash",
+            mcp_url="https://mcp.example.com/mcp",
+            auth={"type": "bearer", "token": "bearer-gemini-xyz"},
+            api_key="AIza-test",
+        )
+        await p.initialize()
+        assert p._mcp_headers == {"Authorization": "Bearer bearer-gemini-xyz"}
+
+    @pytest.mark.asyncio
+    async def test_generate_with_tools_fake_events(self) -> None:
+        """generate_with_tools must: populate tool_results, sum usage, compute cost,
+        not re-execute tools, and close McpToolset on completion."""
+        pytest.importorskip("google.adk", reason="google-adk not installed")
+        import uuid as _uuid
+        from unittest.mock import MagicMock
+
+        # Build fake events using MagicMock — Event is a Pydantic model and does
+        # not allow setting arbitrary attributes directly.
+        class _FakeUsage:
+            prompt_token_count = 10
+            candidates_token_count = 20
+            total_token_count = 30
+
+        class _FakeFunctionCall:
+            name = "list_dashboards"
+            args = {"page": 1}
+
+        class _FakeFunctionResponse:
+            name = "list_dashboards"
+            id = "fc-1"
+            response = {"dashboards": ["d1", "d2"]}
+
+        class _FakePart:
+            text = "Found 2 dashboards."
+
+        class _FakeContent:
+            parts = [_FakePart()]
+
+        fc_event = MagicMock()
+        fc_event.get_function_calls.return_value = [_FakeFunctionCall()]
+        fc_event.get_function_responses.return_value = []
+        fc_event.is_final_response.return_value = False
+        fc_event.content = None
+        fc_event.usage_metadata = None
+
+        fr_event = MagicMock()
+        fr_event.get_function_calls.return_value = []
+        fr_event.get_function_responses.return_value = [_FakeFunctionResponse()]
+        fr_event.is_final_response.return_value = False
+        fr_event.content = None
+        fr_event.usage_metadata = _FakeUsage()
+
+        final_event = MagicMock()
+        final_event.get_function_calls.return_value = []
+        final_event.get_function_responses.return_value = []
+        final_event.is_final_response.return_value = True
+        final_event.content = _FakeContent()
+        final_event.usage_metadata = _FakeUsage()
+
+        async def _fake_run_async(**kwargs):
+            for ev in [fc_event, fr_event, final_event]:
+                yield ev
+
+        closed = []
+
+        class _FakeMcpToolset:
+            async def close(self):
+                closed.append(True)
+
+        class _FakeSession:
+            id = _uuid.uuid4().hex
+
+        class _FakeSessionService:
+            async def create_session(self, **kwargs):
+                return _FakeSession()
+
+        class _FakeRunner:
+            def __init__(self, **kwargs):
+                pass
+
+            def run_async(self, **kwargs):
+                return _fake_run_async(**kwargs)
+
+        from unittest.mock import patch
+
+        p = GeminiSDKProvider(
+            model="gemini-sdk-flash",
+            mcp_url="https://mcp.example.com/mcp",
+            api_key="AIza-test",
+        )
+        p._mcp_headers = {}
+
+        # McpToolset etc. are deferred imports inside generate_with_tools, so
+        # patch the source modules, not testmcpy.src.llm_integration.*.
+        with (
+            patch(
+                "google.adk.tools.mcp_tool.mcp_toolset.McpToolset",
+                return_value=_FakeMcpToolset(),
+            ),
+            patch(
+                "google.adk.sessions.in_memory_session_service.InMemorySessionService",
+                return_value=_FakeSessionService(),
+            ),
+            patch(
+                "google.adk.runners.Runner",
+                side_effect=lambda **kw: _FakeRunner(**kw),
+            ),
+            patch("google.adk.tools.mcp_tool.mcp_session_manager.StreamableHTTPConnectionParams"),
+            patch("google.adk.agents.llm_agent.LlmAgent"),
+            patch("google.adk.models.google_llm.Gemini"),
+        ):
+            result = await p.generate_with_tools("list dashboards", [], timeout=30.0)
+
+        # tool_calls populated
+        assert len(result.tool_calls) == 1
+        assert result.tool_calls[0]["name"] == "list_dashboards"
+        # tool_results populated — no second MCP execution needed
+        assert len(result.tool_results) == 1
+        assert result.tool_results[0].tool_name == "list_dashboards"
+        # usage summed across two usage-bearing events
+        assert result.token_usage is not None
+        assert result.token_usage["prompt"] == 20  # 10 + 10
+        assert result.token_usage["completion"] == 40  # 20 + 20
+        # cost nonzero (registry has pricing for gemini-sdk-flash)
+        assert result.cost > 0
+        # response text collected
+        assert "dashboards" in result.response.lower()
+        # toolset closed
+        assert closed == [True]
 
 
 # ---------------------------------------------------------------------------

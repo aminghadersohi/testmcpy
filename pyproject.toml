@@ -175,10 +175,15 @@ server = [
     # Pinned to 0.17.x — the minor that introduced the agents.mcp /
     # agents.models.openai_provider / agents.run_config import paths we rely on.
     "openai-agents>=0.17,<0.18",
+    # google-adk provides GeminiSDKProvider with native MCP support via McpToolset.
+    # Pinned to 2.x — the version that introduced StreamableHTTPConnectionParams.
+    # Transitively pulls google-genai>=2.4,<3 and mcp>=1.24,<2 (already pinned).
+    "google-adk>=2.0.0,<3.0.0",
 ]
 sdk = [
     "claude-agent-sdk>=0.2.0,<1.0.0",
     "openai-agents>=0.17,<0.18",
+    "google-adk>=2.0.0,<3.0.0",
 ]
 tui = [
     "textual>=0.85.0",
@@ -202,6 +207,7 @@ all = [
     "websockets>=14.0,<17.0",
     "claude-agent-sdk>=0.2.0,<1.0.0",
     "openai-agents>=0.17,<0.18",
+    "google-adk>=2.0.0,<3.0.0",
     "textual>=0.85.0",
     "boto3>=1.28.0",
 ]

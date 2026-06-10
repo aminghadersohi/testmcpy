@@ -1877,6 +1877,31 @@ class ClaudeSDKProvider(BaseSDKProvider):
             server_config["headers"] = dict(self._mcp_headers)
         self._mcp_server_config = server_config
 
+    @staticmethod
+    def _build_clean_env(source_env: dict[str, str] | None = None) -> dict[str, str]:
+        """Build the subprocess env handed to the Claude CLI.
+
+        Inherits the current process env but:
+        - Strips Claude Code session vars that would prevent nested CLI spawning.
+        - Clears ``ANTHROPIC_API_KEY`` so the CLI uses the Claude Code
+          subscription instead of API credits.
+        - Sets ``IS_SANDBOX=1`` so ``--dangerously-skip-permissions`` (driven
+          by ``permission_mode="bypassPermissions"``) is honored when
+          testmcpy runs as root in a container. Recent Claude CLI versions
+          refuse that flag under root/sudo without this opt-in. Harmless
+          when not running as root.
+        """
+        if source_env is None:
+            source_env = dict(os.environ)
+        clean_env = {
+            k: v
+            for k, v in source_env.items()
+            if not k.startswith("CLAUDE_CODE") and k != "CLAUDECODE"
+        }
+        clean_env["ANTHROPIC_API_KEY"] = ""  # Force subscription usage, not API credits
+        clean_env["IS_SANDBOX"] = "1"
+        return clean_env
+
     async def _run_agent(
         self,
         prompt: str,
@@ -1930,14 +1955,21 @@ class ClaudeSDKProvider(BaseSDKProvider):
             else:
                 log("[ClaudeSDK] No MCP server config — SDK will have no MCP tools")
 
-            # Build a clean env: inherit current env but remove Claude Code
-            # session vars that prevent nested CLI spawning
-            clean_env = {
-                k: v
-                for k, v in os.environ.items()
-                if not k.startswith("CLAUDE_CODE") and k != "CLAUDECODE"
-            }
-            clean_env["ANTHROPIC_API_KEY"] = ""  # Force subscription usage, not API credits
+            # Build a clean env (see _build_clean_env for what gets stripped/added,
+            # including the IS_SANDBOX=1 opt-in required when running as root).
+            clean_env = self._build_clean_env()
+
+            # Capture the CLI's stderr so failures (e.g. the root +
+            # --dangerously-skip-permissions refusal) surface in the error
+            # message instead of being swallowed by the previous
+            # debug_stderr=None behavior. We keep a bounded buffer so a
+            # noisy CLI can't blow up memory.
+            stderr_capture: list[str] = []
+            _max_stderr_lines = 200
+
+            def _capture_stderr(line: str) -> None:
+                if len(stderr_capture) < _max_stderr_lines:
+                    stderr_capture.append(line)
 
             # Disable Claude Code's built-in tools (Bash, Read, Edit, Grep, etc.)
             # so the LLM only uses the MCP server's tools (call_tool, search_tools, etc.).
@@ -1987,7 +2019,8 @@ class ClaudeSDKProvider(BaseSDKProvider):
                 env=clean_env,
                 disallowed_tools=_builtin_tools_to_block,
                 system_prompt=system_prompt,
-                debug_stderr=None,  # Suppress CLI debug output
+                debug_stderr=None,  # Don't dump CLI debug to host stderr
+                stderr=_capture_stderr,  # Capture lines for failure diagnostics
                 # Isolate from the host machine's Claude Code config: don't read
                 # ~/.claude/settings.json (or project/local equivalents) and don't
                 # load any installed plugins. Without this, the SDK merges in the
@@ -2286,9 +2319,24 @@ class ClaudeSDKProvider(BaseSDKProvider):
                 logs=logs,
             )
         except ProcessError as e:
+            # Surface the real CLI stderr (e.g. the root + bypassPermissions
+            # refusal) instead of just "exit code 1". Prefer the stderr the
+            # SDK already attached to ProcessError; fall back to our own
+            # callback-captured buffer. Truncate to keep error payloads sane.
+            sdk_stderr = (getattr(e, "stderr", None) or "").strip()
+            captured = "\n".join(stderr_capture).strip()
+            stderr_text = sdk_stderr or captured
+            max_chars = 2000
+            if len(stderr_text) > max_chars:
+                stderr_text = stderr_text[-max_chars:]
+            if stderr_text:
+                log(f"[ClaudeSDK] CLI stderr (captured): {stderr_text}")
             log(f"[ClaudeSDK] Process error: {e}")
+            response_msg = f"Error: Claude CLI process failed: {e}"
+            if stderr_text and stderr_text not in str(e):
+                response_msg = f"{response_msg}\nCLI stderr:\n{stderr_text}"
             return SDKRunResult(
-                response_text=f"Error: Claude CLI process failed: {e}",
+                response_text=response_msg,
                 logs=logs,
             )
         except CLIConnectionError as e:

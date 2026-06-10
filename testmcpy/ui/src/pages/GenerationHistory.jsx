@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react'
+import { formatCost } from '../utils/formatters'
 import {
   History,
   Clock,
@@ -136,11 +137,6 @@ function GenerationHistory() {
     if (!ts) return '-'
     const date = new Date(ts)
     return date.toLocaleString()
-  }
-
-  const formatCost = (cost) => {
-    if (!cost) return '$0.0000'
-    return `$${cost.toFixed(4)}`
   }
 
   return (

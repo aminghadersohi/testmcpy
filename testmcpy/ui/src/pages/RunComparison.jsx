@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react'
+import { formatDurationMs, formatCost, formatTokens } from '../utils/formatters'
 import {
   GitCompare,
   Loader2,
@@ -28,25 +29,6 @@ import {
   Cell,
   ResponsiveContainer,
 } from 'recharts'
-
-function formatDuration(ms) {
-  if (!ms) return '-'
-  if (ms >= 1000) return `${(ms / 1000).toFixed(1)}s`
-  return `${Math.round(ms)}ms`
-}
-
-function formatCost(cost) {
-  if (!cost) return '$0.00'
-  if (cost < 0.01) return `$${cost.toFixed(4)}`
-  return `$${cost.toFixed(2)}`
-}
-
-function formatTokens(tokens) {
-  if (!tokens) return '0'
-  if (tokens >= 1000000) return `${(tokens / 1000000).toFixed(1)}M`
-  if (tokens >= 1000) return `${(tokens / 1000).toFixed(0)}K`
-  return tokens.toString()
-}
 
 function RunComparison() {
   const [runs, setRuns] = useState([])
@@ -520,7 +502,7 @@ function RunComparison() {
                             )}
                             {cell?.duration_ms != null && (
                               <div className="text-[10px] text-text-tertiary mt-0.5 flex items-center justify-center gap-0.5">
-                                <Clock size={8} /> {formatDuration(cell.duration_ms)}
+                                <Clock size={8} /> {formatDurationMs(cell.duration_ms)}
                               </div>
                             )}
                             {cell?.cost_usd > 0 && (
@@ -568,7 +550,7 @@ function RunComparison() {
                           )}
                           {col.total_duration_ms > 0 && (
                             <div className="text-[10px] text-text-tertiary mt-0.5">
-                              {formatDuration(col.total_duration_ms)} total
+                              {formatDurationMs(col.total_duration_ms)} total
                             </div>
                           )}
                         </td>

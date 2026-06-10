@@ -3,6 +3,7 @@ import { useSearchParams } from 'react-router-dom'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import TraceView from '../components/TraceView'
+import { formatDate, formatDuration, formatCost, formatTokens } from '../utils/formatters'
 import {
   LineChart,
   Line,
@@ -42,31 +43,6 @@ import {
 } from 'lucide-react'
 
 const AUTO_REFRESH_INTERVAL = 10000
-
-function formatDate(timestamp) {
-  if (!timestamp) return '-'
-  const date = new Date(timestamp)
-  return date.toLocaleString()
-}
-
-function formatDuration(seconds) {
-  if (!seconds) return '0s'
-  if (seconds < 0.1) return `${(seconds * 1000).toFixed(0)}ms`
-  return `${seconds.toFixed(1)}s`
-}
-
-function formatCost(cost) {
-  if (!cost) return '$0.00'
-  if (cost < 0.01) return `$${cost.toFixed(4)}`
-  return `$${cost.toFixed(2)}`
-}
-
-function formatTokens(tokens) {
-  if (!tokens) return '0'
-  if (tokens >= 1000000) return `${(tokens / 1000000).toFixed(1)}M`
-  if (tokens >= 1000) return `${(tokens / 1000).toFixed(0)}K`
-  return tokens.toString()
-}
 
 function getPassRate(passed, total) {
   if (!total) return 0

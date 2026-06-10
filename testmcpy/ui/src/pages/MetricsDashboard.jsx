@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react'
+import { formatCost } from '../utils/formatters'
 import {
   BarChart3,
   TrendingUp,
@@ -31,12 +32,6 @@ function formatNumber(n) {
   if (n >= 1000000) return `${(n / 1000000).toFixed(1)}M`
   if (n >= 1000) return `${(n / 1000).toFixed(1)}K`
   return n.toString()
-}
-
-function formatCost(cost) {
-  if (!cost) return '$0.00'
-  if (cost < 0.01) return `$${cost.toFixed(4)}`
-  return `$${cost.toFixed(2)}`
 }
 
 function formatMs(ms) {

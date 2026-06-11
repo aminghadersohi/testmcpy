@@ -1404,7 +1404,7 @@ function MCPProfiles({ selectedProfiles = [], onSelectProfiles, hideHeader = fal
         <div className="p-4 border-b border-border bg-surface-elevated">
           <div className="flex items-center justify-between">
             <div>
-              <h1 className="text-xl md:text-2xl font-bold">MCP Profiles</h1>
+              <h1 className="text-xl md:text-2xl font-semibold text-text-primary">MCP Profiles</h1>
               <p className="text-text-secondary mt-1 text-base">
                 Manage and configure MCP service profiles
               </p>

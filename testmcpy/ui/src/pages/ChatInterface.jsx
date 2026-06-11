@@ -761,7 +761,7 @@ ${evaluators}
       <div className="p-4 border-b border-border bg-surface-elevated">
         <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
           <div>
-            <h1 className="text-xl md:text-2xl font-bold">Chat Interface</h1>
+            <h1 className="text-xl md:text-2xl font-semibold text-text-primary">Chat Interface</h1>
             <p className="text-text-secondary mt-1 text-base">
               Interactive chat with LLM using MCP tools
               {messages.length > 0 && (

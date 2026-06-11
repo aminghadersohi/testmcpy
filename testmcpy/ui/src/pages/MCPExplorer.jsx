@@ -649,7 +649,7 @@ function MCPExplorer({ selectedProfiles = [] }) {
     return (
       <div className="h-full flex flex-col">
         <div className="p-4 border-b border-border bg-surface-elevated">
-          <h1 className="text-xl md:text-2xl font-bold">Explorer</h1>
+          <h1 className="text-xl md:text-2xl font-semibold text-text-primary">Explorer</h1>
           <div className="flex items-center gap-2 mt-1">
             <LoadingSpinner size={16} />
             <p className="text-text-secondary text-sm md:text-base">
@@ -680,7 +680,7 @@ function MCPExplorer({ selectedProfiles = [] }) {
     return (
       <div className="h-full flex flex-col">
         <div className="p-4 border-b border-border bg-surface-elevated">
-          <h1 className="text-2xl font-bold">Explorer</h1>
+          <h1 className="text-xl md:text-2xl font-semibold text-text-primary">Explorer</h1>
           <p className="text-text-secondary mt-1 text-base">
             No MCP server connected
           </p>
@@ -732,7 +732,7 @@ function MCPExplorer({ selectedProfiles = [] }) {
     return (
       <div className="h-full flex flex-col">
         <div className="p-4 border-b border-border bg-surface-elevated">
-          <h1 className="text-2xl font-bold">Explorer</h1>
+          <h1 className="text-xl md:text-2xl font-semibold text-text-primary">Explorer</h1>
           <p className="text-text-secondary mt-1 text-base">
             Failed to load MCP data
           </p>
@@ -761,7 +761,7 @@ function MCPExplorer({ selectedProfiles = [] }) {
       <div className="p-4 border-b border-border bg-surface-elevated">
         <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3 mb-3">
           <div>
-            <h1 className="text-xl md:text-2xl font-bold">Explorer</h1>
+            <h1 className="text-xl md:text-2xl font-semibold text-text-primary">Explorer</h1>
             <p className="text-text-secondary mt-1 text-sm md:text-base">
               Browse tools, resources, and prompts from your MCP service
               {batchMode && selectedTools.size > 0 && (

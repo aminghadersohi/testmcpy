@@ -88,7 +88,7 @@ function Configuration() {
       <div className="p-4 md:p-8 border-b border-border bg-surface-elevated">
         <div className="flex items-center justify-between">
           <div>
-            <h1 className="text-xl md:text-2xl font-bold">Configuration</h1>
+            <h1 className="text-xl md:text-2xl font-semibold text-text-primary">Configuration</h1>
             <p className="text-text-secondary mt-2 text-base">
               View current testmcpy configuration settings
             </p>

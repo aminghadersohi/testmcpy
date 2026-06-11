@@ -144,12 +144,30 @@ class TestStorage:
             ("question_results", "false_positive_rate", "FLOAT DEFAULT 0.0"),
             ("test_runs", "total_cost", "FLOAT DEFAULT 0.0"),
         ]
+        # (index name, table, columns) — indexes added after the initial
+        # schema; create_all skips existing tables so these need explicit DDL
+        index_migrations = [
+            (
+                "idx_runs_suite_config",
+                "test_runs",
+                "test_id, model, provider, mcp_profile_id, started_at",
+            ),
+            (
+                "idx_question_results_question_run",
+                "question_results",
+                "question_id, run_id",
+            ),
+        ]
         with self._engine.connect() as conn:
             for table, column, col_type in migrations:
                 result = conn.execute(text(f"PRAGMA table_info({table})"))
                 existing = {row[1] for row in result}
                 if column not in existing:
                     conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}"))
+            for index_name, table, columns in index_migrations:
+                conn.execute(
+                    text(f"CREATE INDEX IF NOT EXISTS {index_name} ON {table} ({columns})")
+                )
             conn.commit()
 
     def _session(self) -> Session:

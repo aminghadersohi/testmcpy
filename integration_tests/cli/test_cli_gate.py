@@ -10,6 +10,10 @@ from testmcpy.src.test_runner import TestResult
 def suite_file(tmp_path, monkeypatch):
     """Single-test suite in an isolated cwd so run artifacts stay in tmp."""
     monkeypatch.chdir(tmp_path)
+    # In real CI this env var points at the live job summary — without
+    # this, every invoke here appends a fake report block to it. The
+    # step-summary test re-sets it explicitly.
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
     path = tmp_path / "suite.yaml"
     path.write_text(
         yaml.dump(

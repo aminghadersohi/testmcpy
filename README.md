@@ -500,7 +500,7 @@ jobs:
   block_on_regression: true # fail on baseline regressions
   ```
 
-- **`--junit-xml`** emits JUnit XML for your CI's native test summary UI (GitHub, Jenkins, GitLab, CircleCI).
+- **`--junit-xml`** emits JUnit XML for CI systems that ingest it natively (Jenkins, GitLab, CircleCI, Buildkite). On GitHub Actions, pair it with an action like `dorny/test-reporter` — or just rely on the next bullet.
 - Inside GitHub Actions, the markdown eval report is **automatically appended to the job summary** — results render on the workflow run page with zero extra steps.
 
 Or use the bundled reusable Action — adds a sticky PR comment, JUnit artifact upload, and structured outputs (`pass-rate`, `gate_passed`):

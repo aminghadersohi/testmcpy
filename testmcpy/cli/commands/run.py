@@ -606,6 +606,11 @@ def run(
 
         if dry_run:
             console.print("[yellow]DRY RUN - Not executing tests[/yellow]")
+            if gate_enabled:
+                console.print(
+                    "[yellow]Note: --gate is skipped during --dry-run "
+                    "(no results to evaluate); exit code is 0[/yellow]"
+                )
             for i, test in enumerate(test_cases, 1):
                 if test.is_auth_only:
                     auth_type = test.auth.get("type", "unknown") if test.auth else "unknown"
@@ -880,29 +885,39 @@ def run(
         # Generate eval report if requested (.md/.json/.html via
         # ReportGenerator, .xml as JUnit for CI systems)
         suite_name = test_path.stem if test_path.is_file() else test_path.name
-        if report:
-            if report.suffix == ".xml":
-                from testmcpy.src.emitters import to_junit_xml
 
-                report.write_text(to_junit_xml([r.to_dict() for r in results], suite_name))
-                console.print(f"\n[green]JUnit report saved to {report}[/green]")
-            else:
+        def _write_junit(path: Path) -> None:
+            from testmcpy.src.emitters import to_junit_xml
+
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(to_junit_xml([r.to_dict() for r in results], suite_name))
+            console.print(f"[green]JUnit report saved to {path}[/green]")
+
+        # Built lazily, shared by the --report branch and the step summary
+        # so the generator isn't constructed twice for the same data.
+        report_gen = None
+
+        def _report_generator():
+            nonlocal report_gen
+            if report_gen is None:
                 from testmcpy.src.report_generator import ReportGenerator
 
-                gen = ReportGenerator.from_test_results(
+                report_gen = ReportGenerator.from_test_results(
                     suite_name=suite_name,
                     results=results,
                     title=report_title or suite_name,
                 )
-                saved_path = gen.save(str(report))
+            return report_gen
+
+        if report:
+            if report.suffix.lower() == ".xml":
+                _write_junit(report)
+            else:
+                saved_path = _report_generator().save(str(report))
                 console.print(f"\n[green]Eval report saved to {saved_path}[/green]")
 
         if junit_xml:
-            from testmcpy.src.emitters import to_junit_xml
-
-            junit_xml.parent.mkdir(parents=True, exist_ok=True)
-            junit_xml.write_text(to_junit_xml([r.to_dict() for r in results], suite_name))
-            console.print(f"[green]JUnit report saved to {junit_xml}[/green]")
+            _write_junit(junit_xml)
 
         # Inside GitHub Actions, append the markdown report to the job
         # summary so results show on the workflow run page without any
@@ -911,18 +926,13 @@ def run(
 
         step_summary = os.environ.get("GITHUB_STEP_SUMMARY")
         if step_summary:
+            # Reporting must never fail a completed run — and a crash here
+            # would surface only inside CI, the worst place to debug it.
             try:
-                from testmcpy.src.report_generator import ReportGenerator
-
-                gen = ReportGenerator.from_test_results(
-                    suite_name=suite_name,
-                    results=results,
-                    title=report_title or suite_name,
-                )
                 with open(step_summary, "a") as f:
-                    f.write(gen.generate_markdown() + "\n")
+                    f.write(_report_generator().generate_markdown() + "\n")
                 console.print("[dim]Report appended to GitHub step summary[/dim]")
-            except OSError as e:
+            except Exception as e:  # noqa: BLE001
                 console.print(f"[dim]Note: Could not write step summary: {e}[/dim]")
 
         # CI gate: evaluated last so results are already saved for the UI

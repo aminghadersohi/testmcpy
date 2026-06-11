@@ -167,7 +167,10 @@ async def list_test_runs(
                 "timestamp": run["started_at"],
                 "provider": run["provider"],
                 "model": run["model"],
-                "mcp_profile": run.get("mcp_profile_id"),
+                # Fallback for runs old enough to only carry the profile in
+                # metadata — keeps list and detail views consistent.
+                "mcp_profile": run.get("mcp_profile_id")
+                or (run.get("metadata") or {}).get("mcp_profile"),
                 "llm_profile": run.get("llm_profile_id"),
                 "version": str(run["test_version"]),
                 "total_tests": run["total_questions"],

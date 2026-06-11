@@ -923,6 +923,35 @@ class TestStorage:
                 },
             }
 
+    @staticmethod
+    def _apply_run_filters(
+        query,
+        test_id: str | None = None,
+        model: str | None = None,
+        provider: str | None = None,
+        mcp_profile: str | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+    ):
+        """Shared filter chain for list_runs/count_runs.
+
+        Keeping it in one place means a filter added for the list can't
+        silently desync the pager's total/has_more.
+        """
+        if test_id:
+            query = query.filter(TestRunModel.suite_id == test_id)
+        if model:
+            query = query.filter(TestRunModel.model == model)
+        if provider:
+            query = query.filter(TestRunModel.provider == provider)
+        if mcp_profile:
+            query = query.filter(TestRunModel.mcp_profile_id == mcp_profile)
+        if date_from:
+            query = query.filter(TestRunModel.started_at >= date_from)
+        if date_to:
+            query = query.filter(TestRunModel.started_at <= date_to)
+        return query
+
     def list_runs(
         self,
         test_id: str | None = None,
@@ -965,18 +994,15 @@ class TestStorage:
                 TestRunModel.run_id == QuestionResultModel.run_id,
             )
 
-            if test_id:
-                query = query.filter(TestRunModel.suite_id == test_id)
-            if model:
-                query = query.filter(TestRunModel.model == model)
-            if provider:
-                query = query.filter(TestRunModel.provider == provider)
-            if mcp_profile:
-                query = query.filter(TestRunModel.mcp_profile_id == mcp_profile)
-            if date_from:
-                query = query.filter(TestRunModel.started_at >= date_from)
-            if date_to:
-                query = query.filter(TestRunModel.started_at <= date_to)
+            query = self._apply_run_filters(
+                query,
+                test_id=test_id,
+                model=model,
+                provider=provider,
+                mcp_profile=mcp_profile,
+                date_from=date_from,
+                date_to=date_to,
+            )
 
             # Sorting — validate against allowlist
             allowed_sort = {
@@ -1034,19 +1060,15 @@ class TestStorage:
     ) -> int:
         """Count runs matching the same filters as list_runs (for pagination)."""
         with self._session() as session:
-            query = session.query(func.count(TestRunModel.run_id))
-            if test_id:
-                query = query.filter(TestRunModel.suite_id == test_id)
-            if model:
-                query = query.filter(TestRunModel.model == model)
-            if provider:
-                query = query.filter(TestRunModel.provider == provider)
-            if mcp_profile:
-                query = query.filter(TestRunModel.mcp_profile_id == mcp_profile)
-            if date_from:
-                query = query.filter(TestRunModel.started_at >= date_from)
-            if date_to:
-                query = query.filter(TestRunModel.started_at <= date_to)
+            query = self._apply_run_filters(
+                session.query(func.count(TestRunModel.run_id)),
+                test_id=test_id,
+                model=model,
+                provider=provider,
+                mcp_profile=mcp_profile,
+                date_from=date_from,
+                date_to=date_to,
+            )
             return query.scalar() or 0
 
     def get_filter_options(self) -> dict[str, list[str]]:

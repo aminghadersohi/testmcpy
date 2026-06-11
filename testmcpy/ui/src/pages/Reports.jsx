@@ -756,7 +756,12 @@ function Reports() {
       if (res.ok) {
         const data = await res.json()
         const next = data.runs || []
-        setTestRuns(prev => [...prev, ...next])
+        // New runs arriving between pages shift offset-based pagination —
+        // dedupe by run_id so rows (and React keys) never repeat.
+        setTestRuns(prev => {
+          const seen = new Set(prev.map(r => r.run_id))
+          return [...prev, ...next.filter(r => !seen.has(r.run_id))]
+        })
         loadedCountRef.current += next.length
         setRunsTotal(data.total ?? loadedCountRef.current)
       }

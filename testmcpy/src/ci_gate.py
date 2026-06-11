@@ -52,18 +52,41 @@ class CIGateConfig:
         }
 
 
-def load_gate_config(path: str = ".testmcpy-gate.yaml") -> CIGateConfig:
-    """Load gate config from YAML file."""
+def _load_yaml(path: str) -> dict:
     config_path = Path(path)
     if not config_path.exists():
-        return CIGateConfig()
-
+        return {}
     with open(config_path) as f:
-        data = yaml.safe_load(f) or {}
+        return yaml.safe_load(f) or {}
+
+
+def load_gate_config(path: str = ".testmcpy-gate.yaml") -> CIGateConfig:
+    """Load the evals gate config from YAML.
+
+    Supports both layouts:
+      - flat (legacy): min_pass_rate / max_failures / ... at top level
+      - sectioned (unified gate): the same keys under an `evals:` block,
+        alongside `conformance:` / `usability:` / `security:` sections
+        consumed by their respective commands via load_gate_section().
+    """
+    data = _load_yaml(path)
+    evals = data.get("evals") if isinstance(data.get("evals"), dict) else data
 
     return CIGateConfig(
-        min_pass_rate=float(data.get("min_pass_rate", 80.0)),
-        max_failures=data.get("max_failures"),
-        required_tests=data.get("required_tests") or [],
-        block_on_regression=data.get("block_on_regression", True),
+        min_pass_rate=float(evals.get("min_pass_rate", 80.0)),
+        max_failures=evals.get("max_failures"),
+        required_tests=evals.get("required_tests") or [],
+        block_on_regression=evals.get("block_on_regression", True),
     )
+
+
+def load_gate_section(section: str, path: str = ".testmcpy-gate.yaml") -> dict:
+    """Read one section of the unified gate file.
+
+    Sections: `conformance` (required, fail_on_warning), `usability`
+    (min_score), `security` (max_severity). Returns {} when the file or
+    section is absent so callers fall back to their CLI defaults.
+    """
+    data = _load_yaml(path)
+    value = data.get(section)
+    return value if isinstance(value, dict) else {}

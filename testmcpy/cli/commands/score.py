@@ -82,10 +82,22 @@ def score(
     min_score: Optional[float] = typer.Option(
         None, "--min-score", help="Exit 1 if the score is below this value (CI gate)"
     ),
+    gate: bool = typer.Option(
+        False,
+        "--gate",
+        help="Read usability.min_score from .testmcpy-gate.yaml (unified gate)",
+    ),
 ):
     """Grade an MCP server's tool surface for LLM usability (0-100, A-F)."""
     from testmcpy.src.mcp_client import MCPError
     from testmcpy.src.usability_score import score_tools
+
+    if gate and min_score is None:
+        from testmcpy.src.ci_gate import load_gate_section
+
+        section_value = load_gate_section("usability").get("min_score")
+        if section_value is not None:
+            min_score = float(section_value)
 
     effective_mcp_url, auth_config, effective_profile = _resolve_connection(mcp_url, profile)
 
@@ -129,7 +141,7 @@ def score(
 
     if min_score is not None and result.score < min_score:
         if output_format != "json":
-            console.print(f"\n[red]Score {result.score} is below --min-score {min_score}[/red]")
+            console.print(f"\n[red]Score {result.score} is below the minimum of {min_score}[/red]")
         raise typer.Exit(1)
 
 

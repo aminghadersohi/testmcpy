@@ -1,0 +1,26 @@
+# Unified quality gate for testmcpy — copy to .testmcpy-gate.yaml in
+# your repo root. One file, one exit code per command:
+#
+#   testmcpy run tests/ --gate          # enforces `evals`
+#   testmcpy conformance <url> --gate   # enforces `conformance`
+#   testmcpy score <url> --gate         # enforces `usability`
+#   testmcpy scan <url> --gate          # enforces `security`
+#
+# Every section is optional; absent sections fall back to each
+# command's CLI defaults. Flat top-level keys (min_pass_rate etc.)
+# remain supported as a legacy alias for the `evals` section.
+
+evals:
+  min_pass_rate: 85.0        # % of tests that must pass
+  max_failures: 3            # absolute failure budget (omit for no limit)
+  required_tests: []         # test names that must always pass
+  block_on_regression: true  # fail when a baseline comparison regresses
+
+conformance:
+  fail_on_warning: false     # also fail on WARNING-level spec checks
+
+usability:
+  min_score: 70              # minimum LLM-usability score (0-100)
+
+security:
+  max_severity: medium       # fail on findings above this (low|medium|high|critical)

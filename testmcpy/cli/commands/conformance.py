@@ -73,8 +73,18 @@ def conformance(
     fail_on_warning: bool = typer.Option(
         False, "--fail-on-warning", help="Exit non-zero on WARNING checks too"
     ),
+    gate: bool = typer.Option(
+        False,
+        "--gate",
+        help="Read conformance settings from .testmcpy-gate.yaml (unified gate)",
+    ),
 ):
     """Run the official MCP spec conformance suite against a server."""
+    if gate:
+        from testmcpy.src.ci_gate import load_gate_section
+
+        section = load_gate_section("conformance")
+        fail_on_warning = bool(section.get("fail_on_warning", fail_on_warning))
     npx = shutil.which("npx")
     if not npx:
         console.print(

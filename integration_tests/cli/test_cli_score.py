@@ -84,7 +84,7 @@ def test_min_score_gates_exit_code(runner, cli_app, fake_tools):
     fake_tools(BROKEN_TOOLS)
     failing = runner.invoke(cli_app, ["score", "--mcp-url", "http://x/mcp", "--min-score", "90"])
     assert failing.exit_code == 1
-    assert "below --min-score" in failing.stdout
+    assert "below the minimum" in failing.stdout
 
     passing = runner.invoke(cli_app, ["score", "--mcp-url", "http://x/mcp", "--min-score", "10"])
     assert passing.exit_code == 0

@@ -6,7 +6,7 @@ TESTMCPY_CHAT_OAUTH_LOGIN-gated interactive OAuth re-login path.
 """
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 OAUTH_ERROR = ValueError(
     "No usable cached OAuth token for http://mock-mcp:3000/mcp. Authenticate the MCP profile first."
@@ -148,6 +148,54 @@ class TestChatOAuthLoginFlag:
         assert "API key missing" in res.json()["detail"]
         # Awaited once by the endpoint's normal client resolution — no re-login.
         assert relogin_client.await_count == 1
+
+    def test_flag_on_tool_execution_uses_refreshed_client(self, client, monkeypatch):
+        """After re-login the old clients are closed; tools must run on the new ones."""
+        monkeypatch.delenv("TESTMCPY_CHAT_OAUTH_LOGIN", raising=False)  # default ON
+
+        tool = MagicMock()
+        tool.name = "health_check"
+        tool.description = "Check health"
+        tool.input_schema = {"type": "object", "properties": {}}
+
+        tool_result = MagicMock()
+        tool_result.content = "OK"
+        tool_result.is_error = False
+        tool_result.error_message = None
+
+        old_client = AsyncMock()
+        old_client.base_url = "http://mock-mcp:3000/mcp"
+        old_client.auth_config = {"type": "oauth", "oauth_auto_discover": True}
+        old_client.list_tools.return_value = [tool]
+        new_client = AsyncMock()
+        new_client.base_url = "http://mock-mcp:3000/mcp"
+        new_client.auth_config = {"type": "oauth", "oauth_auto_discover": True}
+        new_client.call_tool.return_value = tool_result
+
+        failing = make_fake_provider(init_error=OAUTH_ERROR)
+        working = make_fake_provider()
+        working.generate_with_tools.return_value = SimpleNamespace(
+            response="done",
+            tool_calls=[{"name": "health_check", "arguments": {}, "id": "tc1"}],
+            thinking=None,
+            token_usage=None,
+            cost=0.0,
+            duration=0.1,
+        )
+        with (
+            patch(
+                "testmcpy.server.api.create_llm_provider",
+                side_effect=[failing, working],
+            ),
+            patch(
+                "testmcpy.server.api.get_mcp_client_for_server",
+                AsyncMock(side_effect=[old_client, new_client]),
+            ),
+        ):
+            res = client.post("/api/chat", json=CHAT_BODY)
+        assert res.status_code == 200
+        new_client.call_tool.assert_awaited_once()
+        old_client.call_tool.assert_not_awaited()
 
 
 class TestReloginBackoffInterplay:

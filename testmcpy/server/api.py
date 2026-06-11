@@ -363,7 +363,7 @@ def _chat_oauth_login_enabled() -> bool:
     )
 
 
-async def _relogin_oauth_servers(server_keys: list[str]) -> None:
+async def _relogin_oauth_servers(server_keys: list[str]) -> dict[str, MCPClient]:
     """Deliberate interactive re-auth for the given "profileId:mcpName" keys.
 
     Drops cached clients WITHOUT recording back-off, clears any pre-existing
@@ -371,12 +371,40 @@ async def _relogin_oauth_servers(server_keys: list[str]) -> None:
     oauth_auto_discover opens the browser OAuth flow and caches the token via
     fastmcp FileTokenStorage; duplicate popups are prevented by the per-key
     init locks.
+
+    Returns the fresh clients keyed by cache key so callers can replace any
+    references to the old, now-closed client objects.
     """
+    new_clients: dict[str, MCPClient] = {}
     for cache_key in server_keys:
         await clear_cached_client(cache_key, record_failure=False)
         _clear_failure(cache_key)  # earlier failures must not block deliberate re-auth
         profile_id, mcp_name = cache_key.split(":", 1)
-        await get_mcp_client_for_server(profile_id, mcp_name)
+        client = await get_mcp_client_for_server(profile_id, mcp_name)
+        if client:
+            new_clients[cache_key] = client
+    return new_clients
+
+
+def _refresh_client_refs(
+    new_clients: dict[str, MCPClient],
+    clients_to_use: list[tuple[str, str, MCPClient]],
+    tool_to_client: dict[str, tuple[MCPClient, str, str]],
+) -> tuple[list[tuple[str, str, MCPClient]], dict[str, tuple[MCPClient, str, str]]]:
+    """Swap re-logged-in clients into the chat endpoints' lookup structures.
+
+    After _relogin_oauth_servers the old client objects are closed; tool
+    execution through tool_to_client must use the replacements.
+    """
+    refreshed_clients = [
+        (pid, name, new_clients.get(f"{pid}:{name}", client))
+        for pid, name, client in clients_to_use
+    ]
+    refreshed_tools = {
+        tool: (new_clients.get(f"{pid}:{name}", client), pid, name)
+        for tool, (client, pid, name) in tool_to_client.items()
+    }
+    return refreshed_clients, refreshed_tools
 
 
 def is_auth_error(error_msg: str) -> bool:
@@ -1000,7 +1028,13 @@ async def chat(request: ChatRequest) -> ChatResponse:
             if not (_chat_oauth_login_enabled() and _OAUTH_TOKEN_ERROR in str(e)):
                 raise
             print("[Chat] No cached OAuth token; triggering interactive OAuth login...")
-            await _relogin_oauth_servers(accessed_servers)
+            new_clients = await _relogin_oauth_servers(accessed_servers)
+            # The old client objects are closed now — swap in the replacements
+            # so tool execution doesn't hit a closed client.
+            clients_to_use, tool_to_client = _refresh_client_refs(
+                new_clients, clients_to_use, tool_to_client
+            )
+            provider_kwargs.update(_primary_mcp_provider_kwargs(clients_to_use))
             llm_provider = create_llm_provider(provider, model, **provider_kwargs)
             # Single retry; a second failure falls to the existing handlers.
             await llm_provider.initialize()
@@ -1282,7 +1316,13 @@ async def chat_stream(request: ChatRequest):
                 if not (_chat_oauth_login_enabled() and _OAUTH_TOKEN_ERROR in str(e)):
                     raise
                 yield send_event("status", "Waiting for OAuth login in browser...")
-                await _relogin_oauth_servers(accessed_servers)
+                new_clients = await _relogin_oauth_servers(accessed_servers)
+                # The old client objects are closed now — swap in the replacements
+                # so tool execution doesn't hit a closed client.
+                clients_to_use, tool_to_client = _refresh_client_refs(
+                    new_clients, clients_to_use, tool_to_client
+                )
+                provider_kwargs.update(_primary_mcp_provider_kwargs(clients_to_use))
                 llm_provider = create_llm_provider(provider, model, **provider_kwargs)
                 # Single retry; a second failure falls to the existing handlers.
                 await llm_provider.initialize()

@@ -151,6 +151,22 @@ def _get_init_lock(cache_key: str) -> asyncio.Lock:
     return _client_init_locks[cache_key]
 
 
+def _primary_mcp_provider_kwargs(
+    clients_to_use: list[tuple[str, str, MCPClient]],
+) -> dict[str, Any]:
+    """mcp_url/auth kwargs from the FIRST selected MCP client.
+
+    SDK providers support a single MCP server; the Chat UI sends exactly one
+    "profileId:mcpName". Without these kwargs the providers fall back to the
+    DEFAULT profile's URL/auth, breaking chat for any other selected profile.
+    create_llm_provider filters these out for providers that don't accept them.
+    """
+    if not clients_to_use:
+        return {}
+    _profile_id, _mcp_name, client = clients_to_use[0]
+    return {"mcp_url": client.base_url, "auth": client.auth_config}
+
+
 async def get_mcp_clients_for_profile(profile_id: str) -> list[tuple[str, MCPClient]]:
     """
     Get or create MCP clients for all MCP servers in a profile.
@@ -936,6 +952,7 @@ async def chat(request: ChatRequest) -> ChatResponse:
         provider_kwargs = {}
         if api_key:
             provider_kwargs["api_key"] = api_key
+        provider_kwargs.update(_primary_mcp_provider_kwargs(clients_to_use))
         llm_provider = create_llm_provider(provider, model, **provider_kwargs)
         print("[Chat] Initializing LLM provider...")
         await llm_provider.initialize()
@@ -1209,6 +1226,7 @@ async def chat_stream(request: ChatRequest):
             provider_kwargs: dict = {}
             if api_key:
                 provider_kwargs["api_key"] = api_key
+            provider_kwargs.update(_primary_mcp_provider_kwargs(clients_to_use))
             llm_provider = create_llm_provider(provider, model, **provider_kwargs)
             await llm_provider.initialize()
 

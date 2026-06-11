@@ -21,14 +21,20 @@ import httpx
 # Import MCP components (we'll handle the import error gracefully)
 try:
     from ..config import get_config
-    from .mcp_client import MCPClient, MCPTool, MCPToolCall, MCPToolResult
+    from .mcp_client import MCPClient, MCPError, MCPTool, MCPToolCall, MCPToolResult
 except ImportError:
     # Fallback for when running as script
     import os
     import sys
 
     sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-    from mcp_client import MCPClient, MCPTool, MCPToolCall, MCPToolResult
+    from mcp_client import (  # type: ignore[no-redef]
+        MCPClient,
+        MCPError,
+        MCPTool,
+        MCPToolCall,
+        MCPToolResult,
+    )
 
     # Config will fall back to environment variables
     def get_config():
@@ -37,6 +43,9 @@ except ImportError:
                 return os.getenv(key, default)
 
         return FallbackConfig()
+
+
+_logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -101,6 +110,28 @@ class LLMProvider(ABC):
     async def close(self):
         """Clean up resources."""
         pass
+
+
+def _estimate_cost_with_fallback(
+    model: str,
+    prompt_tokens: int,
+    completion_tokens: int,
+    fallback_input_per_1m: float,
+    fallback_output_per_1m: float,
+) -> float:
+    """Estimate cost in USD from model-registry pricing.
+
+    Falls back to the caller-supplied per-1M rates when the model is not in
+    the registry, so unknown/custom models keep their previous estimates.
+    Distinct from ``BaseSDKProvider._estimate_cost_from_registry``, which
+    returns 0.0 for unknown models and resolves ``self._registry_model_id``.
+    """
+    from .model_registry import get_model  # noqa: PLC0415
+
+    info = get_model(model)
+    in_rate = info.input_price_per_1m if info else fallback_input_per_1m
+    out_rate = info.output_price_per_1m if info else fallback_output_per_1m
+    return (prompt_tokens * in_rate + completion_tokens * out_rate) / 1_000_000
 
 
 class OllamaProvider(LLMProvider):
@@ -481,8 +512,13 @@ class OpenAIProvider(LLMProvider):
                 "total": usage.get("total_tokens", 0),
             }
 
-            # Estimate cost (GPT-4 pricing as example)
-            cost = (token_usage["prompt"] * 0.03 + token_usage["completion"] * 0.06) / 1000
+            cost = _estimate_cost_with_fallback(
+                self.model,
+                token_usage["prompt"],
+                token_usage["completion"],
+                fallback_input_per_1m=30.0,
+                fallback_output_per_1m=60.0,
+            )
 
             duration = time.time() - start_time
             tti_ms = int(duration * 1000)  # Non-streaming: TTI = total duration
@@ -609,8 +645,14 @@ class OpenRouterProvider(OpenAIProvider):
             if "usage" in result and "cost" in result["usage"]:
                 cost = float(result["usage"]["cost"])
             else:
-                # Fallback estimate
-                cost = (token_usage["prompt"] * 0.03 + token_usage["completion"] * 0.06) / 1000
+                # Fallback estimate when OpenRouter omits usage cost
+                cost = _estimate_cost_with_fallback(
+                    self.model,
+                    token_usage["prompt"],
+                    token_usage["completion"],
+                    fallback_input_per_1m=30.0,
+                    fallback_output_per_1m=60.0,
+                )
 
             duration = time.time() - start_time
             tti_ms = int(duration * 1000)
@@ -857,12 +899,12 @@ class ToolDiscoveryService:
             return tool_schemas
 
         except Exception as e:
-            raise Exception(f"Failed to discover MCP tools: {e}")
+            raise MCPError(f"Failed to discover MCP tools: {e}") from e
 
     async def execute_tool_call(self, tool_call: dict[str, Any]) -> MCPToolResult:
         """Execute tool call via local MCP client."""
         if not self._mcp_client:
-            raise Exception("MCP client not initialized")
+            raise MCPError("MCP client not initialized")
 
         mcp_call = MCPToolCall(
             name=tool_call["name"],
@@ -1063,12 +1105,16 @@ class AnthropicProvider(LLMProvider):
                     )
 
             # Execute tool calls locally (don't append to response_text - tool results shown separately in UI)
+            # call_tool() reports tool failures as MCPToolResult(is_error=True);
+            # only client-not-initialized or a malformed tool_call dict raise.
             for tool_call in tool_calls:
                 try:
                     await self.tool_discovery.execute_tool_call(tool_call)
                     # Tool results are returned separately, not appended to response text
-                except Exception:
-                    pass  # Errors are handled by the tool execution
+                except (MCPError, KeyError) as e:
+                    _logger.warning(
+                        "Tool call %s failed locally: %s", tool_call.get("name", "?"), e
+                    )
 
             # Calculate usage and cost
             usage = result.get("usage", {})
@@ -1080,8 +1126,13 @@ class AnthropicProvider(LLMProvider):
                 "cache_read": usage.get("cache_read_input_tokens", 0),
             }
 
-            # Estimate cost (Claude pricing)
-            cost = (token_usage["prompt"] * 0.003 + token_usage["completion"] * 0.015) / 1000
+            cost = _estimate_cost_with_fallback(
+                self.model,
+                token_usage["prompt"],
+                token_usage["completion"],
+                fallback_input_per_1m=3.0,
+                fallback_output_per_1m=15.0,
+            )
 
             duration = time.time() - start_time
             # For non-streaming, TTI equals total duration (response arrives all at once)
@@ -1133,6 +1184,16 @@ class AnthropicProvider(LLMProvider):
 
 
 _bedrock_logger = logging.getLogger(__name__ + ".BedrockProvider")
+
+
+def _normalize_bedrock_model_id(model: str) -> str:
+    """Map a Bedrock model id to its model-registry equivalent.
+
+    e.g. ``us.anthropic.claude-sonnet-4-20250514-v1:0`` → ``claude-sonnet-4-20250514``.
+    """
+    normalized = re.sub(r"^(us|eu|apac|global|jp)\.", "", model)
+    normalized = re.sub(r"^anthropic\.", "", normalized)
+    return re.sub(r"-v\d+(:\d+)?$", "", normalized)
 
 
 class BedrockProvider(LLMProvider):
@@ -1299,8 +1360,10 @@ class BedrockProvider(LLMProvider):
             for tool_call in tool_calls:
                 try:
                     await self.tool_discovery.execute_tool_call(tool_call)
-                except Exception:
-                    pass
+                except (MCPError, KeyError) as e:
+                    _logger.warning(
+                        "Tool call %s failed locally: %s", tool_call.get("name", "?"), e
+                    )
 
             # Calculate usage and cost
             usage = response.usage
@@ -1310,8 +1373,13 @@ class BedrockProvider(LLMProvider):
                 "total": usage.input_tokens + usage.output_tokens,
             }
 
-            # Bedrock pricing (Sonnet 4.5: $3/$15 per 1M tokens)
-            cost = (token_usage["prompt"] * 0.003 + token_usage["completion"] * 0.015) / 1000
+            cost = _estimate_cost_with_fallback(
+                _normalize_bedrock_model_id(self.model),
+                token_usage["prompt"],
+                token_usage["completion"],
+                fallback_input_per_1m=3.0,
+                fallback_output_per_1m=15.0,
+            )
 
             duration = time.time() - start_time
             tti_ms = int(duration * 1000)
@@ -1595,7 +1663,9 @@ class BaseSDKProvider(LLMProvider, ABC):
         """Estimate USD cost from ``token_usage`` and ``model_registry``
         per-1M prices. Subclasses can store a friendly registry id
         (e.g. ``"codex-o3"``) in ``self._registry_model_id`` separate from
-        the vendor-facing ``self.model`` (``"o3"``); both are tried."""
+        the vendor-facing ``self.model`` (``"o3"``); both are tried.
+        Unknown models cost 0.0 here; the non-SDK providers use module-level
+        ``_estimate_cost_with_fallback`` to keep legacy estimates instead."""
         if not token_usage:
             return 0.0
         from .model_registry import get_model  # noqa: PLC0415
@@ -3308,8 +3378,10 @@ class GeminiProvider(LLMProvider):
             for tool_call in tool_calls:
                 try:
                     await self.tool_discovery.execute_tool_call(tool_call)
-                except Exception:
-                    pass
+                except (MCPError, KeyError) as e:
+                    _logger.warning(
+                        "Tool call %s failed locally: %s", tool_call.get("name", "?"), e
+                    )
 
             # Extract usage metadata
             usage_metadata = result.get("usageMetadata", {})
@@ -3319,8 +3391,13 @@ class GeminiProvider(LLMProvider):
                 "total": usage_metadata.get("totalTokenCount", 0),
             }
 
-            # Estimate cost (Gemini Pro pricing)
-            cost = (token_usage["prompt"] * 0.00025 + token_usage["completion"] * 0.0005) / 1000
+            cost = _estimate_cost_with_fallback(
+                self.model,
+                token_usage["prompt"],
+                token_usage["completion"],
+                fallback_input_per_1m=0.25,
+                fallback_output_per_1m=0.50,
+            )
 
             duration = time.time() - start_time
             tti_ms = int(duration * 1000)  # Non-streaming: TTI = total duration
@@ -3485,8 +3562,10 @@ class CodexCLIProvider(LLMProvider):
             for tool_call in tool_calls:
                 try:
                     await self.tool_discovery.execute_tool_call(tool_call)
-                except Exception:
-                    pass  # Errors are handled by the tool execution
+                except (MCPError, KeyError) as e:
+                    _logger.warning(
+                        "Tool call %s failed locally: %s", tool_call.get("name", "?"), e
+                    )
 
             return LLMResult(
                 response=response_text,

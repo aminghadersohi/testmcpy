@@ -33,12 +33,14 @@ class YAMLFormatter(SchemaFormatter):
             return f"# Error converting to YAML: {e}"
 
 
-def to_json(schema: dict[str, Any]) -> str:
+def to_json(schema: dict[str, Any], tool_name: str = "") -> str:
     """
     Convert JSON Schema to formatted JSON.
 
     Args:
         schema: JSON Schema to convert
+        tool_name: Unused; accepted so all FORMATS converters share the
+            (schema, tool_name) call signature used by /api/format
 
     Returns:
         Formatted JSON string
@@ -47,12 +49,14 @@ def to_json(schema: dict[str, Any]) -> str:
     return formatter.format()
 
 
-def to_yaml(schema: dict[str, Any]) -> str:
+def to_yaml(schema: dict[str, Any], tool_name: str = "") -> str:
     """
     Convert JSON Schema to YAML.
 
     Args:
         schema: JSON Schema to convert
+        tool_name: Unused; accepted so all FORMATS converters share the
+            (schema, tool_name) call signature used by /api/format
 
     Returns:
         YAML string

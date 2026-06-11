@@ -1,4 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
+import { useConfirm } from '../components/ConfirmDialog'
+import { useNotification } from '../components/NotificationProvider'
 import {
   Plus,
   Play,
@@ -346,6 +348,7 @@ function TestCaseWizard({ onComplete, onCancel }) {
                           setData(prev => ({ ...prev, tests: newTests }))
                         }}
                         className="p-1 hover:bg-error/20 rounded text-error flex-shrink-0"
+                        aria-label="Remove evaluator"
                       >
                         <X size={12} />
                       </button>
@@ -430,6 +433,8 @@ function TestCaseWizard({ onComplete, onCancel }) {
 }
 
 function TestManager({ selectedProfiles = [], selectedLlmProfile = null, llmProfiles = [] }) {
+  const [confirmAction, confirmElement] = useConfirm()
+  const { success: notifySuccess, error: notifyError, warning: notifyWarning, info: notifyInfo } = useNotification()
   const { monacoTheme } = useEditorTheme()
   // Get test run state from context (persists across navigation)
   const {
@@ -1159,10 +1164,10 @@ function TestManager({ selectedProfiles = [], selectedLlmProfile = null, llmProf
       setSelectedFile(prev => ({ ...prev, content: fileContent }))
       setEditMode(false)
       loadTestFiles()
-      alert('File saved successfully')
+      notifySuccess('File saved successfully')
     } catch (error) {
       console.error('Failed to save test file:', error)
-      alert(`Failed to save file: ${error.message}`)
+      notifyError(`Failed to save file: ${error.message}`)
     }
   }
 
@@ -1196,12 +1201,12 @@ tests:
       loadTestFiles()
     } catch (error) {
       console.error('Failed to create test file:', error)
-      alert('Failed to create file')
+      notifyError('Failed to create file')
     }
   }
 
   const deleteTestFile = async (relativePath) => {
-    if (!confirm(`Delete ${relativePath}?`)) return
+    if (!(await confirmAction({ title: 'Delete file', message: `Delete ${relativePath}?` }))) return
 
     try {
       await fetch(`/api/tests/${relativePath}`, { method: 'DELETE' })
@@ -1215,7 +1220,7 @@ tests:
       loadTestFiles()
     } catch (error) {
       console.error('Failed to delete test file:', error)
-      alert('Failed to delete file')
+      notifyError('Failed to delete file')
     }
   }
 
@@ -1280,7 +1285,7 @@ tests:
 
     const allProviders = getAllProviders()
     if (allProviders.length === 0) {
-      alert('No LLM providers configured')
+      notifyWarning('No LLM providers configured')
       return
     }
 
@@ -1352,6 +1357,7 @@ tests:
 
   return (
     <div className="h-full flex flex-col">
+      {confirmElement}
       <div className="flex-1 flex flex-col md:flex-row overflow-hidden min-h-0 relative">
         {/* Permanent overlay — shown/hidden via ref during drag to prevent Monaco from stealing mouse events. Never triggers React re-render. */}
         <div ref={overlayRef} className="absolute inset-0 z-30" style={{ display: 'none' }} />
@@ -1407,6 +1413,7 @@ tests:
                     setNewFileName('')
                   }}
                   className="btn btn-secondary text-sm px-3"
+                  aria-label="Close dialog"
                 >
                   <X size={16} />
                 </button>
@@ -1436,7 +1443,7 @@ tests:
                       ? 'text-primary'
                       : 'text-text-tertiary group-hover:text-text-secondary'
                   }`} />
-                  <span className={`font-medium truncate ${
+                  <span title={file.relative_path || file.filename} className={`font-medium truncate ${
                     (selectedFile?.relative_path || selectedFile?.filename) === file.relative_path
                       ? 'text-text-primary'
                       : 'text-text-secondary'
@@ -1519,7 +1526,7 @@ tests:
                           ? 'text-primary'
                           : 'text-text-tertiary group-hover:text-text-secondary'
                       }`} />
-                      <span className={`text-sm truncate ${
+                      <span title={file.relative_path || file.filename} className={`text-sm truncate ${
                         (selectedFile?.relative_path || selectedFile?.filename) === file.relative_path
                           ? 'text-text-primary font-medium'
                           : 'text-text-secondary'
@@ -1584,11 +1591,11 @@ tests:
                 pathSubtitle={selectedFile.relative_path || selectedFile.filename}
                 testCount={testLocations.length}
                 dirty={editMode && fileContent !== selectedFile.content}
-                onClose={() => {
+                onClose={async () => {
                   // Confirm before discarding unsaved edits — closing the tab
                   // shouldn't silently lose user work.
                   const dirty = editMode && fileContent !== selectedFile.content
-                  if (dirty && !window.confirm('You have unsaved changes. Close anyway?')) {
+                  if (dirty && !(await confirmAction({ title: 'Unsaved changes', message: 'You have unsaved changes. Close anyway?', confirmLabel: 'Close anyway' }))) {
                     return
                   }
                   setSelectedFile(null)
@@ -2016,7 +2023,7 @@ tests:
                               {historySelectMode && selectedRunIds.size > 0 && (
                                 <button
                                   onClick={async () => {
-                                    if (!confirm(`Delete ${selectedRunIds.size} run${selectedRunIds.size > 1 ? 's' : ''}?`)) return
+                                    if (!(await confirmAction({ title: 'Delete runs', message: `Delete ${selectedRunIds.size} run${selectedRunIds.size > 1 ? 's' : ''}?` }))) return
                                     const ids = Array.from(selectedRunIds)
                                     try {
                                       const res = await fetch('/api/results/runs/bulk-delete', {
@@ -2024,7 +2031,7 @@ tests:
                                         headers: { 'Content-Type': 'application/json' },
                                         body: JSON.stringify({ run_ids: ids }),
                                       })
-                                      if (!res.ok) { alert('Delete failed'); return }
+                                      if (!res.ok) { notifyError('Delete failed'); return }
                                       const { run_ids: deletedIds } = await res.json()
                                       const deletedSet = new Set(deletedIds)
                                       if (pinnedHistoryRun?.metadata?.run_id && deletedSet.has(pinnedHistoryRun.metadata.run_id)) setPinnedHistoryRun(null)
@@ -2032,7 +2039,7 @@ tests:
                                       setHistorySelectMode(false)
                                       const testFile = selectedFile?.relative_path || selectedFile?.filename
                                       if (testFile) loadResultsHistory(testFile)
-                                    } catch (e) { alert('Failed to delete selected runs') }
+                                    } catch (e) { notifyError('Failed to delete selected runs') }
                                   }}
                                   className="px-2 py-1 text-xs rounded bg-error/20 text-error hover:bg-error/30 transition-colors"
                                 >
@@ -2263,6 +2270,7 @@ tests:
                       onClick={() => setAllLlmsResults(null)}
                       className="p-1.5 hover:bg-surface-hover rounded text-text-tertiary hover:text-text-primary transition-colors"
                       title="Close"
+                      aria-label="Close"
                     >
                       <X size={14} />
                     </button>
@@ -2360,7 +2368,7 @@ tests:
               loadTestFile(filename)
             } catch (error) {
               console.error('Failed to create test file:', error)
-              alert('Failed to create test file')
+              notifyError('Failed to create test file')
             }
           }}
           onCancel={() => setShowTestWizard(false)}

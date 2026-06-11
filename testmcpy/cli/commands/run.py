@@ -315,6 +315,10 @@ def run(
 
     This command executes test cases defined in YAML/JSON files.
     """
+    if not test_path.exists():
+        console.print(f"[red]Error: test path does not exist: {test_path}[/red]")
+        raise typer.Exit(1)
+
     # Generate session ID to group multiple runs from the same CLI invocation
     session_id = str(uuid.uuid4())
 

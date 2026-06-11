@@ -1,8 +1,11 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react'
+import { useConfirm } from '../components/ConfirmDialog'
+import { useNotification } from '../components/NotificationProvider'
 import { useSearchParams } from 'react-router-dom'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import TraceView from '../components/TraceView'
+import { formatDate, formatDuration, formatCost, formatTokens } from '../utils/formatters'
 import {
   LineChart,
   Line,
@@ -42,31 +45,6 @@ import {
 } from 'lucide-react'
 
 const AUTO_REFRESH_INTERVAL = 10000
-
-function formatDate(timestamp) {
-  if (!timestamp) return '-'
-  const date = new Date(timestamp)
-  return date.toLocaleString()
-}
-
-function formatDuration(seconds) {
-  if (!seconds) return '0s'
-  if (seconds < 0.1) return `${(seconds * 1000).toFixed(0)}ms`
-  return `${seconds.toFixed(1)}s`
-}
-
-function formatCost(cost) {
-  if (!cost) return '$0.00'
-  if (cost < 0.01) return `$${cost.toFixed(4)}`
-  return `$${cost.toFixed(2)}`
-}
-
-function formatTokens(tokens) {
-  if (!tokens) return '0'
-  if (tokens >= 1000000) return `${(tokens / 1000000).toFixed(1)}M`
-  if (tokens >= 1000) return `${(tokens / 1000).toFixed(0)}K`
-  return tokens.toString()
-}
 
 function getPassRate(passed, total) {
   if (!total) return 0
@@ -963,6 +941,8 @@ function TrendsTab({ testRuns }) {
 }
 
 function Reports() {
+  const [confirmAction, confirmElement] = useConfirm()
+  const { success: notifySuccess, error: notifyError, warning: notifyWarning, info: notifyInfo } = useNotification()
   const [searchParams, setSearchParams] = useSearchParams()
   const [activeTab, setActiveTab] = useState('tests')
   const [testRuns, setTestRuns] = useState([])
@@ -1182,7 +1162,7 @@ function Reports() {
   }
 
   const deleteRun = async (runId, type) => {
-    if (!confirm('Delete this report?')) return
+    if (!(await confirmAction({ title: 'Delete report', message: 'Delete this report?' }))) return
     try {
       const endpoint = type === 'tests'
         ? `/api/results/run/${runId}`
@@ -1225,7 +1205,7 @@ function Reports() {
 
   const deleteSelected = async () => {
     if (selectedRuns.size === 0) return
-    if (!confirm(`Delete ${selectedRuns.size} run${selectedRuns.size > 1 ? 's' : ''}?`)) return
+    if (!(await confirmAction({ title: 'Delete runs', message: `Delete ${selectedRuns.size} run${selectedRuns.size > 1 ? 's' : ''}?` }))) return
     try {
       const res = await fetch('/api/results/runs/bulk-delete', {
         method: 'POST',
@@ -1234,7 +1214,7 @@ function Reports() {
       })
       if (!res.ok) {
         const err = await res.json().catch(() => ({}))
-        alert(`Delete failed: ${err.detail || res.statusText}`)
+        notifyError(`Delete failed: ${err.detail || res.statusText}`)
         return
       }
       if (selectedRuns.has(selectedRun?.id)) {
@@ -1251,7 +1231,7 @@ function Reports() {
       await Promise.all([loadTestRuns(), loadFilterOptions()])
     } catch (error) {
       console.error('Bulk delete failed:', error)
-      alert(`Delete failed: ${error.message || error}`)
+      notifyError(`Delete failed: ${error.message || error}`)
     }
   }
 
@@ -1580,6 +1560,7 @@ function Reports() {
 
   return (
     <div className="h-full flex flex-col bg-background">
+      {confirmElement}
       {/* Header */}
       <div className="flex-shrink-0 px-4 md:px-6 py-4 border-b border-border bg-surface-elevated">
         <div className="flex items-center justify-between">
@@ -1898,7 +1879,7 @@ function Reports() {
           {/* Details Panel */}
           <div className={`flex-1 overflow-auto bg-background ${selectedRun ? 'block' : 'hidden md:block'}`}>
             {selectedRun && (
-              <button onClick={() => { setSelectedRun(null); setRunDetails(null) }} className="md:hidden flex items-center gap-2 px-4 py-3 text-sm text-text-secondary hover:text-text-primary border-b border-border w-full">
+              <button onClick={() => { setSelectedRun(null); setRunDetails(null); setSearchParams({}, { replace: true }) }} className="md:hidden flex items-center gap-2 px-4 py-3 text-sm text-text-secondary hover:text-text-primary border-b border-border w-full">
                 <ChevronRight size={16} className="rotate-180" />
                 <span>Back to list</span>
               </button>

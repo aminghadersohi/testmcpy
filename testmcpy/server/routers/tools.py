@@ -185,7 +185,11 @@ async def format_schema(request: FormatSchemaRequest):
             "language": format_config["language"],
         }
 
-    except Exception as e:
+    except HTTPException:
+        # Don't let the broad handler below turn a 400 into a 500
+        raise
+    except (TypeError, ValueError, KeyError, AttributeError) as e:
+        # Converter failures on malformed schemas
         raise HTTPException(status_code=500, detail=str(e))
 
 

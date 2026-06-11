@@ -1197,7 +1197,7 @@ function AuthDebugger() {
         {/* Header */}
         <div className="flex items-center justify-between">
           <div>
-            <h1 className="text-xl md:text-2xl font-bold text-text-primary flex items-center gap-3">
+            <h1 className="text-xl md:text-2xl font-semibold text-text-primary flex items-center gap-3">
               <div className="p-2 bg-primary/10 rounded-lg">
                 <Shield className="text-primary" size={28} />
               </div>

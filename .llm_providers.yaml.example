@@ -7,6 +7,11 @@
 #   - openai: OpenAI GPT models (API)
 #   - claude-sdk: Claude Agent SDK (native MCP support)
 #     Aliases: "claude-cli" and "claude-code" also map to claude-sdk
+#   - codex-sdk: OpenAI Codex via openai-agents SDK (native MCP support)
+#     Aliases: "codex-cli" and "codex" also map to codex-sdk
+#   - gemini-sdk: Google ADK (native MCP support)
+#   - gemini: Google Gemini direct API (alias: "google"); gemini-cli for the CLI
+#   - bedrock (alias: "aws-bedrock"), xai (alias: "grok"), openrouter, ollama
 #
 # API Key Sources (priority order):
 #   1. Provider-specific api_key in this file
@@ -78,17 +83,26 @@ profiles:
       default: false
       api_key: ${OPENAI_API_KEY}
 
-    # OpenAI Codex CLI (subprocess, similar to Claude Code)
-    - name: Codex CLI (gpt-5-codex)
-      provider: codex-cli
+    # OpenAI Codex SDK (openai-agents, native MCP). Uses Codex CLI OAuth
+    # login (~/.codex/auth.json) when no api_key is given.
+    - name: Codex SDK (gpt-5-codex)
+      provider: codex-sdk
       model: gpt-5-codex
       timeout: 120
       default: false
-    - name: Codex CLI (o3)
-      provider: codex-cli
+    - name: Codex SDK (o3)
+      provider: codex-sdk
       model: o3
       timeout: 180
       default: false
+
+    # Google ADK (gemini-sdk, native MCP)
+    - name: Gemini SDK (Flash)
+      provider: gemini-sdk
+      model: gemini-sdk-flash
+      timeout: 120
+      default: false
+      api_key: ${GEMINI_API_KEY}
 
 global:
   timeout: 60

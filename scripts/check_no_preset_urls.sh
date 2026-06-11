@@ -4,6 +4,9 @@
 # docs/presentation.html and docs/talking_points.md are exempt (internal presentation materials).
 set -euo pipefail
 
+# This script must exempt itself: PATTERN below necessarily contains the
+# blocked literals (e.g. PRESET_API_TOKEN), so the grep would always match
+# its own source.
 EXEMPT_FILES="NOTICE|docs/presentation\.html|docs/talking_points\.md|scripts/check_no_preset_urls\.sh"
 
 # Patterns that should NOT appear in committed code

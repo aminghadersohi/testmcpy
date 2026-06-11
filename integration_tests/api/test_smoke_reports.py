@@ -1,7 +1,5 @@
 """Tests for smoke reports endpoints."""
 
-import json
-
 
 def _make_smoke_report(
     server_url="http://mock:3000/mcp",
@@ -22,30 +20,26 @@ def _make_smoke_report(
         "failed": failed,
         "success_rate": (passed / total * 100) if total > 0 else 0,
         "duration_ms": 1500,
-        "tool_results": [
+        "results": [
             {
                 "tool_name": f"tool_{i}",
                 "success": i < passed,
                 "duration_ms": 300,
-                "error": None if i < passed else "timeout",
+                "error_message": None if i < passed else "timeout",
             }
             for i in range(total)
         ],
     }
 
 
-def _save_smoke_report_to_disk(tmp_workspace, report_data):
-    """Save a smoke report directly to disk and return the report_id."""
-    import uuid
-    from datetime import datetime
+def _save_smoke_report(client, report_data):
+    """Save a smoke report through the API and return the report_id.
 
-    report_id = str(uuid.uuid4())[:8] + "_20250101_000000"
-    report_data["report_id"] = report_id
-    report_data["saved_at"] = datetime.now().isoformat()
-    report_file = tmp_workspace / "tests" / ".smoke_reports" / f"{report_id}.json"
-    with open(report_file, "w") as f:
-        json.dump(report_data, f, indent=2, default=str)
-    return report_id
+    Reports are stored in the SQLite DB (TestStorage), not as JSON files.
+    """
+    resp = client.post("/api/smoke-reports/save", json=report_data)
+    assert resp.status_code == 200
+    return resp.json()["report_id"]
 
 
 class TestListSmokeReports:
@@ -60,18 +54,18 @@ class TestListSmokeReports:
 
     def test_list_after_save(self, client, tmp_workspace):
         report = _make_smoke_report()
-        _save_smoke_report_to_disk(tmp_workspace, report)
+        _save_smoke_report(client, report)
         resp = client.get("/api/smoke-reports/list")
         data = resp.json()
         assert data["total"] >= 1
 
     def test_list_filter_by_server_url(self, client, tmp_workspace):
-        _save_smoke_report_to_disk(
-            tmp_workspace,
+        _save_smoke_report(
+            client,
             _make_smoke_report(server_url="http://a:3000/mcp"),
         )
-        _save_smoke_report_to_disk(
-            tmp_workspace,
+        _save_smoke_report(
+            client,
             _make_smoke_report(server_url="http://b:3000/mcp"),
         )
         resp = client.get(
@@ -83,8 +77,8 @@ class TestListSmokeReports:
             assert report["server_url"] == "http://a:3000/mcp"
 
     def test_list_filter_by_profile_id(self, client, tmp_workspace):
-        _save_smoke_report_to_disk(tmp_workspace, _make_smoke_report(profile_id="alpha"))
-        _save_smoke_report_to_disk(tmp_workspace, _make_smoke_report(profile_id="beta"))
+        _save_smoke_report(client, _make_smoke_report(profile_id="alpha"))
+        _save_smoke_report(client, _make_smoke_report(profile_id="beta"))
         resp = client.get("/api/smoke-reports/list", params={"profile_id": "alpha"})
         data = resp.json()
         for report in data["reports"]:
@@ -92,13 +86,13 @@ class TestListSmokeReports:
 
     def test_list_respects_limit(self, client, tmp_workspace):
         for _ in range(5):
-            _save_smoke_report_to_disk(tmp_workspace, _make_smoke_report())
+            _save_smoke_report(client, _make_smoke_report())
         resp = client.get("/api/smoke-reports/list", params={"limit": 2})
         data = resp.json()
         assert len(data["reports"]) <= 2
 
     def test_list_report_has_summary_fields(self, client, tmp_workspace):
-        _save_smoke_report_to_disk(tmp_workspace, _make_smoke_report())
+        _save_smoke_report(client, _make_smoke_report())
         resp = client.get("/api/smoke-reports/list")
         data = resp.json()
         report = data["reports"][0]
@@ -116,7 +110,7 @@ class TestGetSmokeReport:
 
     def test_get_existing_report(self, client, tmp_workspace):
         report = _make_smoke_report()
-        report_id = _save_smoke_report_to_disk(tmp_workspace, report)
+        report_id = _save_smoke_report(client, report)
         resp = client.get(f"/api/smoke-reports/report/{report_id}")
         assert resp.status_code == 200
         data = resp.json()
@@ -128,11 +122,11 @@ class TestGetSmokeReport:
 
     def test_get_report_has_tool_results(self, client, tmp_workspace):
         report = _make_smoke_report()
-        report_id = _save_smoke_report_to_disk(tmp_workspace, report)
+        report_id = _save_smoke_report(client, report)
         resp = client.get(f"/api/smoke-reports/report/{report_id}")
         data = resp.json()
-        assert "tool_results" in data
-        assert len(data["tool_results"]) == 4
+        assert "results" in data
+        assert len(data["results"]) == 4
 
 
 class TestDeleteSmokeReport:
@@ -140,7 +134,7 @@ class TestDeleteSmokeReport:
 
     def test_delete_existing_report(self, client, tmp_workspace):
         report = _make_smoke_report()
-        report_id = _save_smoke_report_to_disk(tmp_workspace, report)
+        report_id = _save_smoke_report(client, report)
         resp = client.delete(f"/api/smoke-reports/report/{report_id}")
         assert resp.status_code == 200
         data = resp.json()
@@ -152,7 +146,7 @@ class TestDeleteSmokeReport:
 
     def test_delete_then_get_returns_404(self, client, tmp_workspace):
         report = _make_smoke_report()
-        report_id = _save_smoke_report_to_disk(tmp_workspace, report)
+        report_id = _save_smoke_report(client, report)
         client.delete(f"/api/smoke-reports/report/{report_id}")
         resp = client.get(f"/api/smoke-reports/report/{report_id}")
         assert resp.status_code == 404
@@ -169,14 +163,14 @@ class TestClearAllSmokeReports:
 
     def test_clear_all(self, client, tmp_workspace):
         for _ in range(3):
-            _save_smoke_report_to_disk(tmp_workspace, _make_smoke_report())
+            _save_smoke_report(client, _make_smoke_report())
         resp = client.delete("/api/smoke-reports/clear")
         data = resp.json()
         assert data["deleted"] == 3
 
     def test_clear_then_list_is_empty(self, client, tmp_workspace):
         for _ in range(3):
-            _save_smoke_report_to_disk(tmp_workspace, _make_smoke_report())
+            _save_smoke_report(client, _make_smoke_report())
         client.delete("/api/smoke-reports/clear")
         resp = client.get("/api/smoke-reports/list")
         data = resp.json()

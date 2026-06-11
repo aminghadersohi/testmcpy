@@ -111,6 +111,9 @@ active_websockets: list[WebSocket] = []
 
 # Exponential back-off state for failed MCP connections.
 # Maps cache_key → (next_retry_monotonic, failure_count)
+# No lock needed: the helpers below never await between read and write, so
+# each mutation runs atomically on the event loop; the connection-init path
+# itself is serialized per key by _client_init_locks.
 _connection_backoff: dict[str, tuple[float, int]] = {}
 _BACKOFF_BASE = 5.0  # seconds for first retry
 _BACKOFF_MAX = 300.0  # cap at 5 minutes
@@ -201,6 +204,8 @@ async def get_mcp_clients_for_profile(profile_id: str) -> list[tuple[str, MCPCli
             try:
                 await client.initialize()
             except Exception:
+                # Intentionally broad: any init failure (auth, network, SDK
+                # bug) must record back-off state before re-raising.
                 _record_failure(cache_key)
                 raise
 
@@ -276,6 +281,8 @@ async def get_mcp_client_for_server(profile_id: str, mcp_name: str) -> MCPClient
         try:
             await client.initialize()
         except Exception:
+            # Intentionally broad: any init failure (auth, network, SDK bug)
+            # must record back-off state before re-raising.
             _record_failure(cache_key)
             raise
 
@@ -308,7 +315,7 @@ async def clear_cached_client(cache_key: str) -> bool:
         try:
             await client.close()
             print(f"Cleared cached client '{cache_key}'")
-        except Exception as e:
+        except (OSError, RuntimeError) as e:
             print(f"Warning: Failed to close cached client '{cache_key}': {e}")
         return True
     return False
@@ -564,30 +571,19 @@ async def get_configuration():
 
 @app.get("/api/models")
 async def list_models():
-    """List available models for each provider."""
+    """List available models for each provider (sourced from the model registry)."""
+    from testmcpy.src.model_registry import get_models_by_provider  # noqa: PLC0415
+
+    def _entries(provider: str) -> list[dict[str, str]]:
+        return [
+            {"id": m.id, "name": m.name, "description": m.description}
+            for m in get_models_by_provider(provider)
+            if not m.is_deprecated
+        ]
+
     return {
-        "anthropic": [
-            {
-                "id": "claude-sonnet-4-5",
-                "name": "Claude Sonnet 4.5",
-                "description": "Latest Sonnet 4.5 (most capable)",
-            },
-            {
-                "id": "claude-haiku-4-5",
-                "name": "Claude Haiku 4.5",
-                "description": "Latest Haiku 4.5 (fast & efficient)",
-            },
-            {
-                "id": "claude-opus-4-1",
-                "name": "Claude Opus 4.1",
-                "description": "Latest Opus 4.1 (most powerful)",
-            },
-            {
-                "id": "claude-haiku-4-5",
-                "name": "Claude 3.5 Haiku",
-                "description": "Legacy Haiku 3.5",
-            },
-        ],
+        "anthropic": _entries("anthropic"),
+        # Ollama models are local installs, not in the registry
         "ollama": [
             {
                 "id": "llama3.1:8b",
@@ -606,20 +602,7 @@ async def list_models():
             },
             {"id": "mistral:7b", "name": "Mistral 7B", "description": "Mistral 7B (efficient)"},
         ],
-        "openai": [
-            {
-                "id": "gpt-4o",
-                "name": "GPT-4 Optimized",
-                "description": "GPT-4 Optimized (recommended)",
-            },
-            {"id": "gpt-4-turbo", "name": "GPT-4 Turbo", "description": "GPT-4 Turbo"},
-            {"id": "gpt-4", "name": "GPT-4", "description": "GPT-4 (original)"},
-            {
-                "id": "gpt-3.5-turbo",
-                "name": "GPT-3.5 Turbo",
-                "description": "GPT-3.5 Turbo (faster, cheaper)",
-            },
-        ],
+        "openai": _entries("openai"),
     }
 
 
@@ -682,7 +665,7 @@ async def list_mcp_tools(profiles: list[str] = Query(default=None)):
         # on every subsequent request until evicted.
         for cache_key in accessed_servers:
             await clear_cached_client(cache_key)
-        if is_connection_error(error_msg):
+        if is_connection_error(error_msg) or is_auth_error(error_msg):
             raise HTTPException(
                 status_code=503,
                 detail=f"Service unavailable: Unable to connect to MCP server. {error_msg}",

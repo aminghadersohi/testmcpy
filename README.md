@@ -52,14 +52,21 @@ That's it! No complex configuration needed to get started.
 
 ### Multi-Provider LLM Support
 
-Test with **Claude**, **GPT-4**, **Llama**, and other models. Works with both paid APIs and free local models via Ollama. Includes a Claude SDK provider for subprocess-based MCP support.
+Test with **Claude**, **GPT**, **Gemini**, **Llama**, and other models. Works with both paid APIs and free local models via Ollama. Includes agent-SDK providers (Claude, Codex, Gemini) with native MCP support.
 
-| Provider | Models | Features |
-|----------|--------|----------|
-| Anthropic | claude-opus-4, claude-sonnet-4-5, claude-haiku-4-5 | Native MCP, extended thinking, vision, token caching |
-| OpenAI | gpt-4, gpt-4-turbo, gpt-4o | Function calling, vision, cost tracking |
-| Ollama | Llama, Mistral, etc. (local) | Free, local execution, no API costs |
-| Claude SDK | claude-cli, claude-code | Subprocess-based, full MCP support |
+| Provider | Config name | Models | Features |
+|----------|-------------|--------|----------|
+| Anthropic | `anthropic` | claude-opus-4, claude-sonnet-4-5, claude-haiku-4-5 | Native MCP, extended thinking, vision, token caching |
+| OpenAI | `openai` | gpt-4, gpt-4-turbo, gpt-4o | Function calling, vision, cost tracking |
+| Ollama | `ollama` | Llama, Mistral, etc. (local) | Free, local execution, no API costs |
+| Claude SDK | `claude-sdk` (aliases: `claude-cli`, `claude-code`) | claude-sonnet-4-5, claude-opus-4 | Claude Agent SDK, native MCP, CLI OAuth login |
+| Codex SDK | `codex-sdk` (aliases: `codex-cli`, `codex`) | gpt-5-codex, o3, o4-mini | openai-agents SDK, native MCP, Codex CLI OAuth or API key |
+| Gemini SDK | `gemini-sdk` | gemini-sdk-flash, gemini-sdk-pro | google-adk, native MCP |
+| Google Gemini | `gemini` (alias: `google`) | gemini-2.5-flash, gemini-2.5-pro | Direct Gemini API, function calling |
+| Gemini CLI | `gemini-cli` | gemini-2.5-flash, gemini-2.5-pro | Subprocess-based Gemini CLI |
+| AWS Bedrock | `bedrock` (alias: `aws-bedrock`) | Claude models via AWS | IAM auth, no Anthropic key needed |
+| xAI | `xai` (alias: `grok`) | grok models | Function calling |
+| OpenRouter | `openrouter` | 100+ models with one API key | Function calling, cost tracking |
 
 ![LLM Profiles — manage Anthropic, OpenAI, Ollama and Claude SDK provider configurations](https://raw.githubusercontent.com/preset-io/testmcpy/main/docs/screenshots/llm-profiles.png)
 

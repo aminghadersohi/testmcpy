@@ -1,4 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react'
+import { useConfirm } from '../components/ConfirmDialog'
+import { useNotification } from '../components/NotificationProvider'
 import { Send, Loader, Wrench, DollarSign, ChevronDown, ChevronRight, CheckCircle, FileText, Plus, Server, Trash2, RefreshCw, Download, Edit3, Settings2 } from 'lucide-react'
 import ReactJson from '@microlink/react-json-view'
 import ReactMarkdown from 'react-markdown'
@@ -80,6 +82,8 @@ function JSONViewer({ data }) {
 }
 
 function ChatInterface({ selectedProfiles = [], selectedLlmProfile, llmProfiles = [] }) {
+  const [confirmAction, confirmElement] = useConfirm()
+  const { success: notifySuccess, error: notifyError, warning: notifyWarning, info: notifyInfo } = useNotification()
   const { jsonTheme } = useEditorTheme()
   const [messages, setMessages] = useState([])
   const [input, setInput] = useState('')
@@ -531,13 +535,13 @@ function ChatInterface({ selectedProfiles = [], selectedLlmProfile, llmProfiles 
     sendMessage()
   }, [input, loading])
 
-  const handleClearShortcut = useCallback((e) => {
+  const handleClearShortcut = useCallback(async (e) => {
     e.preventDefault()
-    if (messages.length > 0 && window.confirm('Clear chat history?')) {
+    if (messages.length > 0 && await confirmAction({ title: 'Clear chat', message: 'Clear chat history?', confirmLabel: 'Clear' })) {
       clearChatHistory()
       announce('Chat history cleared')
     }
-  }, [messages, announce])
+  }, [messages, announce, confirmAction])
 
   // Register keyboard shortcuts
   useKeyboardShortcuts({
@@ -741,25 +745,26 @@ ${evaluators}
       if (res.ok) {
         const result = await res.json()
         console.log('Test created:', result)
-        alert(`Test case created successfully: ${testName}.yaml`)
+        notifySuccess(`Test case created: ${testName}.yaml`)
       } else {
         const error = await res.json().catch(() => ({ detail: 'Unknown error' }))
         console.error('Failed to create test:', error)
-        alert(`Failed to create test case: ${error.detail}`)
+        notifyError(`Failed to create test case: ${error.detail}`)
       }
     } catch (error) {
       console.error('Failed to create test case:', error)
-      alert(`Failed to create test case: ${error.message}`)
+      notifyError(`Failed to create test case: ${error.message}`)
     }
   }
 
   return (
     <div className="h-full flex flex-col">
+      {confirmElement}
       {/* Header */}
       <div className="p-4 border-b border-border bg-surface-elevated">
         <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
           <div>
-            <h1 className="text-xl md:text-2xl font-bold">Chat Interface</h1>
+            <h1 className="text-xl md:text-2xl font-semibold text-text-primary">Chat Interface</h1>
             <p className="text-text-secondary mt-1 text-base">
               Interactive chat with LLM using MCP tools
               {messages.length > 0 && (

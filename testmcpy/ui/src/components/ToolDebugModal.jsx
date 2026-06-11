@@ -387,6 +387,7 @@ function ToolDebugModal({ tool, profile, onClose }) {
           <button
             onClick={onClose}
             className="p-2 hover:bg-surface-hover rounded-lg transition-colors flex-shrink-0"
+            aria-label="Close"
           >
             <X size={20} className="text-text-tertiary" />
           </button>

@@ -105,7 +105,7 @@ function CompatibilityMatrix() {
         <div className="flex items-center gap-3">
           <Grid3X3 size={24} className="text-primary" />
           <div>
-            <h1 className="text-xl md:text-2xl font-bold">Compatibility Matrix</h1>
+            <h1 className="text-xl md:text-2xl font-semibold text-text-primary">Compatibility Matrix</h1>
             <p className="text-text-secondary mt-1 text-sm md:text-base">
               Test tools across multiple MCP servers and compare schemas
             </p>

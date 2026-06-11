@@ -1142,3 +1142,52 @@ class TestResponseMatchesPattern:
         e = create_evaluator("response_matches_pattern", pattern=r"dashboard_id:\s*\d+")
         result = e.evaluate({"response": "Created dashboard_id: 42"})
         assert result.passed
+
+
+class TestCostHelpers:
+    """Module-level cost helpers used by the non-SDK providers."""
+
+    def test_known_model_uses_registry_rates(self):
+        from testmcpy.src.llm_integration import _estimate_cost_with_fallback
+        from testmcpy.src.model_registry import get_model
+
+        info = get_model("gpt-4o")
+        cost = _estimate_cost_with_fallback("gpt-4o", 1_000_000, 1_000_000, 30.0, 60.0)
+        assert cost == pytest.approx(info.input_price_per_1m + info.output_price_per_1m)
+
+    def test_unknown_model_keeps_caller_fallback(self):
+        from testmcpy.src.llm_integration import _estimate_cost_with_fallback
+
+        cost = _estimate_cost_with_fallback("model-not-in-registry", 1_000_000, 0, 30.0, 60.0)
+        assert cost == pytest.approx(30.0)
+
+    def test_zero_tokens_zero_cost(self):
+        from testmcpy.src.llm_integration import _estimate_cost_with_fallback
+
+        assert _estimate_cost_with_fallback("gpt-4o", 0, 0, 30.0, 60.0) == 0.0
+
+
+class TestNormalizeBedrockModelId:
+    @pytest.mark.parametrize(
+        "bedrock_id,expected",
+        [
+            ("us.anthropic.claude-sonnet-4-20250514-v1:0", "claude-sonnet-4-20250514"),
+            ("eu.anthropic.claude-3-5-haiku-20241022-v1:0", "claude-3-5-haiku-20241022"),
+            ("apac.anthropic.claude-sonnet-4-20250514-v1:0", "claude-sonnet-4-20250514"),
+            ("global.anthropic.claude-sonnet-4-20250514-v1:0", "claude-sonnet-4-20250514"),
+            ("jp.anthropic.claude-sonnet-4-20250514-v1:0", "claude-sonnet-4-20250514"),
+            ("anthropic.claude-sonnet-4-20250514-v2:1", "claude-sonnet-4-20250514"),
+            ("claude-sonnet-4-20250514", "claude-sonnet-4-20250514"),
+        ],
+    )
+    def test_prefix_and_suffix_stripping(self, bedrock_id, expected):
+        from testmcpy.src.llm_integration import _normalize_bedrock_model_id
+
+        assert _normalize_bedrock_model_id(bedrock_id) == expected
+
+    def test_normalized_id_resolves_in_registry(self):
+        from testmcpy.src.llm_integration import _normalize_bedrock_model_id
+        from testmcpy.src.model_registry import get_model
+
+        normalized = _normalize_bedrock_model_id("global.anthropic.claude-sonnet-4-20250514-v1:0")
+        assert get_model(normalized) is not None

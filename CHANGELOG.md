@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-06-11
+
+Crash-safe UI test runs: the results DB is now the source of truth for
+in-flight runs, and the client survives disconnects instead of declaring
+live runs dead.
+
+### Added
+- **Incremental result persistence**: UI-triggered runs write their
+  `test_runs` row at start and one `question_results` row per completed
+  test (`testmcpy/server/run_persistence.py`) — a crash mid-suite keeps
+  every finished test instead of losing the whole run
+- **Run heartbeats**: new `test_runs.heartbeat_at` column (alembic
+  `c3d4e5f6a7b8`, SQLite auto-migrated) stamped every 30s per live run;
+  crashed runs flip to `interrupted` within ~4 minutes via a background
+  sweeper instead of waiting for the next server restart
+- **Concurrency cap with visible queue**: `TESTMCPY_MAX_CONCURRENT_RUNS`
+  (default 2); excess runs show `status=queued` in `/api/runs` and the
+  background-runs indicator, and can be stopped while queued
+- **History fallback**: WebSocket `attach` and `GET /api/runs/{id}`
+  resolve runs from the results DB when the in-memory registry no longer
+  has them — runs that died mid-flight replay as `interrupted` with
+  their partial results
+- **Client reconnect**: a dropped run socket reconnects with exponential
+  backoff (5 attempts), then offers a manual Reattach banner; resume on
+  page load is server-authoritative (`GET /api/runs`) instead of a
+  5-minute localStorage TTL
+
+### Fixed
+- Token usage was stored as 0 for every UI-triggered run (the mapping
+  read `input`/`output` but providers emit `prompt`/`completion`);
+  history rows now also record the effective model/provider when a
+  suite-level override is set
+- Reattaching no longer duplicates the buffered log backlog
+
 ## [0.8.0] - 2026-06-11
 
 The platform release: CI gating, per-config performance analytics,

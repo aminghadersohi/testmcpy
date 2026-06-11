@@ -69,6 +69,10 @@ class RunHandle:
     summary: dict[str, Any] | None = None
     results: list[dict[str, Any]] = field(default_factory=list)
     task: asyncio.Task | None = None
+    # run_id of the DB history row currently being written by this run's
+    # RunRecord — equal to ``run_id`` for single-file runs, but a fresh
+    # per-file id while a directory batch is executing.
+    db_run_id: str | None = None
     # Queue published to by send_log + send_structured. Replaced when a
     # new client attaches; ``None`` when no client is currently watching.
     attached_queue: asyncio.Queue | None = None

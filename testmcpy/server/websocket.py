@@ -14,6 +14,7 @@ from fastapi import WebSocket, WebSocketDisconnect
 
 from testmcpy.config import get_config
 from testmcpy.server import run_registry
+from testmcpy.server.run_persistence import RunRecord
 from testmcpy.server.run_registry import RunHandle
 from testmcpy.server.state import get_or_create_mcp_client
 from testmcpy.src.llm_integration import create_llm_provider
@@ -262,6 +263,29 @@ def _emit_run_error(
     _emit_event(handle, payload)
 
 
+def _display_test_file_name(test_path: Path) -> str:
+    """Relativize ``test_path`` for history grouping: relative to ./tests
+    when inside it, ``<extra-root-name>/<rel>`` for configured extra test
+    dirs, bare filename otherwise."""
+    from testmcpy.server.routers.tests import _extra_tests_dirs
+
+    test_file_name = test_path.name
+    tests_dir = Path.cwd() / "tests"
+    try:
+        resolved = test_path.resolve()
+        if resolved.is_relative_to(tests_dir.resolve()):
+            test_file_name = str(resolved.relative_to(tests_dir.resolve()))
+        else:
+            for extra_root in _extra_tests_dirs():
+                extra_real = extra_root.resolve()
+                if resolved.is_relative_to(extra_real):
+                    test_file_name = f"{extra_root.name}/{resolved.relative_to(extra_real)}"
+                    break
+    except OSError:
+        pass
+    return test_file_name
+
+
 async def _run_test_command(handle: RunHandle, data: dict, config) -> None:
     """Execute a single 'run_test' command tied to ``handle``.
 
@@ -283,6 +307,10 @@ async def _run_test_command(handle: RunHandle, data: dict, config) -> None:
         return
 
     _emit_log(handle, f"📁 Loading test file: {test_path}")
+
+    # Incremental history record — begun once the runner is ready, appended
+    # per test, finished on every exit path (crash-safe partial results).
+    record: RunRecord | None = None
 
     try:
         # Load test cases
@@ -437,6 +465,23 @@ async def _run_test_command(handle: RunHandle, data: dict, config) -> None:
         await runner.initialize()
         _emit_log(handle, "✅ Test runner ready")
 
+        # For single-file runs, reuse the registry's run_id so the live
+        # "Reattached to run …" banner and the /reports entry show the same
+        # id. Directory sub-calls mint a fresh per-file id — each YAML keeps
+        # its own /reports row.
+        record = RunRecord(
+            run_id=handle.run_id if not data.get("_in_batch") else None,
+            log=lambda msg: _emit_log(handle, msg),
+        )
+        record.begin(
+            test_file=_display_test_file_name(test_path),
+            model=effective_model,
+            provider=effective_provider,
+            mcp_profile=effective_profile,
+            llm_profile=llm_profile_id,
+        )
+        handle.db_run_id = record.run_id
+
         # Run each test one at a time
         all_results = []
         for i, tc in enumerate(test_cases):
@@ -476,17 +521,21 @@ async def _run_test_command(handle: RunHandle, data: dict, config) -> None:
             if result.error:
                 _emit_log(handle, f"⚠️ Error: {result.error}")
 
+            result_dict = result.to_dict()
             _emit_event(
                 handle,
                 {
                     "type": "test_complete",
                     "test_name": tc.name,
-                    "result": result.to_dict(),
+                    "result": result_dict,
                 },
             )
 
             all_results.append(result)
-            handle.results.append(result.to_dict())
+            handle.results.append(result_dict)
+            # Persist immediately — a crash mid-suite keeps every test
+            # completed so far.
+            record.append(result_dict)
 
         # Send final summary
         passed = sum(1 for r in all_results if r.passed)
@@ -507,48 +556,10 @@ async def _run_test_command(handle: RunHandle, data: dict, config) -> None:
         }
         handle.summary = summary
 
-        # Save results to history
-        try:
-            from testmcpy.server.routers.results import save_test_run_to_file
-            from testmcpy.server.routers.tests import _extra_tests_dirs
-
-            tests_dir = Path.cwd() / "tests"
-            test_file_name = test_path.name
-            try:
-                resolved_test_path = test_path.resolve()
-                if resolved_test_path.is_relative_to(tests_dir.resolve()):
-                    test_file_name = str(resolved_test_path.relative_to(tests_dir.resolve()))
-                else:
-                    for extra_root in _extra_tests_dirs():
-                        extra_real = extra_root.resolve()
-                        if resolved_test_path.is_relative_to(extra_real):
-                            test_file_name = (
-                                f"{extra_root.name}/{resolved_test_path.relative_to(extra_real)}"
-                            )
-                            break
-            except OSError:
-                pass
-
-            save_data = {
-                "test_file": test_file_name,
-                "test_file_path": str(test_path),
-                "provider": provider,
-                "model": model,
-                "mcp_profile": effective_profile,
-                "results": results_list,
-                "summary": summary,
-            }
-            # For single-file runs, reuse the registry's run_id so the
-            # live "Reattached to run …" banner and the /reports entry
-            # show the same id. For directory sub-calls, leave run_id
-            # unset so each file's save_test_run_to_file mints a fresh
-            # id — each YAML still gets its own /reports row.
-            if handle.kind == "single":
-                save_data["run_id"] = handle.run_id
-            save_result = save_test_run_to_file(save_data)
-            _emit_log(handle, f"💾 Results saved: {save_result.get('run_id')}")
-        except Exception as save_err:
-            _emit_log(handle, f"⚠️ Failed to save results: {save_err}")
+        # Per-test results were persisted incrementally via record.append();
+        # stamp the terminal status + denormalized totals.
+        record.finish("completed")
+        _emit_log(handle, f"💾 Results saved: {record.run_id}")
 
         # `all_complete` is a TERMINAL signal on the wire (the UI sets
         # running=false, clears directoryRunProgress, and closes the WS).
@@ -569,12 +580,17 @@ async def _run_test_command(handle: RunHandle, data: dict, config) -> None:
             )
 
     except asyncio.CancelledError:
-        # Stopped by user — let the caller emit the user-facing message.
+        # Stopped by user — keep the partial results, let the caller emit
+        # the user-facing message.
+        if record is not None:
+            record.finish("stopped")
         raise
     except Exception as e:
         import traceback
 
         tb = traceback.format_exc()
+        if record is not None:
+            record.finish("error")
         _emit_log(handle, f"❌ Error: {str(e)}")
         _emit_log(handle, f"Traceback:\n{tb}")
         _emit_run_error(handle, data, str(e), traceback=tb)

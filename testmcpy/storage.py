@@ -770,11 +770,19 @@ class TestStorage:
             session.commit()
 
     def complete_run(self, run_id: str, completed_at: str) -> None:
+        self.finish_run(run_id, status="completed", completed_at=completed_at)
+
+    def finish_run(self, run_id: str, status: str, completed_at: str | None = None) -> None:
+        """Finalize a run row with any terminal status (completed / error /
+        stopped / interrupted), stamping ``completed_at`` and the
+        denormalized token/cost totals from its question results."""
+        if completed_at is None:
+            completed_at = datetime.now(timezone.utc).isoformat()
         with self._session() as session:
             run = session.query(TestRunModel).filter_by(run_id=run_id).first()
             if run:
                 run.completed_at = completed_at
-                run.status = "completed"
+                run.status = status
                 # Compute denormalized totals
                 results = session.query(QuestionResultModel).filter_by(run_id=run_id).all()
                 run.total_tokens = sum(

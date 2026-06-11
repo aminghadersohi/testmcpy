@@ -913,6 +913,64 @@ class TestRunManagement:
         assert len(runs) == 1
         assert runs[0]["model"] == "gpt-4o"
 
+    def test_list_runs_includes_profiles(self, storage):
+        now = datetime.now(timezone.utc).isoformat()
+        storage.save_run(
+            run_id="r1",
+            test_id="s",
+            test_version=1,
+            model="m",
+            provider="p",
+            started_at=now,
+            mcp_profile_id="staging",
+            llm_profile_id="claude-prod",
+        )
+        runs = storage.list_runs()
+        assert runs[0]["mcp_profile_id"] == "staging"
+        assert runs[0]["llm_profile_id"] == "claude-prod"
+
+        run = storage.get_run("r1")
+        assert run["mcp_profile_id"] == "staging"
+        assert run["llm_profile_id"] == "claude-prod"
+
+    def test_list_runs_filter_by_mcp_profile(self, storage):
+        now = datetime.now(timezone.utc).isoformat()
+        storage.save_run(
+            run_id="r1",
+            test_id="s",
+            test_version=1,
+            model="m",
+            provider="p",
+            started_at=now,
+            mcp_profile_id="staging",
+        )
+        storage.save_run(
+            run_id="r2",
+            test_id="s",
+            test_version=1,
+            model="m",
+            provider="p",
+            started_at=now,
+            mcp_profile_id="prod",
+        )
+        runs = storage.list_runs(mcp_profile="prod")
+        assert len(runs) == 1
+        assert runs[0]["run_id"] == "r2"
+
+    def test_filter_options_include_mcp_profiles(self, storage):
+        now = datetime.now(timezone.utc).isoformat()
+        storage.save_run(
+            run_id="r1",
+            test_id="s",
+            test_version=1,
+            model="m",
+            provider="p",
+            started_at=now,
+            mcp_profile_id="staging",
+        )
+        options = storage.get_filter_options()
+        assert options["mcp_profiles"] == ["staging"]
+
     def test_list_runs_limit(self, storage):
         now = datetime.now(timezone.utc).isoformat()
         for i in range(5):
@@ -930,6 +988,27 @@ class TestRunManagement:
     def test_list_runs_empty(self, storage):
         runs = storage.list_runs()
         assert runs == []
+
+    def test_count_runs_matches_filters(self, storage):
+        now = datetime.now(timezone.utc).isoformat()
+        for i in range(5):
+            storage.save_run(
+                run_id=f"r{i}",
+                test_id="s",
+                test_version=1,
+                model="claude-sonnet-4-5" if i < 3 else "gpt-4o",
+                provider="anthropic" if i < 3 else "openai",
+                started_at=now,
+            )
+        assert storage.count_runs() == 5
+        assert storage.count_runs(model="gpt-4o") == 2
+        assert storage.count_runs(provider="anthropic") == 3
+        # count is unaffected by pagination args on list_runs
+        assert len(storage.list_runs(limit=2)) == 2
+        assert storage.count_runs() == 5
+
+    def test_count_runs_empty(self, storage):
+        assert storage.count_runs() == 0
 
 
 # ---------------------------------------------------------------------------

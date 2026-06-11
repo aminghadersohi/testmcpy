@@ -19,6 +19,48 @@ import yaml
 
 logger = logging.getLogger(__name__)
 
+# Config keys that hold credentials — values should be ${ENV_VAR}
+# references, not literals committed to disk.
+_SECRET_KEYS = frozenset(
+    {"api_token", "api_secret", "token", "api_key", "client_secret", "password"}
+)
+_ENV_REF = re.compile(r"^\$\{[A-Za-z_][A-Za-z0-9_]*\}$")
+
+
+def _warn_plaintext_secrets(raw_config: Any, config_path: Path | str) -> None:
+    """Warn once per file about literal secrets in profile YAML.
+
+    Values are fine when they use ${ENV_VAR} substitution; short values
+    are ignored to avoid flagging placeholders like "none" or "changeme".
+    """
+    flagged: list[str] = []
+
+    def walk(node: Any, path: str) -> None:
+        if isinstance(node, dict):
+            for key, value in node.items():
+                child = f"{path}.{key}" if path else str(key)
+                if (
+                    key in _SECRET_KEYS
+                    and isinstance(value, str)
+                    and len(value) >= 12
+                    and not _ENV_REF.match(value)
+                ):
+                    flagged.append(child)
+                else:
+                    walk(value, child)
+        elif isinstance(node, list):
+            for i, item in enumerate(node):
+                walk(item, f"{path}[{i}]")
+
+    walk(raw_config, "")
+    if flagged:
+        logger.warning(
+            "%s contains plaintext secrets at: %s — use ${ENV_VAR} references "
+            "instead so credentials stay out of files",
+            config_path,
+            ", ".join(flagged[:5]) + (" …" if len(flagged) > 5 else ""),
+        )
+
 
 @dataclass
 class AuthConfig:
@@ -255,6 +297,8 @@ class MCPProfileConfig:
 
             # Store raw config for API access
             self.raw_config = raw_config
+
+            _warn_plaintext_secrets(raw_config, self.config_path)
 
             # Substitute environment variables
             config = self._substitute_env_vars(raw_config)

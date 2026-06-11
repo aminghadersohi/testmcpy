@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react'
-import { BrowserRouter as Router, Routes, Route, NavLink, useNavigate, useLocation } from 'react-router-dom'
+import { BrowserRouter as Router, Routes, Route, NavLink, Navigate, useNavigate, useLocation } from 'react-router-dom'
 import {
   Package,
   MessageSquare,
@@ -14,12 +14,9 @@ import {
   Shield,
   History,
   BarChart3,
-  Grid3X3,
   Sun,
   Moon,
   Monitor,
-  GitCompare,
-  Heart,
   TrendingUp,
 } from 'lucide-react'
 
@@ -32,10 +29,8 @@ import LLMProfiles from './pages/LLMProfiles'
 import AuthDebugger from './pages/AuthDebugger'
 import GenerationHistory from './pages/GenerationHistory'
 import Reports from './pages/Reports'
-import CompatibilityMatrix from './pages/CompatibilityMatrix'
-import MetricsDashboard from './pages/MetricsDashboard'
-import RunComparison from './pages/RunComparison'
-import MCPHealth from './pages/MCPHealth'
+import Performance from './pages/Performance'
+import Servers from './pages/Servers'
 import SecurityDashboard from './pages/SecurityDashboard'
 import { TestRunProvider } from './contexts/TestRunContext'
 import { ThemeProvider, useTheme } from './contexts/ThemeContext'
@@ -345,16 +340,15 @@ function AppContent() {
   const navItems = [
     { path: '/', label: 'Explorer', icon: Package },
     { path: '/tests', label: 'Tests', icon: FileText },
-    { path: '/reports', label: 'Reports', icon: BarChart3 },
-    { path: '/compatibility', label: 'Compat', icon: Grid3X3 },
-    { path: '/generation-history', label: 'Gen History', icon: History },
     { path: '/chat', label: 'Interact', icon: MessageSquare },
     { section: 'Analytics' },
-    { path: '/metrics', label: 'Metrics', icon: TrendingUp },
-    { path: '/compare', label: 'Compare', icon: GitCompare },
-    { path: '/mcp-health', label: 'MCP Health', icon: Heart },
-    { path: '/security', label: 'Security', icon: Shield },
+    { path: '/reports', label: 'Reports', icon: BarChart3 },
+    { path: '/performance', label: 'Performance', icon: TrendingUp },
+    { path: '/generation-history', label: 'Gen History', icon: History },
+    { section: 'Infrastructure' },
+    { path: '/servers', label: 'Servers', icon: Server },
     { section: 'Settings' },
+    { path: '/security', label: 'Security', icon: Shield },
     { path: '/auth-debugger', label: 'Auth Debug', icon: Shield },
     { path: '/config', label: 'Config', icon: Settings },
   ]
@@ -445,7 +439,7 @@ function AppContent() {
                   setSidebarOpen(!sidebarOpen)
                 }
               }}
-              className="p-1.5 hover:bg-surface-hover rounded-lg transition-all duration-200 text-text-tertiary hover:text-text-primary"
+              className="min-w-[44px] min-h-[44px] -m-2.5 flex items-center justify-center hover:bg-surface-hover rounded-lg transition-all duration-200 text-text-tertiary hover:text-text-primary"
               aria-label="Toggle sidebar"
             >
               {showLabels ? <X size={16} /> : <Menu size={18} />}
@@ -587,7 +581,7 @@ function AppContent() {
           <div className="md:hidden flex items-center justify-between px-4 py-2.5 border-b border-border bg-surface-elevated">
             <button
               onClick={() => setMobileMenuOpen(true)}
-              className="p-1.5 hover:bg-surface-hover rounded-lg transition-all duration-200 text-text-secondary hover:text-text-primary"
+              className="min-w-[44px] min-h-[44px] -ml-2.5 flex items-center justify-center hover:bg-surface-hover rounded-lg transition-all duration-200 text-text-secondary hover:text-text-primary"
               aria-label="Open menu"
             >
               <Menu size={20} />
@@ -612,11 +606,13 @@ function AppContent() {
               <Route path="/chat" element={<ChatInterface selectedProfiles={selectedProfiles} selectedLlmProfile={selectedLlmProfile} llmProfiles={llmProfiles} />} />
               <Route path="/tests" element={<TestManager selectedProfiles={selectedProfiles} selectedLlmProfile={selectedLlmProfile} llmProfiles={llmProfiles} />} />
               <Route path="/reports" element={<Reports />} />
-              <Route path="/compatibility" element={<CompatibilityMatrix />} />
               <Route path="/generation-history" element={<GenerationHistory />} />
-              <Route path="/metrics" element={<MetricsDashboard />} />
-              <Route path="/compare" element={<RunComparison />} />
-              <Route path="/mcp-health" element={<MCPHealth />} />
+              <Route path="/performance" element={<Performance />} />
+              <Route path="/metrics" element={<Navigate to="/performance" replace />} />
+              <Route path="/compare" element={<Navigate to="/performance" replace />} />
+              <Route path="/servers" element={<Servers />} />
+              <Route path="/mcp-health" element={<Navigate to="/servers" replace />} />
+              <Route path="/compatibility" element={<Navigate to="/servers" replace />} />
               <Route path="/security" element={<SecurityDashboard />} />
               <Route path="/auth-debugger" element={<AuthDebugger />} />
               <Route path="/config" element={<Configuration />} />

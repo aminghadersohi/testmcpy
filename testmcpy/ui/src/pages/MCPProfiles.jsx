@@ -55,12 +55,12 @@ function ProfileEditorModal({ profile, onSave, onCancel }) {
         <form onSubmit={handleSubmit}>
           <div className="space-y-4">
             <div>
-              <label className="block text-sm font-medium mb-1">Profile Name</label>
+              <label className="block text-sm font-medium mb-1 text-text-secondary">Profile Name</label>
               <input
                 type="text"
                 value={name}
                 onChange={(e) => setName(e.target.value)}
-                className="input w-full"
+                className={`input w-full${errors.name ? ' border-error/50' : ''}`}
                 placeholder="e.g., Production, Development"
                 autoFocus
               />
@@ -69,7 +69,7 @@ function ProfileEditorModal({ profile, onSave, onCancel }) {
               )}
             </div>
             <div>
-              <label className="block text-sm font-medium mb-1">Description</label>
+              <label className="block text-sm font-medium mb-1 text-text-secondary">Description</label>
               <textarea
                 value={description}
                 onChange={(e) => setDescription(e.target.value)}
@@ -79,11 +79,11 @@ function ProfileEditorModal({ profile, onSave, onCancel }) {
               />
             </div>
           </div>
-          <div className="flex justify-end gap-3 mt-6">
-            <button type="button" onClick={onCancel} className="btn btn-secondary">
+          <div className="flex flex-col-reverse sm:flex-row sm:justify-end gap-3 mt-6">
+            <button type="button" onClick={onCancel} className="btn btn-secondary w-full sm:w-auto">
               Cancel
             </button>
-            <button type="submit" className="btn btn-primary">
+            <button type="submit" className="btn btn-primary w-full sm:w-auto">
               <Save size={16} />
               Save
             </button>
@@ -196,12 +196,12 @@ function MCPEditorModal({ mcp, onSave, onCancel }) {
           <div className="space-y-4 max-h-[60vh] overflow-y-auto pr-2">
             {/* Basic Info */}
             <div>
-              <label className="block text-sm font-medium mb-1">Server Name</label>
+              <label className="block text-sm font-medium mb-1 text-text-secondary">Server Name</label>
               <input
                 type="text"
                 value={formData.name}
                 onChange={(e) => updateField('name', e.target.value)}
-                className="input w-full"
+                className={`input w-full${errors.name ? ' border-error/50' : ''}`}
                 placeholder="e.g., Superset MCP"
                 autoFocus
               />
@@ -210,7 +210,7 @@ function MCPEditorModal({ mcp, onSave, onCancel }) {
 
             {/* Transport Type */}
             <div>
-              <label className="block text-sm font-medium mb-1">Transport</label>
+              <label className="block text-sm font-medium mb-1 text-text-secondary">Transport</label>
               <select
                 value={formData.transport}
                 onChange={(e) => updateField('transport', e.target.value)}
@@ -229,18 +229,18 @@ function MCPEditorModal({ mcp, onSave, onCancel }) {
             {formData.transport === 'stdio' ? (
               <>
                 <div>
-                  <label className="block text-sm font-medium mb-1">Command</label>
+                  <label className="block text-sm font-medium mb-1 text-text-secondary">Command</label>
                   <input
                     type="text"
                     value={formData.command}
                     onChange={(e) => updateField('command', e.target.value)}
-                    className="input w-full font-mono text-sm"
+                    className={`input w-full font-mono text-sm${errors.command ? ' border-error/50' : ''}`}
                     placeholder="e.g., npx, python, node"
                   />
                   {errors.command && <p className="text-error text-xs mt-1">{errors.command}</p>}
                 </div>
                 <div>
-                  <label className="block text-sm font-medium mb-1">Arguments (space-separated)</label>
+                  <label className="block text-sm font-medium mb-1 text-text-secondary">Arguments (space-separated)</label>
                   <input
                     type="text"
                     value={formData.args}
@@ -255,12 +255,12 @@ function MCPEditorModal({ mcp, onSave, onCancel }) {
               </>
             ) : (
               <div>
-                <label className="block text-sm font-medium mb-1">MCP URL</label>
+                <label className="block text-sm font-medium mb-1 text-text-secondary">MCP URL</label>
                 <input
                   type="text"
                   value={formData.mcp_url}
                   onChange={(e) => updateField('mcp_url', e.target.value)}
-                  className="input w-full font-mono text-sm"
+                  className={`input w-full font-mono text-sm${errors.mcp_url ? ' border-error/50' : ''}`}
                   placeholder="https://api.example.com/mcp/"
                 />
                 {errors.mcp_url && <p className="text-error text-xs mt-1">{errors.mcp_url}</p>}
@@ -269,7 +269,7 @@ function MCPEditorModal({ mcp, onSave, onCancel }) {
 
             {/* Auth Type */}
             <div>
-              <label className="block text-sm font-medium mb-1">Authentication Type</label>
+              <label className="block text-sm font-medium mb-1 text-text-secondary">Authentication Type</label>
               <select
                 value={formData.auth_type}
                 onChange={(e) => updateField('auth_type', e.target.value)}
@@ -285,12 +285,12 @@ function MCPEditorModal({ mcp, onSave, onCancel }) {
             {/* Auth Fields - Bearer */}
             {formData.auth_type === 'bearer' && (
               <div>
-                <label className="block text-sm font-medium mb-1">Bearer Token</label>
+                <label className="block text-sm font-medium mb-1 text-text-secondary">Bearer Token</label>
                 <input
                   type="password"
                   value={formData.token}
                   onChange={(e) => updateField('token', e.target.value)}
-                  className="input w-full font-mono text-sm"
+                  className={`input w-full font-mono text-sm${errors.token ? ' border-error/50' : ''}`}
                   placeholder="Enter token or ${ENV_VAR_NAME}"
                 />
                 {errors.token && <p className="text-error text-xs mt-1">{errors.token}</p>}
@@ -304,34 +304,34 @@ function MCPEditorModal({ mcp, onSave, onCancel }) {
             {formData.auth_type === 'jwt' && (
               <>
                 <div>
-                  <label className="block text-sm font-medium mb-1">API URL</label>
+                  <label className="block text-sm font-medium mb-1 text-text-secondary">API URL</label>
                   <input
                     type="text"
                     value={formData.api_url}
                     onChange={(e) => updateField('api_url', e.target.value)}
-                    className="input w-full font-mono text-sm"
+                    className={`input w-full font-mono text-sm${errors.api_url ? ' border-error/50' : ''}`}
                     placeholder="https://api.example.com/v1/auth/"
                   />
                   {errors.api_url && <p className="text-error text-xs mt-1">{errors.api_url}</p>}
                 </div>
                 <div>
-                  <label className="block text-sm font-medium mb-1">API Token</label>
+                  <label className="block text-sm font-medium mb-1 text-text-secondary">API Token</label>
                   <input
                     type="password"
                     value={formData.api_token}
                     onChange={(e) => updateField('api_token', e.target.value)}
-                    className="input w-full font-mono text-sm"
+                    className={`input w-full font-mono text-sm${errors.api_token ? ' border-error/50' : ''}`}
                     placeholder="Enter token or ${ENV_VAR_NAME}"
                   />
                   {errors.api_token && <p className="text-error text-xs mt-1">{errors.api_token}</p>}
                 </div>
                 <div>
-                  <label className="block text-sm font-medium mb-1">API Secret</label>
+                  <label className="block text-sm font-medium mb-1 text-text-secondary">API Secret</label>
                   <input
                     type="password"
                     value={formData.api_secret}
                     onChange={(e) => updateField('api_secret', e.target.value)}
-                    className="input w-full font-mono text-sm"
+                    className={`input w-full font-mono text-sm${errors.api_secret ? ' border-error/50' : ''}`}
                     placeholder="Enter secret or ${ENV_VAR_NAME}"
                   />
                   {errors.api_secret && <p className="text-error text-xs mt-1">{errors.api_secret}</p>}
@@ -361,40 +361,40 @@ function MCPEditorModal({ mcp, onSave, onCancel }) {
                 {!formData.oauth_auto_discover && (
                   <>
                     <div>
-                      <label className="block text-sm font-medium mb-1">Client ID</label>
+                      <label className="block text-sm font-medium mb-1 text-text-secondary">Client ID</label>
                       <input
                         type="text"
                         value={formData.client_id}
                         onChange={(e) => updateField('client_id', e.target.value)}
-                        className="input w-full font-mono text-sm"
+                        className={`input w-full font-mono text-sm${errors.client_id ? ' border-error/50' : ''}`}
                         placeholder="Enter client ID or ${ENV_VAR_NAME}"
                       />
                       {errors.client_id && <p className="text-error text-xs mt-1">{errors.client_id}</p>}
                     </div>
                     <div>
-                      <label className="block text-sm font-medium mb-1">Client Secret</label>
+                      <label className="block text-sm font-medium mb-1 text-text-secondary">Client Secret</label>
                       <input
                         type="password"
                         value={formData.client_secret}
                         onChange={(e) => updateField('client_secret', e.target.value)}
-                        className="input w-full font-mono text-sm"
+                        className={`input w-full font-mono text-sm${errors.client_secret ? ' border-error/50' : ''}`}
                         placeholder="Enter secret or ${ENV_VAR_NAME}"
                       />
                       {errors.client_secret && <p className="text-error text-xs mt-1">{errors.client_secret}</p>}
                     </div>
                     <div>
-                      <label className="block text-sm font-medium mb-1">Token URL</label>
+                      <label className="block text-sm font-medium mb-1 text-text-secondary">Token URL</label>
                       <input
                         type="text"
                         value={formData.token_url}
                         onChange={(e) => updateField('token_url', e.target.value)}
-                        className="input w-full font-mono text-sm"
+                        className={`input w-full font-mono text-sm${errors.token_url ? ' border-error/50' : ''}`}
                         placeholder="https://api.example.com/oauth/token"
                       />
                       {errors.token_url && <p className="text-error text-xs mt-1">{errors.token_url}</p>}
                     </div>
                     <div>
-                      <label className="block text-sm font-medium mb-1">Scopes (comma-separated)</label>
+                      <label className="block text-sm font-medium mb-1 text-text-secondary">Scopes (comma-separated)</label>
                       <input
                         type="text"
                         value={formData.scopes}
@@ -411,7 +411,7 @@ function MCPEditorModal({ mcp, onSave, onCancel }) {
             {/* Advanced Settings */}
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div>
-                <label className="block text-sm font-medium mb-1">Timeout (seconds)</label>
+                <label className="block text-sm font-medium mb-1 text-text-secondary">Timeout (seconds)</label>
                 <input
                   type="number"
                   value={formData.timeout}
@@ -422,7 +422,7 @@ function MCPEditorModal({ mcp, onSave, onCancel }) {
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium mb-1">Rate Limit (req/min)</label>
+                <label className="block text-sm font-medium mb-1 text-text-secondary">Rate Limit (req/min)</label>
                 <input
                   type="number"
                   value={formData.rate_limit_rpm}
@@ -450,11 +450,11 @@ function MCPEditorModal({ mcp, onSave, onCancel }) {
             </div>
           </div>
 
-          <div className="flex justify-end gap-3 mt-6 pt-4 border-t border-border">
-            <button type="button" onClick={onCancel} className="btn btn-secondary">
+          <div className="flex flex-col-reverse sm:flex-row sm:justify-end gap-3 mt-6 pt-4 border-t border-border">
+            <button type="button" onClick={onCancel} className="btn btn-secondary w-full sm:w-auto">
               Cancel
             </button>
-            <button type="submit" className="btn btn-primary">
+            <button type="submit" className="btn btn-primary w-full sm:w-auto">
               <Save size={16} />
               Save MCP
             </button>
@@ -561,7 +561,7 @@ function MCPWizard({ profiles, onComplete, onCancel }) {
       component: ({ data, setData }) => (
         <div className="space-y-4">
           <div>
-            <label className="block text-sm font-medium mb-1">Server Name</label>
+            <label className="block text-sm font-medium mb-1 text-text-secondary">Server Name</label>
             <input
               type="text"
               value={data.name}
@@ -572,7 +572,7 @@ function MCPWizard({ profiles, onComplete, onCancel }) {
             />
           </div>
           <div>
-            <label className="block text-sm font-medium mb-1">Description (optional)</label>
+            <label className="block text-sm font-medium mb-1 text-text-secondary">Description (optional)</label>
             <input
               type="text"
               value={data.description}
@@ -582,8 +582,8 @@ function MCPWizard({ profiles, onComplete, onCancel }) {
             />
           </div>
           <div>
-            <label className="block text-sm font-medium mb-1">Transport Type</label>
-            <div className="grid grid-cols-2 gap-3">
+            <label className="block text-sm font-medium mb-1 text-text-secondary">Transport Type</label>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               {[
                 { value: 'sse', label: 'HTTP / SSE', desc: 'Remote server over HTTP with SSE streaming' },
                 { value: 'stdio', label: 'Stdio', desc: 'Local subprocess via stdin/stdout JSON-RPC' },
@@ -623,7 +623,7 @@ function MCPWizard({ profiles, onComplete, onCancel }) {
           {data.transport === 'stdio' ? (
             <>
               <div>
-                <label className="block text-sm font-medium mb-1">Command</label>
+                <label className="block text-sm font-medium mb-1 text-text-secondary">Command</label>
                 <input
                   type="text"
                   value={data.command}
@@ -634,7 +634,7 @@ function MCPWizard({ profiles, onComplete, onCancel }) {
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium mb-1">Arguments (space-separated)</label>
+                <label className="block text-sm font-medium mb-1 text-text-secondary">Arguments (space-separated)</label>
                 <input
                   type="text"
                   value={data.args}
@@ -646,7 +646,7 @@ function MCPWizard({ profiles, onComplete, onCancel }) {
             </>
           ) : (
             <div>
-              <label className="block text-sm font-medium mb-1">MCP URL</label>
+              <label className="block text-sm font-medium mb-1 text-text-secondary">MCP URL</label>
               <input
                 type="text"
                 value={data.mcp_url}
@@ -657,9 +657,9 @@ function MCPWizard({ profiles, onComplete, onCancel }) {
               />
             </div>
           )}
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div>
-              <label className="block text-sm font-medium mb-1">Timeout (seconds)</label>
+              <label className="block text-sm font-medium mb-1 text-text-secondary">Timeout (seconds)</label>
               <input
                 type="number"
                 value={data.timeout}
@@ -669,7 +669,7 @@ function MCPWizard({ profiles, onComplete, onCancel }) {
               />
             </div>
             <div>
-              <label className="block text-sm font-medium mb-1">Rate Limit (req/min)</label>
+              <label className="block text-sm font-medium mb-1 text-text-secondary">Rate Limit (req/min)</label>
               <input
                 type="number"
                 value={data.rate_limit_rpm}
@@ -688,7 +688,7 @@ function MCPWizard({ profiles, onComplete, onCancel }) {
       component: ({ data, setData }) => (
         <div className="space-y-4">
           <div>
-            <label className="block text-sm font-medium mb-1">Authentication Type</label>
+            <label className="block text-sm font-medium mb-1 text-text-secondary">Authentication Type</label>
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
               {[
                 { value: 'none', label: 'None', icon: <Unlock size={16} /> },
@@ -715,7 +715,7 @@ function MCPWizard({ profiles, onComplete, onCancel }) {
 
           {data.auth_type === 'bearer' && (
             <div>
-              <label className="block text-sm font-medium mb-1">Bearer Token</label>
+              <label className="block text-sm font-medium mb-1 text-text-secondary">Bearer Token</label>
               <input
                 type="password"
                 value={data.token}
@@ -730,19 +730,19 @@ function MCPWizard({ profiles, onComplete, onCancel }) {
           {data.auth_type === 'jwt' && (
             <>
               <div>
-                <label className="block text-sm font-medium mb-1">API URL</label>
+                <label className="block text-sm font-medium mb-1 text-text-secondary">API URL</label>
                 <input type="text" value={data.api_url}
                   onChange={(e) => setData(prev => ({ ...prev, api_url: e.target.value }))}
                   className="input w-full font-mono text-sm" placeholder="https://api.example.com/v1/auth/" />
               </div>
               <div>
-                <label className="block text-sm font-medium mb-1">API Token</label>
+                <label className="block text-sm font-medium mb-1 text-text-secondary">API Token</label>
                 <input type="password" value={data.api_token}
                   onChange={(e) => setData(prev => ({ ...prev, api_token: e.target.value }))}
                   className="input w-full font-mono text-sm" placeholder="Enter token or ${ENV_VAR_NAME}" />
               </div>
               <div>
-                <label className="block text-sm font-medium mb-1">API Secret</label>
+                <label className="block text-sm font-medium mb-1 text-text-secondary">API Secret</label>
                 <input type="password" value={data.api_secret}
                   onChange={(e) => setData(prev => ({ ...prev, api_secret: e.target.value }))}
                   className="input w-full font-mono text-sm" placeholder="Enter secret or ${ENV_VAR_NAME}" />
@@ -765,19 +765,19 @@ function MCPWizard({ profiles, onComplete, onCancel }) {
               {!data.oauth_auto_discover && (
                 <>
                   <div>
-                    <label className="block text-sm font-medium mb-1">Client ID</label>
+                    <label className="block text-sm font-medium mb-1 text-text-secondary">Client ID</label>
                     <input type="text" value={data.client_id}
                       onChange={(e) => setData(prev => ({ ...prev, client_id: e.target.value }))}
                       className="input w-full font-mono text-sm" placeholder="Enter client ID" />
                   </div>
                   <div>
-                    <label className="block text-sm font-medium mb-1">Client Secret</label>
+                    <label className="block text-sm font-medium mb-1 text-text-secondary">Client Secret</label>
                     <input type="password" value={data.client_secret}
                       onChange={(e) => setData(prev => ({ ...prev, client_secret: e.target.value }))}
                       className="input w-full font-mono text-sm" placeholder="Enter secret" />
                   </div>
                   <div>
-                    <label className="block text-sm font-medium mb-1">Token URL</label>
+                    <label className="block text-sm font-medium mb-1 text-text-secondary">Token URL</label>
                     <input type="text" value={data.token_url}
                       onChange={(e) => setData(prev => ({ ...prev, token_url: e.target.value }))}
                       className="input w-full font-mono text-sm" placeholder="https://api.example.com/oauth/token" />
@@ -909,7 +909,7 @@ function MCPWizard({ profiles, onComplete, onCancel }) {
           </div>
 
           <div>
-            <label className="block text-sm font-medium mb-1">Add to Profile</label>
+            <label className="block text-sm font-medium mb-1 text-text-secondary">Add to Profile</label>
             <select
               value={data.targetProfileId}
               onChange={(e) => setData(prev => ({ ...prev, targetProfileId: e.target.value }))}
@@ -1371,7 +1371,7 @@ function MCPProfiles({ selectedProfiles = [], onSelectProfiles, hideHeader = fal
     return (
       <div className="flex items-center justify-center h-full">
         <div className="flex flex-col items-center gap-3">
-          <div className="w-8 h-8 border-2 border-primary border-t-transparent rounded-full animate-spin"></div>
+          <Loader2 className="animate-spin text-primary" size={32} />
           <div className="text-text-secondary">Loading MCP profiles...</div>
         </div>
       </div>

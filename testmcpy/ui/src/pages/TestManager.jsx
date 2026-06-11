@@ -29,6 +29,7 @@ import {
 } from 'lucide-react'
 import Editor from '@monaco-editor/react'
 import Wizard from '../components/Wizard'
+import Badge from '../components/Badge'
 import TestStatusIndicator from '../components/TestStatusIndicator'
 import TestResultPanel from '../components/TestResultPanel'
 import { useKeyboardShortcuts, useAnnounce } from '../hooks/useKeyboardShortcuts'
@@ -482,6 +483,17 @@ function TestManager({ selectedProfiles = [], selectedLlmProfile = null, llmProf
   const [editorMinimap, setEditorMinimap] = useState(() => {
     return localStorage.getItem('testManagerEditorMinimap') === '1'
   })
+  // Below md, strip Monaco chrome (minimap, line numbers, gutters) so the
+  // code area keeps usable width on phones.
+  const [isNarrowViewport, setIsNarrowViewport] = useState(() =>
+    typeof window !== 'undefined' ? !window.matchMedia('(min-width: 768px)').matches : false
+  )
+  useEffect(() => {
+    const mq = window.matchMedia('(min-width: 768px)')
+    const onChange = (e) => setIsNarrowViewport(!e.matches)
+    mq.addEventListener('change', onChange)
+    return () => mq.removeEventListener('change', onChange)
+  }, [])
   const editorRef = useRef(null)
   const monacoRef = useRef(null)
   const testLocationsRef = useRef([]) // Ref to avoid stale closure in click handler
@@ -533,7 +545,13 @@ function TestManager({ selectedProfiles = [], selectedLlmProfile = null, llmProf
     document.body.style.userSelect = ''
   }
 
-  // Bottom panel drag — pure DOM, no setState during drag
+  // Mouse or touch coordinates from any pointer event
+  const pointerXY = (e) => {
+    const p = e.touches?.[0] ?? e.changedTouches?.[0] ?? e
+    return { x: p.clientX, y: p.clientY }
+  }
+
+  // Bottom panel drag — pure DOM, no setState during drag (mouse + touch)
   const handleDragStart = useCallback((e) => {
     e.preventDefault()
     showOverlay('row-resize')
@@ -541,11 +559,12 @@ function TestManager({ selectedProfiles = [], selectedLlmProfile = null, llmProf
     let currentHeight = bottomPanelHeight
 
     const onMove = (e) => {
+      const { y } = pointerXY(e)
       if (rafRef.current) cancelAnimationFrame(rafRef.current)
       rafRef.current = requestAnimationFrame(() => {
         if (!containerRef.current) return
         const rect = containerRef.current.getBoundingClientRect()
-        const h = Math.min(Math.max(rect.bottom - e.clientY, 80), rect.height * 0.8)
+        const h = Math.min(Math.max(rect.bottom - y, 80), rect.height * 0.8)
         currentHeight = h
         if (panelEl) panelEl.style.height = `${h}px`
       })
@@ -556,15 +575,19 @@ function TestManager({ selectedProfiles = [], selectedLlmProfile = null, llmProf
       hideOverlay()
       document.removeEventListener('mousemove', onMove)
       document.removeEventListener('mouseup', onUp)
+      document.removeEventListener('touchmove', onMove)
+      document.removeEventListener('touchend', onUp)
       setBottomPanelHeight(currentHeight)
       localStorage.setItem('testManagerPanelHeight', String(currentHeight))
     }
 
     document.addEventListener('mousemove', onMove)
     document.addEventListener('mouseup', onUp)
+    document.addEventListener('touchmove', onMove, { passive: false })
+    document.addEventListener('touchend', onUp)
   }, [bottomPanelHeight])
 
-  // Sidebar drag — pure DOM, no setState during drag
+  // Sidebar drag — pure DOM, no setState during drag (mouse + touch)
   const handleSidebarDragStart = useCallback((e) => {
     e.preventDefault()
     showOverlay('col-resize')
@@ -574,9 +597,10 @@ function TestManager({ selectedProfiles = [], selectedLlmProfile = null, llmProf
     let currentWidth = sidebarWidth
 
     const onMove = (e) => {
+      const { x } = pointerXY(e)
       if (rafRef.current) cancelAnimationFrame(rafRef.current)
       rafRef.current = requestAnimationFrame(() => {
-        const w = Math.min(Math.max(e.clientX - sidebarLeft, 180), 600)
+        const w = Math.min(Math.max(x - sidebarLeft, 180), 600)
         currentWidth = w
         if (sidebarEl) sidebarEl.style.width = `${w}px`
       })
@@ -587,12 +611,16 @@ function TestManager({ selectedProfiles = [], selectedLlmProfile = null, llmProf
       hideOverlay()
       document.removeEventListener('mousemove', onMove)
       document.removeEventListener('mouseup', onUp)
+      document.removeEventListener('touchmove', onMove)
+      document.removeEventListener('touchend', onUp)
       setSidebarWidth(currentWidth)
       localStorage.setItem('testManagerSidebarWidth', String(currentWidth))
     }
 
     document.addEventListener('mousemove', onMove)
     document.addEventListener('mouseup', onUp)
+    document.addEventListener('touchmove', onMove, { passive: false })
+    document.addEventListener('touchend', onUp)
   }, [sidebarWidth])
 
   useEffect(() => {
@@ -1487,10 +1515,10 @@ tests:
                 <span className="font-medium text-text-primary">{folderName}</span>
                 <span className="text-xs text-text-tertiary ml-auto">{files.length} file{files.length !== 1 ? 's' : ''}</span>
                 {directoryRunProgress?.folder === folderName ? (
-                  <span className="flex items-center gap-1 px-1.5 py-0.5 rounded bg-warning/20 text-warning text-[10px] font-medium">
+                  <Badge variant="warning" size="xs" className="font-medium">
                     <Loader2 size={10} className="animate-spin" />
                     {directoryRunProgress.current}/{directoryRunProgress.total}
-                  </span>
+                  </Badge>
                 ) : (
                   <button
                     onClick={(e) => {
@@ -1568,6 +1596,7 @@ tests:
         <div
           className="hidden md:flex w-1.5 flex-shrink-0 cursor-col-resize bg-transparent hover:bg-primary/30 active:bg-primary/50 transition-colors items-center justify-center group"
           onMouseDown={handleSidebarDragStart}
+          onTouchStart={handleSidebarDragStart}
           title="Drag to resize"
         >
           <div className="w-0.5 h-8 bg-border group-hover:bg-primary/50 rounded-full transition-colors" />
@@ -1752,15 +1781,15 @@ tests:
                     onMount={handleEditorDidMount}
                     options={{
                       readOnly: !editMode,
-                      minimap: { enabled: editorMinimap },
-                      wordWrap: editorWordWrap ? 'on' : 'off',
+                      minimap: { enabled: editorMinimap && !isNarrowViewport },
+                      wordWrap: isNarrowViewport ? 'on' : editorWordWrap ? 'on' : 'off',
                       fontSize: 14,
-                      lineNumbers: 'on',
+                      lineNumbers: isNarrowViewport ? 'off' : 'on',
                       scrollBeyondLastLine: false,
                       automaticLayout: true,
-                      glyphMargin: true,
-                      folding: true,
-                      lineDecorationsWidth: 5,
+                      glyphMargin: !isNarrowViewport,
+                      folding: !isNarrowViewport,
+                      lineDecorationsWidth: isNarrowViewport ? 2 : 5,
                     }}
                   />
                 </div>
@@ -1793,7 +1822,8 @@ tests:
                 {/* Drag handle */}
                 <div
                   onMouseDown={handleDragStart}
-                  className="h-1.5 flex-shrink-0 cursor-row-resize bg-border hover:bg-primary/40 transition-colors group flex items-center justify-center"
+                  onTouchStart={handleDragStart}
+                  className="h-2.5 md:h-1.5 flex-shrink-0 cursor-row-resize bg-border hover:bg-primary/40 transition-colors group flex items-center justify-center touch-none"
                 >
                   <div className="w-8 h-0.5 rounded-full bg-text-disabled group-hover:bg-primary transition-colors" />
                 </div>

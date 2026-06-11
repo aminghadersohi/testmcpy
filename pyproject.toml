@@ -93,7 +93,7 @@ testmcpy = [
 
 [project]
 name = "testmcpy"
-version = "0.7.26"
+version = "0.8.0"
 description = "A comprehensive testing framework for validating LLM tool calling capabilities with MCP services"
 authors = [{name = "Amin Ghadersohi"}]
 license = "Apache-2.0"
@@ -197,6 +197,11 @@ export = [
 ]
 bedrock = [
     "boto3>=1.28.0",
+]
+postgres = [
+    # Enables TESTMCPY_DB_URL=postgresql+psycopg://... for a shared
+    # results database. SQLite stays the default.
+    "psycopg[binary]>=3.1,<4.0",
 ]
 all = [
     "fastapi>=0.104.0,<1.0.0",

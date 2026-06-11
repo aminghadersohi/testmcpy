@@ -48,6 +48,41 @@ jobs:
           file: ./coverage.xml
           fail_ci_if_error: false
 
+  mcp-prerelease-canary:
+    # Early warning for the MCP stateless-spec transition (2026-07-28 RC):
+    # installs mcp/fastmcp pre-releases on top of our pins and runs the
+    # unit suite. Never blocks CI — a red canary means "start the
+    # migration", not "this PR is broken".
+    name: Canary (mcp/fastmcp pre-releases)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: 'pip'
+          cache-dependency-path: pyproject.toml
+      - name: Install with mcp/fastmcp pre-releases
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,server]"
+          pip install --upgrade --pre mcp fastmcp
+          pip list | grep -E "^(mcp|fastmcp) "
+      - name: Run unit tests against pre-releases (signal via warnings, never red)
+        run: |
+          # Force-upgrading past our own pins makes `pip check` complain by
+          # construction — that line is noise. The real canary signal is
+          # whether the suite still passes on the next mcp/fastmcp line.
+          pip check | grep -v "testmcpy .* has requirement" || true
+          if pytest unit_tests/ -q; then
+            echo "Canary green: unit suite passes against pre-release mcp/fastmcp" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::warning title=mcp pre-release canary::unit suite FAILS against pre-release mcp/fastmcp — start the stateless-spec migration (see plan risk #1)"
+            echo "Canary RED: unit suite fails against pre-release mcp/fastmcp — migration needed" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
   ui:
     runs-on: ubuntu-latest
 

@@ -1292,10 +1292,10 @@ function AuthDebugger() {
                       <button
                         key={type}
                         onClick={() => setAuthType(type)}
-                        className={`flex-1 px-4 py-2 rounded-lg font-medium transition-colors ${
+                        className={`flex-1 justify-center px-4 py-2 rounded-lg text-sm font-medium transition-colors flex items-center gap-2 ${
                           authType === type
                             ? 'bg-primary text-white'
-                            : 'bg-surface border border-border text-text-secondary hover:text-text-primary'
+                            : 'bg-surface hover:bg-surface-hover text-text-secondary'
                         }`}
                       >
                         {type.toUpperCase()}

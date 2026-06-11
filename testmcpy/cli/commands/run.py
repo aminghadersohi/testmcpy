@@ -309,6 +309,35 @@ def run(
             "process. (SC-106138)"
         ),
     ),
+    junit_xml: Optional[Path] = typer.Option(
+        None,
+        "--junit-xml",
+        help="Write a JUnit XML report to this path (for CI test summaries)",
+    ),
+    session_id_opt: Optional[str] = typer.Option(
+        None,
+        "--session-id",
+        hidden=True,
+        help="Group this run under an existing session (used by `testmcpy bench`)",
+    ),
+    gate: bool = typer.Option(
+        False,
+        "--gate",
+        help=(
+            "Enforce CI gate thresholds from .testmcpy-gate.yaml (or "
+            "--gate-config) and exit non-zero if the run fails the gate"
+        ),
+    ),
+    gate_config: Optional[Path] = typer.Option(
+        None,
+        "--gate-config",
+        help="Path to a CI gate config YAML (implies --gate)",
+    ),
+    min_pass_rate: Optional[float] = typer.Option(
+        None,
+        "--min-pass-rate",
+        help="Minimum pass rate percentage required, e.g. 85 (implies --gate)",
+    ),
 ):
     """
     Run test cases against MCP service.
@@ -319,8 +348,14 @@ def run(
         console.print(f"[red]Error: test path does not exist: {test_path}[/red]")
         raise typer.Exit(1)
 
-    # Generate session ID to group multiple runs from the same CLI invocation
-    session_id = str(uuid.uuid4())
+    gate_enabled = gate or gate_config is not None or min_pass_rate is not None
+    if gate_config is not None and not gate_config.exists():
+        console.print(f"[red]Error: gate config does not exist: {gate_config}[/red]")
+        raise typer.Exit(1)
+
+    # Group multiple runs from the same CLI invocation (or a parent
+    # `testmcpy bench` invocation, which passes --session-id)
+    session_id = session_id_opt or str(uuid.uuid4())
 
     # Build inline auth dict if --auth-type is provided
     inline_auth = None
@@ -571,6 +606,11 @@ def run(
 
         if dry_run:
             console.print("[yellow]DRY RUN - Not executing tests[/yellow]")
+            if gate_enabled:
+                console.print(
+                    "[yellow]Note: --gate is skipped during --dry-run "
+                    "(no results to evaluate); exit code is 0[/yellow]"
+                )
             for i, test in enumerate(test_cases, 1):
                 if test.is_auth_only:
                     auth_type = test.auth.get("type", "unknown") if test.auth else "unknown"
@@ -842,20 +882,87 @@ def run(
 
             console.print(f"\n[green]Report saved to {output}[/green]")
 
-        # Generate markdown eval report if requested
+        # Generate eval report if requested (.md/.json/.html via
+        # ReportGenerator, .xml as JUnit for CI systems)
+        suite_name = test_path.stem if test_path.is_file() else test_path.name
+
+        def _write_junit(path: Path) -> None:
+            from testmcpy.src.emitters import to_junit_xml
+
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(to_junit_xml([r.to_dict() for r in results], suite_name))
+            console.print(f"[green]JUnit report saved to {path}[/green]")
+
+        # Built lazily, shared by the --report branch and the step summary
+        # so the generator isn't constructed twice for the same data.
+        report_gen = None
+
+        def _report_generator():
+            nonlocal report_gen
+            if report_gen is None:
+                from testmcpy.src.report_generator import ReportGenerator
+
+                report_gen = ReportGenerator.from_test_results(
+                    suite_name=suite_name,
+                    results=results,
+                    title=report_title or suite_name,
+                )
+            return report_gen
+
         if report:
-            from testmcpy.src.report_generator import ReportGenerator
+            if report.suffix.lower() == ".xml":
+                _write_junit(report)
+            else:
+                saved_path = _report_generator().save(str(report))
+                console.print(f"\n[green]Eval report saved to {saved_path}[/green]")
 
-            suite_name = test_path.stem if test_path.is_file() else test_path.name
-            gen = ReportGenerator.from_test_results(
-                suite_name=suite_name,
-                results=results,
-                title=report_title or suite_name,
+        if junit_xml:
+            _write_junit(junit_xml)
+
+        # Inside GitHub Actions, append the markdown report to the job
+        # summary so results show on the workflow run page without any
+        # extra workflow steps.
+        import os
+
+        step_summary = os.environ.get("GITHUB_STEP_SUMMARY")
+        if step_summary:
+            # Reporting must never fail a completed run — and a crash here
+            # would surface only inside CI, the worst place to debug it.
+            try:
+                with open(step_summary, "a") as f:
+                    f.write(_report_generator().generate_markdown() + "\n")
+                console.print("[dim]Report appended to GitHub step summary[/dim]")
+            except Exception as e:  # noqa: BLE001
+                console.print(f"[dim]Note: Could not write step summary: {e}[/dim]")
+
+        # CI gate: evaluated last so results are already saved for the UI
+        # even when the gate fails the build.
+        if gate_enabled:
+            from testmcpy.src.ci_gate import load_gate_config
+
+            gate_cfg = (
+                load_gate_config(str(gate_config))
+                if gate_config is not None
+                else load_gate_config()
             )
-            saved_path = gen.save(str(report))
-            console.print(f"\n[green]Eval report saved to {saved_path}[/green]")
+            if min_pass_rate is not None:
+                gate_cfg.min_pass_rate = min_pass_rate
+            verdict = gate_cfg.evaluate([r.to_dict() for r in results])
 
-    asyncio.run(run_tests())
+            status = "[green]PASSED[/green]" if verdict["passed"] else "[red]FAILED[/red]"
+            console.print(
+                f"\n[bold]CI Gate:[/bold] {status} "
+                f"(pass rate {verdict['pass_rate']:.1f}%, "
+                f"minimum {gate_cfg.min_pass_rate:.1f}%)"
+            )
+            for failure in verdict["failures"]:
+                console.print(f"  [red]✗ {escape(failure)}[/red]")
+            return not verdict["passed"]
+        return False
+
+    gate_failed = asyncio.run(run_tests())
+    if gate_failed:
+        raise typer.Exit(1)
 
 
 @app.command()

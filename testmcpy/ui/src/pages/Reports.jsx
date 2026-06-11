@@ -1,23 +1,13 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react'
 import { useConfirm } from '../components/ConfirmDialog'
 import { useNotification } from '../components/NotificationProvider'
-import { useSearchParams } from 'react-router-dom'
+import { useSearchParams, Link } from 'react-router-dom'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import TraceView from '../components/TraceView'
+import Badge from '../components/Badge'
+import { Skeleton, ListItemSkeleton } from '../components/SkeletonLoader'
 import { formatDate, formatDuration, formatCost, formatTokens } from '../utils/formatters'
-import {
-  LineChart,
-  Line,
-  BarChart,
-  Bar,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  Tooltip,
-  Legend,
-  ResponsiveContainer,
-} from 'recharts'
 import {
   FileText,
   CheckCircle,
@@ -41,7 +31,8 @@ import {
   Link2,
   Download,
   CheckSquare,
-  TrendingUp,
+  Copy,
+  Check,
 } from 'lucide-react'
 
 const AUTO_REFRESH_INTERVAL = 10000
@@ -81,7 +72,7 @@ function CollapsibleSection({ title, icon: Icon, badge, defaultOpen = false, chi
         {Icon && <Icon size={14} className="text-text-secondary flex-shrink-0" />}
         <span className="text-xs font-semibold text-text-secondary uppercase tracking-wide">{title}</span>
         {badge !== undefined && (
-          <span className="text-xs px-1.5 py-0.5 rounded bg-surface-elevated text-text-tertiary">{badge}</span>
+          <Badge>{badge}</Badge>
         )}
       </button>
       {open && <div className="mt-2">{children}</div>}
@@ -123,7 +114,7 @@ function ToolCallDisplay({ call, index }) {
       <div className="flex-1 pb-3 min-w-0">
         <div className="flex items-center gap-2 mb-1">
           <span className="font-mono text-sm font-medium text-primary">{displayName}</span>
-          {isError && <span className="text-xs px-1.5 py-0.5 rounded bg-error/20 text-error">error</span>}
+          {isError && <Badge variant="error">error</Badge>}
         </div>
         {!isEmptyArgs && (
           <pre className="text-xs font-mono bg-surface p-2 rounded border border-border overflow-x-auto mb-2 text-text-secondary">
@@ -359,7 +350,7 @@ function TestResultCard({ result, providerHint, onFpToggle }) {
             </span>
           )}
         </div>
-        <div className="flex items-center gap-3 text-xs text-text-tertiary flex-shrink-0 ml-2">
+        <div className="flex items-center flex-wrap gap-3 text-xs text-text-tertiary flex-shrink-0 ml-2">
           <span
             className="font-mono"
             title="Aggregate evaluator score for this test (0.00–1.00). 1.00 = all evaluators passed at 100%."
@@ -686,260 +677,6 @@ function SmokeTestResultCard({ result }) {
   )
 }
 
-// Trends Tab Component
-const TREND_COLORS = ["#4ade80", "#60a5fa", "#f59e0b", "#f87171", "#a78bfa"]
-
-function TrendsTab({ testRuns }) {
-  // Helper: truncate a timestamp to date string YYYY-MM-DD
-  const toDateStr = (timestamp) => {
-    if (!timestamp) return null
-    try {
-      return new Date(timestamp).toISOString().slice(0, 10)
-    } catch {
-      return null
-    }
-  }
-
-  // 5a. Pass rate over time per test file
-  const passRateData = React.useMemo(() => {
-    // Get up to 5 unique test files
-    const fileSet = new Set()
-    testRuns.forEach(r => { if (r.test_file) fileSet.add(r.test_file) })
-    const files = Array.from(fileSet).slice(0, 5)
-
-    // Group by date
-    const byDate = {}
-    testRuns.forEach(run => {
-      const date = toDateStr(run.timestamp)
-      if (!date) return
-      if (!byDate[date]) byDate[date] = {}
-      const file = run.test_file
-      if (!file || !files.includes(file)) return
-      if (!byDate[date][file]) byDate[date][file] = { passed: 0, total: 0 }
-      byDate[date][file].passed += run.passed || 0
-      byDate[date][file].total += run.total_tests || 0
-    })
-
-    return {
-      files,
-      data: Object.entries(byDate)
-        .sort(([a], [b]) => a.localeCompare(b))
-        .map(([date, fileData]) => {
-          const row = { date }
-          files.forEach(f => {
-            const fd = fileData[f]
-            row[f] = fd && fd.total > 0 ? Math.round((fd.passed / fd.total) * 100) : null
-          })
-          return row
-        }),
-    }
-  }, [testRuns])
-
-  // 5b. Cost per run over time
-  const costData = React.useMemo(() => {
-    const byDate = {}
-    testRuns.forEach(run => {
-      const date = toDateStr(run.timestamp)
-      if (!date) return
-      if (!byDate[date]) byDate[date] = 0
-      byDate[date] += run.total_cost || 0
-    })
-    return Object.entries(byDate)
-      .sort(([a], [b]) => a.localeCompare(b))
-      .map(([date, cost]) => ({ date, cost: parseFloat(cost.toFixed(4)) }))
-  }, [testRuns])
-
-  // 5c. Most variable test files
-  const variabilityData = React.useMemo(() => {
-    const fileStats = {}
-    testRuns.forEach(run => {
-      const file = run.test_file
-      if (!file) return
-      const rate = run.total_tests > 0 ? (run.passed / run.total_tests) * 100 : 0
-      if (!fileStats[file]) fileStats[file] = { rates: [] }
-      fileStats[file].rates.push(rate)
-    })
-    return Object.entries(fileStats)
-      .map(([file, stats]) => {
-        const min = Math.min(...stats.rates)
-        const max = Math.max(...stats.rates)
-        return {
-          file: file.split('/').pop(),
-          min: Math.round(min),
-          max: Math.round(max),
-          variance: Math.round(max - min),
-          count: stats.rates.length,
-        }
-      })
-      .sort((a, b) => b.variance - a.variance)
-      .slice(0, 10)
-  }, [testRuns])
-
-  // 5d. Slowest test files
-  const slowestData = React.useMemo(() => {
-    const fileStats = {}
-    testRuns.forEach(run => {
-      const file = run.test_file
-      if (!file || !run.total_duration) return
-      if (!fileStats[file]) fileStats[file] = { durations: [] }
-      fileStats[file].durations.push(run.total_duration)
-    })
-    return Object.entries(fileStats)
-      .map(([file, stats]) => {
-        const avg = stats.durations.reduce((a, b) => a + b, 0) / stats.durations.length
-        return {
-          file: file.split('/').pop(),
-          avgDuration: avg,
-          count: stats.durations.length,
-        }
-      })
-      .sort((a, b) => b.avgDuration - a.avgDuration)
-      .slice(0, 10)
-  }, [testRuns])
-
-  if (testRuns.length === 0) {
-    return (
-      <div className="flex items-center justify-center h-full p-12 text-center">
-        <div>
-          <TrendingUp size={48} className="mx-auto mb-3 text-text-disabled opacity-50" />
-          <p className="text-text-tertiary">No test runs to analyze</p>
-          <p className="text-text-disabled text-sm mt-1">Run some tests to see trends</p>
-        </div>
-      </div>
-    )
-  }
-
-  return (
-    <div className="p-6 space-y-8">
-      {/* Pass rate over time */}
-      <div>
-        <h3 className="text-base font-semibold text-text-primary mb-4 flex items-center gap-2">
-          <TrendingUp size={16} className="text-primary" />
-          Pass Rate Over Time (per test file)
-        </h3>
-        {passRateData.data.length === 0 ? (
-          <p className="text-xs text-text-tertiary">Not enough dated data.</p>
-        ) : (
-          <ResponsiveContainer width="100%" height={260}>
-            <LineChart data={passRateData.data} margin={{ top: 8, right: 16, left: 0, bottom: 8 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border, #374151)" />
-              <XAxis dataKey="date" tick={{ fontSize: 11 }} stroke="var(--color-text-tertiary, #6b7280)" />
-              <YAxis domain={[0, 100]} tickFormatter={v => `${v}%`} tick={{ fontSize: 11 }} stroke="var(--color-text-tertiary, #6b7280)" />
-              <Tooltip formatter={(value) => value !== null ? `${value}%` : 'N/A'} />
-              <Legend wrapperStyle={{ fontSize: 11 }} />
-              {passRateData.files.map((file, idx) => (
-                <Line
-                  key={file}
-                  type="monotone"
-                  dataKey={file}
-                  name={file.split('/').pop()}
-                  stroke={TREND_COLORS[idx % TREND_COLORS.length]}
-                  strokeWidth={2}
-                  dot={{ r: 3 }}
-                  connectNulls
-                />
-              ))}
-            </LineChart>
-          </ResponsiveContainer>
-        )}
-      </div>
-
-      {/* Cost per run over time */}
-      <div>
-        <h3 className="text-base font-semibold text-text-primary mb-4 flex items-center gap-2">
-          <DollarSign size={16} className="text-primary" />
-          Cost per Day
-        </h3>
-        {costData.length === 0 ? (
-          <p className="text-xs text-text-tertiary">No cost data available.</p>
-        ) : (
-          <ResponsiveContainer width="100%" height={220}>
-            <BarChart data={costData} margin={{ top: 8, right: 16, left: 0, bottom: 8 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border, #374151)" />
-              <XAxis dataKey="date" tick={{ fontSize: 11 }} stroke="var(--color-text-tertiary, #6b7280)" />
-              <YAxis tickFormatter={v => `$${v}`} tick={{ fontSize: 11 }} stroke="var(--color-text-tertiary, #6b7280)" />
-              <Tooltip formatter={(v) => `$${v}`} />
-              <Bar dataKey="cost" fill="#60a5fa" radius={[3, 3, 0, 0]} />
-            </BarChart>
-          </ResponsiveContainer>
-        )}
-      </div>
-
-      {/* Most variable test files */}
-      <div>
-        <h3 className="text-base font-semibold text-text-primary mb-4 flex items-center gap-2">
-          <BarChart3 size={16} className="text-primary" />
-          Most Variable Test Files
-        </h3>
-        {variabilityData.length === 0 ? (
-          <p className="text-xs text-text-tertiary">No variability data.</p>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b border-border">
-                  <th className="text-left py-2 px-3 text-text-secondary font-medium">Test File</th>
-                  <th className="text-center py-2 px-3 text-text-secondary font-medium">Min Rate</th>
-                  <th className="text-center py-2 px-3 text-text-secondary font-medium">Max Rate</th>
-                  <th className="text-center py-2 px-3 text-text-secondary font-medium">Variance</th>
-                  <th className="text-center py-2 px-3 text-text-secondary font-medium"># Runs</th>
-                </tr>
-              </thead>
-              <tbody>
-                {variabilityData.map((row, idx) => (
-                  <tr key={idx} className="border-b border-border/50 hover:bg-surface-hover">
-                    <td className="py-2 px-3 font-mono text-xs text-text-primary">{row.file}</td>
-                    <td className="text-center py-2 px-3 text-xs font-mono text-text-secondary">{row.min}%</td>
-                    <td className="text-center py-2 px-3 text-xs font-mono text-text-secondary">{row.max}%</td>
-                    <td className="text-center py-2 px-3">
-                      <span className={`text-xs font-mono font-semibold ${row.variance > 30 ? 'text-error' : row.variance > 10 ? 'text-warning' : 'text-success'}`}>
-                        {row.variance}%
-                      </span>
-                    </td>
-                    <td className="text-center py-2 px-3 text-xs text-text-tertiary">{row.count}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </div>
-
-      {/* Slowest test files */}
-      <div>
-        <h3 className="text-base font-semibold text-text-primary mb-4 flex items-center gap-2">
-          <Clock size={16} className="text-primary" />
-          Slowest Test Files (avg duration)
-        </h3>
-        {slowestData.length === 0 ? (
-          <p className="text-xs text-text-tertiary">No duration data.</p>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b border-border">
-                  <th className="text-left py-2 px-3 text-text-secondary font-medium">Test File</th>
-                  <th className="text-center py-2 px-3 text-text-secondary font-medium">Avg Duration</th>
-                  <th className="text-center py-2 px-3 text-text-secondary font-medium"># Runs</th>
-                </tr>
-              </thead>
-              <tbody>
-                {slowestData.map((row, idx) => (
-                  <tr key={idx} className="border-b border-border/50 hover:bg-surface-hover">
-                    <td className="py-2 px-3 font-mono text-xs text-text-primary">{row.file}</td>
-                    <td className="text-center py-2 px-3 text-xs font-mono text-text-secondary">{formatDuration(row.avgDuration)}</td>
-                    <td className="text-center py-2 px-3 text-xs text-text-tertiary">{row.count}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </div>
-    </div>
-  )
-}
-
 function Reports() {
   const [confirmAction, confirmElement] = useConfirm()
   const { success: notifySuccess, error: notifyError, warning: notifyWarning, info: notifyInfo } = useNotification()
@@ -948,6 +685,9 @@ function Reports() {
   const [testRuns, setTestRuns] = useState([])
   const [smokeReports, setSmokeReports] = useState([])
   const [loading, setLoading] = useState(true)
+  const [runsTotal, setRunsTotal] = useState(0)
+  const [loadingMore, setLoadingMore] = useState(false)
+  const loadedCountRef = useRef(0)
   const [selectedRun, setSelectedRun] = useState(null)
   const [runDetails, setRunDetails] = useState(null)
   const [loadingDetails, setLoadingDetails] = useState(false)
@@ -964,11 +704,8 @@ function Reports() {
   // Bulk selection
   const [selectMode, setSelectMode] = useState(false)
   const [selectedRuns, setSelectedRuns] = useState(new Set())
-  // Comparison
-  const [compareMode, setCompareMode] = useState(false)
-  const [selectedForCompare, setSelectedForCompare] = useState(new Set())
-  const [compareData, setCompareData] = useState(null)
-  const [showCompare, setShowCompare] = useState(false)
+  // Empty-state copyable command
+  const [copiedCmd, setCopiedCmd] = useState(false)
   const autoRefreshRef = useRef(null)
   const deepLinkProcessed = useRef(false)
 
@@ -986,17 +723,52 @@ function Reports() {
 
   const loadTestRuns = useCallback(async () => {
     try {
-      const params = new URLSearchParams({ limit: '100' })
+      // Refetch everything loaded so far so auto-refresh doesn't collapse
+      // previously loaded pages back to the first one
+      const params = new URLSearchParams({ limit: String(Math.max(100, loadedCountRef.current)) })
       if (filterModel) params.set('model', filterModel)
       if (filterProvider) params.set('provider', filterProvider)
       if (filterTestFile) params.set('test_file', filterTestFile)
       const res = await fetch(`/api/results/list?${params}`)
       if (res.ok) {
         const data = await res.json()
-        setTestRuns(data.runs || [])
+        const runs = data.runs || []
+        setTestRuns(runs)
+        loadedCountRef.current = runs.length
+        setRunsTotal(data.total ?? runs.length)
       }
     } catch (error) {
       console.error('Failed to load test runs:', error)
+    }
+  }, [filterModel, filterProvider, filterTestFile])
+
+  const loadMoreRuns = useCallback(async () => {
+    setLoadingMore(true)
+    try {
+      const params = new URLSearchParams({
+        limit: '100',
+        offset: String(loadedCountRef.current),
+      })
+      if (filterModel) params.set('model', filterModel)
+      if (filterProvider) params.set('provider', filterProvider)
+      if (filterTestFile) params.set('test_file', filterTestFile)
+      const res = await fetch(`/api/results/list?${params}`)
+      if (res.ok) {
+        const data = await res.json()
+        const next = data.runs || []
+        // New runs arriving between pages shift offset-based pagination —
+        // dedupe by run_id so rows (and React keys) never repeat.
+        setTestRuns(prev => {
+          const seen = new Set(prev.map(r => r.run_id))
+          return [...prev, ...next.filter(r => !seen.has(r.run_id))]
+        })
+        loadedCountRef.current += next.length
+        setRunsTotal(data.total ?? loadedCountRef.current)
+      }
+    } catch (error) {
+      console.error('Failed to load more runs:', error)
+    } finally {
+      setLoadingMore(false)
     }
   }, [filterModel, filterProvider, filterTestFile])
 
@@ -1034,33 +806,9 @@ function Reports() {
       filtersInitialized.current = true
       return  // skip first render — initial load handles it
     }
+    loadedCountRef.current = 0  // filters changed — start from the first page
     loadTestRuns()
   }, [filterModel, filterProvider, filterTestFile]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  // Comparison logic
-  const toggleCompareSelection = (runId) => {
-    setSelectedForCompare(prev => {
-      const next = new Set(prev)
-      if (next.has(runId)) next.delete(runId)
-      else next.add(runId)
-      return next
-    })
-  }
-
-  const loadComparison = async () => {
-    if (selectedForCompare.size < 2) return
-    try {
-      const ids = Array.from(selectedForCompare).join(',')
-      const res = await fetch(`/api/results/compare?run_ids=${ids}`)
-      if (res.ok) {
-        const data = await res.json()
-        setCompareData(data)
-        setShowCompare(true)
-      }
-    } catch (error) {
-      console.error('Failed to load comparison:', error)
-    }
-  }
 
   // Deep-link: load run from URL params after data loads
   useEffect(() => {
@@ -1265,7 +1013,7 @@ function Reports() {
             ? 'bg-primary/10 border-l-2 border-l-primary'
             : 'hover:bg-surface border-l-2 border-l-transparent'
         }`}
-        onClick={() => selectMode ? toggleSelectRun(run.run_id) : compareMode ? toggleCompareSelection(run.run_id) : selectRun(run.run_id, 'tests')}
+        onClick={() => selectMode ? toggleSelectRun(run.run_id) : selectRun(run.run_id, 'tests')}
       >
         <div className="flex items-start justify-between gap-2">
           {selectMode && (
@@ -1275,15 +1023,6 @@ function Reports() {
               onChange={() => toggleSelectRun(run.run_id)}
               onClick={(e) => e.stopPropagation()}
               className="mt-1 flex-shrink-0 accent-primary"
-            />
-          )}
-          {!selectMode && compareMode && (
-            <input
-              type="checkbox"
-              checked={selectedForCompare.has(run.run_id)}
-              onChange={() => toggleCompareSelection(run.run_id)}
-              onClick={(e) => e.stopPropagation()}
-              className="mt-1 flex-shrink-0"
             />
           )}
           <div className="flex-1 min-w-0">
@@ -1609,7 +1348,7 @@ function Reports() {
             <span className={`px-1.5 py-0.5 rounded text-xs ${
               activeTab === 'tests' ? 'bg-surface-hover' : 'bg-surface-elevated'
             }`}>
-              {testRuns.length}
+              {runsTotal || testRuns.length}
             </span>
           </button>
           <button
@@ -1628,22 +1367,10 @@ function Reports() {
               {smokeReports.length}
             </span>
           </button>
-          <button
-            onClick={() => setActiveTab('trends')}
-            className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors flex items-center gap-2 ${
-              activeTab === 'trends'
-                ? 'bg-primary text-white'
-                : 'bg-surface hover:bg-surface-hover text-text-secondary'
-            }`}
-          >
-            <TrendingUp size={16} />
-            Trends
-          </button>
         </div>
 
-        {/* Filter bar — only shown for tests/smoke tabs */}
-        {activeTab !== 'trends' && (
-          <div className="flex items-center gap-3 mt-3 flex-wrap">
+        {/* Filter bar */}
+        <div className="flex items-center gap-3 mt-3 flex-wrap">
             <input
               type="text"
               value={filterSearch}
@@ -1697,29 +1424,13 @@ function Reports() {
               ))}
             </div>
             <div className="flex items-center gap-1 ml-auto">
-              <button
-                onClick={() => {
-                  setCompareMode(!compareMode)
-                  if (compareMode) {
-                    setSelectedForCompare(new Set())
-                    setShowCompare(false)
-                    setCompareData(null)
-                  }
-                }}
-                className={`px-2.5 py-1 rounded text-xs font-medium transition-colors ${
-                  compareMode ? 'bg-primary/20 text-primary' : 'bg-surface hover:bg-surface-hover text-text-secondary'
-                }`}
+              <Link
+                to="/performance"
+                className="px-2.5 py-1 rounded text-xs font-medium transition-colors bg-surface hover:bg-surface-hover text-text-secondary"
+                title="Compare runs across models and configs on the Performance page"
               >
-                {compareMode ? 'Cancel Compare' : 'Compare'}
-              </button>
-              {compareMode && selectedForCompare.size >= 2 && (
-                <button
-                  onClick={loadComparison}
-                  className="px-2.5 py-1 rounded text-xs font-medium bg-primary text-white"
-                >
-                  Compare {selectedForCompare.size} runs
-                </button>
-              )}
+                Compare
+              </Link>
             </div>
             {(filterModel || filterProvider || filterTestFile) && (
               <button
@@ -1730,19 +1441,10 @@ function Reports() {
               </button>
             )}
           </div>
-        )}
       </div>
 
-      {/* Trends tab — full-width, no list panel */}
-      {activeTab === 'trends' && (
-        <div className="flex-1 overflow-auto bg-background">
-          <TrendsTab testRuns={testRuns} />
-        </div>
-      )}
-
       {/* Content — list + detail panel for tests/smoke */}
-      {activeTab !== 'trends' && (
-        <div className="flex-1 flex flex-col md:flex-row overflow-hidden">
+      <div className="flex-1 flex flex-col md:flex-row overflow-hidden">
           {/* List Panel */}
           <div className={`w-full md:w-96 flex-shrink-0 border-b md:border-b-0 md:border-r border-border overflow-auto bg-surface-elevated ${selectedRun ? 'hidden md:block' : 'block'}`}>
             {loading ? (
@@ -1754,7 +1456,30 @@ function Reports() {
                 <div className="p-8 text-center">
                   <FileText size={48} className="mx-auto mb-3 text-text-disabled opacity-50" />
                   <p className="text-text-tertiary">No test runs found</p>
-                  <p className="text-text-disabled text-sm mt-1">Run some tests to see results here</p>
+                  <div className="mt-4 flex items-center gap-2 bg-surface border border-border rounded-lg px-3 py-2">
+                    <code className="flex-1 text-left text-xs font-mono text-text-secondary overflow-x-auto whitespace-nowrap">
+                      testmcpy run examples/ --model claude-haiku-4-5
+                    </code>
+                    <button
+                      onClick={async () => {
+                        try {
+                          await navigator.clipboard.writeText('testmcpy run examples/ --model claude-haiku-4-5')
+                          setCopiedCmd(true)
+                          setTimeout(() => setCopiedCmd(false), 2000)
+                        } catch (err) {
+                          console.error('Copy failed:', err)
+                        }
+                      }}
+                      className="p-1.5 rounded hover:bg-surface-hover text-text-tertiary hover:text-text-primary flex-shrink-0"
+                      title="Copy command"
+                      aria-label="Copy command"
+                    >
+                      {copiedCmd ? <Check size={14} className="text-success" /> : <Copy size={14} />}
+                    </button>
+                  </div>
+                  <p className="text-text-disabled text-sm mt-3">
+                    or open the <Link to="/tests" className="text-primary hover:underline">Tests page</Link> to create a suite
+                  </p>
                 </div>
               ) : (
                 <div>
@@ -1805,6 +1530,19 @@ function Reports() {
                   <div className="divide-y divide-border">
                     {filteredTestRuns.map(renderRunListItem)}
                   </div>
+                  {testRuns.length < runsTotal && (
+                    <div className="p-3 text-center border-t border-border">
+                      <button
+                        onClick={loadMoreRuns}
+                        disabled={loadingMore}
+                        className="text-xs text-text-secondary hover:text-text-primary px-3 py-1.5 rounded bg-surface hover:bg-surface-hover transition-colors disabled:opacity-50"
+                      >
+                        {loadingMore
+                          ? 'Loading…'
+                          : `Load more (${testRuns.length} of ${runsTotal})`}
+                      </button>
+                    </div>
+                  )}
                 </div>
               )
             ) : (
@@ -1885,8 +1623,11 @@ function Reports() {
               </button>
             )}
             {loadingDetails ? (
-              <div className="flex items-center justify-center h-full">
-                <Loader2 className="animate-spin text-primary" size={32} />
+              <div className="p-4 space-y-2">
+                <Skeleton width="40%" height="24px" className="mb-4" />
+                {Array.from({ length: 6 }).map((_, idx) => (
+                  <ListItemSkeleton key={idx} />
+                ))}
               </div>
             ) : !runDetails ? (
               <div className="flex items-center justify-center h-full">
@@ -1902,63 +1643,6 @@ function Reports() {
             )}
           </div>
         </div>
-      )}
-
-      {/* Comparison Modal */}
-      {showCompare && compareData && (
-        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
-          <div className="bg-surface-elevated rounded-lg border border-border max-w-4xl w-full max-h-[80vh] overflow-auto shadow-lg">
-            <div className="p-4 border-b border-border flex items-center justify-between">
-              <h3 className="font-semibold text-text-primary">Run Comparison</h3>
-              <button
-                onClick={() => { setShowCompare(false); setCompareData(null) }}
-                className="text-text-tertiary hover:text-text-primary"
-              >
-                &times;
-              </button>
-            </div>
-            <div className="p-4 overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="border-b border-border">
-                    <th className="text-left py-2 px-3 text-text-secondary font-medium">Test</th>
-                    {(compareData.runs || []).map(run => (
-                      <th key={run.run_id} className="text-center py-2 px-3 text-text-secondary font-medium">
-                        <div className="text-xs">{run.model}</div>
-                        <div className="text-xs text-text-disabled">{run.provider}</div>
-                        <div className={`text-xs mt-1 px-1.5 py-0.5 rounded inline-block ${getPassRateBgColor(run.pass_rate * 100)}`}>
-                          {(run.pass_rate * 100).toFixed(0)}%
-                        </div>
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {Object.entries(compareData.tests || {}).map(([testName, runs]) => (
-                    <tr key={testName} className="border-b border-border/50">
-                      <td className="py-2 px-3 font-mono text-xs text-text-primary">{testName}</td>
-                      {(compareData.runs || []).map(run => {
-                        const result = runs[run.run_id]
-                        return (
-                          <td key={run.run_id} className="text-center py-2 px-3">
-                            {result ? (
-                              <span className={`text-xs px-2 py-0.5 rounded ${result.passed ? 'bg-success/20 text-success' : 'bg-error/20 text-error'}`}>
-                                {result.passed ? 'PASS' : 'FAIL'}
-                              </span>
-                            ) : (
-                              <span className="text-xs text-text-disabled">-</span>
-                            )}
-                          </td>
-                        )
-                      })}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   )
 }

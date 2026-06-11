@@ -64,12 +64,12 @@ function ProfileEditorModal({ profile, onSave, onCancel }) {
         <form onSubmit={handleSubmit}>
           <div className="space-y-4">
             <div>
-              <label className="block text-sm font-medium mb-1">Profile ID</label>
+              <label className="block text-sm font-medium mb-1 text-text-secondary">Profile ID</label>
               <input
                 type="text"
                 value={profileId}
                 onChange={(e) => setProfileId(e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, ''))}
-                className="input w-full"
+                className={`input w-full${errors.profileId ? ' border-error/50' : ''}`}
                 placeholder="e.g., prod, dev, budget"
                 disabled={!isNew}
                 autoFocus={isNew}
@@ -79,12 +79,12 @@ function ProfileEditorModal({ profile, onSave, onCancel }) {
               )}
             </div>
             <div>
-              <label className="block text-sm font-medium mb-1">Profile Name</label>
+              <label className="block text-sm font-medium mb-1 text-text-secondary">Profile Name</label>
               <input
                 type="text"
                 value={name}
                 onChange={(e) => setName(e.target.value)}
-                className="input w-full"
+                className={`input w-full${errors.name ? ' border-error/50' : ''}`}
                 placeholder="e.g., Production, Development"
                 autoFocus={!isNew}
               />
@@ -93,7 +93,7 @@ function ProfileEditorModal({ profile, onSave, onCancel }) {
               )}
             </div>
             <div>
-              <label className="block text-sm font-medium mb-1">Description</label>
+              <label className="block text-sm font-medium mb-1 text-text-secondary">Description</label>
               <textarea
                 value={description}
                 onChange={(e) => setDescription(e.target.value)}
@@ -103,11 +103,11 @@ function ProfileEditorModal({ profile, onSave, onCancel }) {
               />
             </div>
           </div>
-          <div className="flex justify-end gap-3 mt-6">
-            <button type="button" onClick={onCancel} className="btn btn-secondary">
+          <div className="flex flex-col-reverse sm:flex-row sm:justify-end gap-3 mt-6">
+            <button type="button" onClick={onCancel} className="btn btn-secondary w-full sm:w-auto">
               Cancel
             </button>
-            <button type="submit" className="btn btn-primary">
+            <button type="submit" className="btn btn-primary w-full sm:w-auto">
               <Save size={16} />
               {isNew ? 'Create Profile' : 'Save'}
             </button>
@@ -196,7 +196,7 @@ function ProviderEditorModal({ provider, availableModels, onSave, onCancel }) {
           <div className="space-y-4 max-h-[60vh] overflow-y-auto pr-2">
             {/* Provider Type */}
             <div>
-              <label className="block text-sm font-medium mb-1">Provider</label>
+              <label className="block text-sm font-medium mb-1 text-text-secondary">Provider</label>
               <select
                 value={formData.provider}
                 onChange={(e) => updateField('provider', e.target.value)}
@@ -213,7 +213,7 @@ function ProviderEditorModal({ provider, availableModels, onSave, onCancel }) {
 
             {/* Model Selection */}
             <div>
-              <label className="block text-sm font-medium mb-1">Model</label>
+              <label className="block text-sm font-medium mb-1 text-text-secondary">Model</label>
               {filteredModels.length > 0 ? (
                 <select
                   value={formData.model}
@@ -231,7 +231,7 @@ function ProviderEditorModal({ provider, availableModels, onSave, onCancel }) {
                   type="text"
                   value={formData.model}
                   onChange={(e) => updateField('model', e.target.value)}
-                  className="input w-full font-mono text-sm"
+                  className={`input w-full font-mono text-sm${errors.model ? ' border-error/50' : ''}`}
                   placeholder="e.g., claude-sonnet-4-5-20250514"
                 />
               )}
@@ -272,12 +272,12 @@ function ProviderEditorModal({ provider, availableModels, onSave, onCancel }) {
 
             {/* Display Name */}
             <div>
-              <label className="block text-sm font-medium mb-1">Display Name</label>
+              <label className="block text-sm font-medium mb-1 text-text-secondary">Display Name</label>
               <input
                 type="text"
                 value={formData.name}
                 onChange={(e) => updateField('name', e.target.value)}
-                className="input w-full"
+                className={`input w-full${errors.name ? ' border-error/50' : ''}`}
                 placeholder="e.g., Claude Sonnet 4.5"
               />
               {errors.name && <p className="text-error text-xs mt-1">{errors.name}</p>}
@@ -347,7 +347,7 @@ function ProviderEditorModal({ provider, availableModels, onSave, onCancel }) {
             {/* Base URL (for Ollama) */}
             {formData.provider === 'ollama' && (
               <div>
-                <label className="block text-sm font-medium mb-1">Base URL</label>
+                <label className="block text-sm font-medium mb-1 text-text-secondary">Base URL</label>
                 <input
                   type="text"
                   value={formData.base_url}
@@ -360,7 +360,7 @@ function ProviderEditorModal({ provider, availableModels, onSave, onCancel }) {
 
             {/* Timeout */}
             <div>
-              <label className="block text-sm font-medium mb-1">Timeout (seconds)</label>
+              <label className="block text-sm font-medium mb-1 text-text-secondary">Timeout (seconds)</label>
               <input
                 type="number"
                 value={formData.timeout}
@@ -387,11 +387,11 @@ function ProviderEditorModal({ provider, availableModels, onSave, onCancel }) {
             </div>
           </div>
 
-          <div className="flex justify-end gap-3 mt-6 pt-4 border-t border-border">
-            <button type="button" onClick={onCancel} className="btn btn-secondary">
+          <div className="flex flex-col-reverse sm:flex-row sm:justify-end gap-3 mt-6 pt-4 border-t border-border">
+            <button type="button" onClick={onCancel} className="btn btn-secondary w-full sm:w-auto">
               Cancel
             </button>
-            <button type="submit" className="btn btn-primary">
+            <button type="submit" className="btn btn-primary w-full sm:w-auto">
               <Save size={16} />
               Save Provider
             </button>
@@ -520,7 +520,7 @@ function LLMWizard({ profiles, availableModels, onComplete, onCancel }) {
             {filtered.length > 0 ? (
               <>
                 <div>
-                  <label className="block text-sm font-medium mb-1">Select Model</label>
+                  <label className="block text-sm font-medium mb-1 text-text-secondary">Select Model</label>
                   <select
                     value={data.model}
                     onChange={(e) => {
@@ -576,7 +576,7 @@ function LLMWizard({ profiles, availableModels, onComplete, onCancel }) {
               </>
             ) : (
               <div>
-                <label className="block text-sm font-medium mb-1">Model ID</label>
+                <label className="block text-sm font-medium mb-1 text-text-secondary">Model ID</label>
                 <input
                   type="text"
                   value={data.model}
@@ -589,7 +589,7 @@ function LLMWizard({ profiles, availableModels, onComplete, onCancel }) {
             )}
 
             <div>
-              <label className="block text-sm font-medium mb-1">Display Name</label>
+              <label className="block text-sm font-medium mb-1 text-text-secondary">Display Name</label>
               <input
                 type="text"
                 value={data.name}
@@ -664,7 +664,7 @@ function LLMWizard({ profiles, availableModels, onComplete, onCancel }) {
 
             {data.provider === 'ollama' && (
               <div>
-                <label className="block text-sm font-medium mb-1">Base URL</label>
+                <label className="block text-sm font-medium mb-1 text-text-secondary">Base URL</label>
                 <input
                   type="text"
                   value={data.base_url}
@@ -676,7 +676,7 @@ function LLMWizard({ profiles, availableModels, onComplete, onCancel }) {
             )}
 
             <div>
-              <label className="block text-sm font-medium mb-1">Timeout (seconds)</label>
+              <label className="block text-sm font-medium mb-1 text-text-secondary">Timeout (seconds)</label>
               <input
                 type="number"
                 value={data.timeout}
@@ -776,7 +776,7 @@ function LLMWizard({ profiles, availableModels, onComplete, onCancel }) {
             </div>
 
             <div>
-              <label className="block text-sm font-medium mb-1">Add to Profile</label>
+              <label className="block text-sm font-medium mb-1 text-text-secondary">Add to Profile</label>
               <select
                 value={data.targetProfileId}
                 onChange={(e) => setData(prev => ({ ...prev, targetProfileId: e.target.value }))}

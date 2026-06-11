@@ -7,6 +7,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-06-11
+
+The platform release: CI gating, per-config performance analytics,
+quality scoring, security scanning, and a UI overhaul.
+
+### Added
+- **CI gate**: `testmcpy run --gate / --gate-config / --min-pass-rate`
+  exits non-zero when thresholds fail; unified `.testmcpy-gate.yaml`
+  with `evals` / `conformance` / `usability` / `security` sections
+  (legacy flat keys still work; example in `examples/testmcpy-gate.yaml`)
+- **JUnit XML output**: `--junit-xml PATH` or `--report foo.xml`;
+  markdown report auto-appended to `$GITHUB_STEP_SUMMARY` inside
+  GitHub Actions
+- **Performance analytics**: per-test × per-config matrix with
+  flakiness detection and day-bucketed trends — `/performance` UI
+  page, `/api/analytics/*` endpoints, and CLI parity via
+  `testmcpy matrix | leaderboard | flaky`
+- **`testmcpy bench`**: run a suite across models × profiles ×
+  repeats (one session) to feed the matrix
+- **`testmcpy conformance`**: wraps the official
+  `@modelcontextprotocol/conformance` suite with testmcpy reporting
+  and exit codes
+- **`testmcpy score`**: LLM-usability grade (0-100, A-F) for a
+  server's tool surface — descriptions, schemas, naming, token
+  economy, parameter clarity
+- **`testmcpy scan`**: static security scanner — tool-poisoning
+  heuristics (TMS001-007), rug-pull detection vs saved baselines
+  (TMS100-103), SARIF 2.1.0 output for GitHub code scanning
+- **Security evaluators**: `no_injection_echo` canary detection,
+  `auth_rejects_missing_token` / `auth_rejects_invalid_token` /
+  `auth_token_not_echoed` probes; `security` and `auth-security`
+  evaluator packs
+- **`testmcpy badge`**: shields.io endpoint JSON for pass-rate /
+  usability / conformance badges
+- **Reusable GitHub Action** rewritten: uvx install, real gate exit
+  codes, JUnit, sticky PR comment, structured outputs
+- `TESTMCPY_DB_URL` (full SQLAlchemy URL, e.g. Postgres) with a new
+  `[postgres]` extra; SQLite remains the default
+- `python -m testmcpy` entry point
+
+### Changed
+- UI consolidation: new Performance page replaces Compare + Metrics
+  (routes redirect); MCP Health + Compatibility merged into a tabbed
+  Servers page; nav regrouped (Workflow / Analytics / Infrastructure
+  / Settings)
+- Mobile-web pass: responsive modals, stacking forms, touch-draggable
+  panels, phone-tuned Monaco, 44px tap targets, overflow-safe tables
+- Run listings now surface `mcp_profile` / `llm_profile` and paginate
+  with real totals
+
+### Fixed
+- Runs stuck in `running` after a server crash are marked
+  `interrupted` on startup
+- Profile YAML loader warns when credential fields hold literals
+  instead of `${ENV_VAR}` references
+
 ## [0.7.26] - 2026-06-09
 
 ### Fixed

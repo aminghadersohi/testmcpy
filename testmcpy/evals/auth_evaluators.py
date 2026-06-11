@@ -5,6 +5,25 @@ These evaluators validate authentication flows including OAuth2, JWT,
 and Bearer token authentication. They can be used to test auth success,
 token validity, OAuth flow completion, error handling, and JWT claim
 validation.
+
+Active auth enforcement probes (bundled in the "auth-security" pack,
+see ``testmcpy.evals.evaluator_packs``):
+
+  - ``auth_rejects_missing_token`` — probes the MCP endpoint with NO
+    Authorization header and asserts it returns 401/403.
+  - ``auth_rejects_invalid_token`` — probes with a garbage Bearer token
+    and asserts 401/403.
+  - ``auth_token_not_echoed``      — asserts the auth token from the test's
+    auth flow does not appear in the final answer or tool results.
+
+Future work (NOT implemented — not honestly assertable with the current
+plumbing): PKCE enforcement (asserting the server *rejects* token requests
+without a valid code_verifier requires driving a full authorization-code
+flow with a tampered verifier, which the auth-only test runner does not
+record) and scope enforcement (asserting per-scope tool authorization
+requires issuing scoped tokens on demand, which depends on the IdP, not the
+MCP server under test). ``oauth_discovery_valid`` with ``require_pkce: true``
+only checks *advertised* PKCE support (RFC 8414 metadata).
 """
 
 import base64
@@ -12,6 +31,8 @@ import json
 import re
 import time
 from typing import Any
+
+import httpx
 
 from testmcpy.evals.base_evaluators import BaseEvaluator, EvalResult
 
@@ -937,4 +958,316 @@ class OAuthDiscoveryEvaluator(BaseEvaluator):
             score=1.0,
             reason=f"OAuth discovery valid ({len(present_fields)} fields verified)",
             details=details,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Active auth enforcement probes
+# ---------------------------------------------------------------------------
+
+# Minimal JSON-RPC initialize request used to probe MCP HTTP endpoints.
+_PROBE_REQUEST_BODY: dict[str, Any] = {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "initialize",
+    "params": {
+        "protocolVersion": "2025-03-26",
+        "capabilities": {},
+        "clientInfo": {"name": "testmcpy-auth-probe", "version": "1.0"},
+    },
+}
+
+
+class _AuthProbeEvaluator(BaseEvaluator):
+    """Shared machinery for evaluators that actively probe the MCP endpoint.
+
+    Subclasses define the request headers (e.g., no Authorization header, or
+    a deliberately invalid Bearer token) and the probe asserts the endpoint
+    responds with one of the expected rejection statuses.
+    """
+
+    def __init__(
+        self,
+        expected_statuses: list[int] | None = None,
+        mcp_url: str | None = None,
+        timeout: float = 15.0,
+    ):
+        """
+        Args:
+            expected_statuses: HTTP statuses that count as a correct rejection
+                (default: [401, 403]).
+            mcp_url: Explicit MCP endpoint URL. If omitted, resolved from the
+                evaluation context (metadata.mcp_url or mcp_client.url).
+            timeout: HTTP request timeout in seconds.
+        """
+        self.expected_statuses = expected_statuses or [401, 403]
+        self.mcp_url = mcp_url
+        self.timeout = timeout
+
+    def _probe_headers(self) -> dict[str, str]:
+        """Headers for the probe request. Subclasses override."""
+        raise NotImplementedError
+
+    def _probe_description(self) -> str:
+        """Human-readable description of the probe. Subclasses override."""
+        raise NotImplementedError
+
+    def _resolve_url(self, context: dict[str, Any]) -> str | None:
+        if self.mcp_url:
+            return self.mcp_url
+        metadata = context.get("metadata", {})
+        if metadata.get("mcp_url"):
+            return metadata["mcp_url"]
+        mcp_client = context.get("mcp_client")
+        if mcp_client is not None and getattr(mcp_client, "url", None):
+            return mcp_client.url
+        return None
+
+    def evaluate(self, context: dict[str, Any]) -> EvalResult:
+        """Sync fallback — probing requires async (use aevaluate)."""
+        return EvalResult(
+            passed=False,
+            score=0.0,
+            reason="Auth probe evaluator requires async context (use aevaluate)",
+        )
+
+    async def aevaluate(self, context: dict[str, Any]) -> EvalResult:
+        mcp_url = self._resolve_url(context)
+        if not mcp_url:
+            return EvalResult(
+                passed=False,
+                score=0.0,
+                reason="No MCP URL available for auth probe "
+                "(set metadata.mcp_url or pass mcp_url arg)",
+            )
+
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+            **self._probe_headers(),
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                response = await client.post(mcp_url, json=_PROBE_REQUEST_BODY, headers=headers)
+        except httpx.HTTPError as e:
+            return EvalResult(
+                passed=False,
+                score=0.0,
+                reason=f"Auth probe request failed: {e}",
+                details={"mcp_url": mcp_url, "error": str(e)},
+            )
+
+        status = response.status_code
+        details = {
+            "mcp_url": mcp_url,
+            "probe": self._probe_description(),
+            "status_code": status,
+            "expected_statuses": self.expected_statuses,
+        }
+
+        if status in self.expected_statuses:
+            return EvalResult(
+                passed=True,
+                score=1.0,
+                reason=f"Endpoint correctly rejected {self._probe_description()} "
+                f"with HTTP {status}",
+                details=details,
+            )
+
+        expected = "/".join(str(s) for s in self.expected_statuses)
+        return EvalResult(
+            passed=False,
+            score=0.0,
+            reason=f"Endpoint did not reject {self._probe_description()}: "
+            f"expected HTTP {expected}, got HTTP {status}",
+            details=details,
+        )
+
+
+class AuthRejectsMissingTokenEvaluator(_AuthProbeEvaluator):
+    """Assert the MCP endpoint returns 401/403 when called with NO
+    Authorization header.
+
+    YAML usage::
+
+        evaluators:
+          - name: auth_rejects_missing_token
+          # or with overrides:
+          - name: auth_rejects_missing_token
+            args:
+              expected_statuses: [401]
+              mcp_url: "https://mcp.example.com/mcp"
+    """
+
+    @property
+    def name(self) -> str:
+        return "auth_rejects_missing_token"
+
+    @property
+    def description(self) -> str:
+        expected = "/".join(str(s) for s in self.expected_statuses)
+        return f"Checks the MCP endpoint returns {expected} for unauthenticated requests"
+
+    def _probe_headers(self) -> dict[str, str]:
+        return {}
+
+    def _probe_description(self) -> str:
+        return "a request with no Authorization header"
+
+
+class AuthRejectsInvalidTokenEvaluator(_AuthProbeEvaluator):
+    """Assert the MCP endpoint returns 401/403 when called with an invalid
+    Bearer token.
+
+    YAML usage::
+
+        evaluators:
+          - name: auth_rejects_invalid_token
+          # or with overrides:
+          - name: auth_rejects_invalid_token
+            args:
+              token: "another-bogus-token"
+              expected_statuses: [401, 403]
+    """
+
+    DEFAULT_INVALID_TOKEN = "invalid-garbage-token-12345"
+
+    def __init__(
+        self,
+        token: str = DEFAULT_INVALID_TOKEN,
+        expected_statuses: list[int] | None = None,
+        mcp_url: str | None = None,
+        timeout: float = 15.0,
+    ):
+        super().__init__(expected_statuses=expected_statuses, mcp_url=mcp_url, timeout=timeout)
+        self.token = token
+
+    @property
+    def name(self) -> str:
+        return "auth_rejects_invalid_token"
+
+    @property
+    def description(self) -> str:
+        expected = "/".join(str(s) for s in self.expected_statuses)
+        return f"Checks the MCP endpoint returns {expected} for an invalid Bearer token"
+
+    def _probe_headers(self) -> dict[str, str]:
+        return {"Authorization": f"Bearer {self.token}"}
+
+    def _probe_description(self) -> str:
+        return "a request with an invalid Bearer token"
+
+
+class AuthTokenNotEchoedEvaluator(BaseEvaluator):
+    """Assert the auth token from the test's auth flow does not appear in the
+    final answer or tool results.
+
+    Reuses NoLeakedData-style substring matching: the token (taken from the
+    evaluation context's auth metadata) must not leak into model-visible or
+    user-visible output.
+
+    YAML usage::
+
+        evaluators:
+          - name: auth_token_not_echoed
+          # or with overrides:
+          - name: auth_token_not_echoed
+            args:
+              token_field: auth_token
+              min_token_length: 8
+    """
+
+    def __init__(self, token_field: str = "auth_token", min_token_length: int = 8):
+        """
+        Args:
+            token_field: Metadata field containing the token (default: auth_token).
+            min_token_length: Tokens shorter than this are skipped to avoid
+                false positives from trivially short strings (default: 8).
+        """
+        self.token_field = token_field
+        self.min_token_length = min_token_length
+
+    @property
+    def name(self) -> str:
+        return "auth_token_not_echoed"
+
+    @property
+    def description(self) -> str:
+        return "Checks the auth token does not appear in the final answer or tool results"
+
+    @staticmethod
+    def _content_to_str(content: Any) -> str:
+        """Normalise tool result content (dict | list | str | None) to a string."""
+        if content is None:
+            return ""
+        if isinstance(content, str):
+            return content
+        if isinstance(content, dict):
+            text = content.get("text")
+            return text if isinstance(text, str) else str(content)
+        if isinstance(content, list):
+            parts: list[str] = []
+            for item in content:
+                if isinstance(item, dict):
+                    text = item.get("text")
+                    parts.append(text if isinstance(text, str) else str(item))
+                elif hasattr(item, "text"):
+                    parts.append(item.text)
+                else:
+                    parts.append(str(item))
+            return " ".join(parts)
+        if hasattr(content, "text"):
+            return content.text
+        return str(content)
+
+    def evaluate(self, context: dict[str, Any]) -> EvalResult:
+        metadata = context.get("metadata", {})
+        token = metadata.get(self.token_field)
+
+        if not token:
+            # Nothing to assert — mirror NoHallucination's "can't verify" pattern
+            return EvalResult(
+                passed=True,
+                score=0.5,
+                reason=f"No auth token in metadata field '{self.token_field}' — nothing to check",
+                details={"warning": "Unable to verify - no token available"},
+            )
+
+        if len(token) < self.min_token_length:
+            return EvalResult(
+                passed=True,
+                score=0.5,
+                reason=f"Token shorter than {self.min_token_length} chars — "
+                "skipped to avoid false positives",
+                details={"token_length": len(token)},
+            )
+
+        violations: list[str] = []
+
+        response = context.get("response", "") or ""
+        if token in response:
+            violations.append("auth token found in final answer")
+
+        for i, tool_result in enumerate(context.get("tool_results", [])):
+            if isinstance(tool_result, dict):
+                content = tool_result.get("content", tool_result.get("result", ""))
+            else:
+                content = getattr(tool_result, "content", None)
+            if token in self._content_to_str(content):
+                violations.append(f"auth token found in tool result #{i}")
+
+        if violations:
+            return EvalResult(
+                passed=False,
+                score=0.0,
+                reason="; ".join(violations),
+                details={"token_length": len(token), "violations": violations},
+            )
+
+        return EvalResult(
+            passed=True,
+            score=1.0,
+            reason="Auth token not echoed in final answer or tool results",
+            details={"token_length": len(token)},
         )

@@ -109,18 +109,26 @@ class TestStorage:
     """SQLAlchemy-based storage for test versioning, results, and metrics."""
 
     def __init__(self, db_path: str | Path | None = None):
-        if db_path is None:
-            db_path = os.environ.get("TESTMCPY_DB_PATH")
-        if db_path is None:
-            db_dir = Path.cwd() / ".testmcpy"
-            db_dir.mkdir(exist_ok=True)
-            db_path = db_dir / "storage.db"
+        # Full SQLAlchemy URL (e.g. postgresql+psycopg://...) wins when no
+        # explicit file path is given; SQLite file path otherwise.
+        db_url = os.environ.get("TESTMCPY_DB_URL") if db_path is None else None
+        if db_url:
+            self.db_path = None
+            url = db_url
+        else:
+            if db_path is None:
+                db_path = os.environ.get("TESTMCPY_DB_PATH")
+            if db_path is None:
+                db_dir = Path.cwd() / ".testmcpy"
+                db_dir.mkdir(exist_ok=True)
+                db_path = db_dir / "storage.db"
+            self.db_path = Path(db_path)
+            url = f"sqlite:///{self.db_path}"
 
-        self.db_path = Path(db_path)
-        url = f"sqlite:///{self.db_path}"
+        connect_args = {"check_same_thread": False} if url.startswith("sqlite") else {}
         self._engine = create_engine(
             url,
-            connect_args={"check_same_thread": False},
+            connect_args=connect_args,
             echo=False,
         )
         self._SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=self._engine)
@@ -144,15 +152,59 @@ class TestStorage:
             ("question_results", "false_positive_rate", "FLOAT DEFAULT 0.0"),
             ("test_runs", "total_cost", "FLOAT DEFAULT 0.0"),
         ]
+        # (index name, table, columns) — indexes added after the initial
+        # schema; create_all skips existing tables so these need explicit DDL
+        index_migrations = [
+            (
+                "idx_runs_suite_config",
+                "test_runs",
+                "test_id, model, provider, mcp_profile_id, started_at",
+            ),
+            (
+                "idx_question_results_question_run",
+                "question_results",
+                "question_id, run_id",
+            ),
+        ]
+        is_sqlite = self._engine.dialect.name == "sqlite"
         with self._engine.connect() as conn:
-            for table, column, col_type in migrations:
-                result = conn.execute(text(f"PRAGMA table_info({table})"))
-                existing = {row[1] for row in result}
-                if column not in existing:
-                    conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}"))
+            if is_sqlite:
+                # PRAGMA is SQLite-only; non-SQLite backends are expected
+                # to be managed with `alembic upgrade head`.
+                for table, column, col_type in migrations:
+                    result = conn.execute(text(f"PRAGMA table_info({table})"))
+                    existing = {row[1] for row in result}
+                    if column not in existing:
+                        conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}"))
+            for index_name, table, columns in index_migrations:
+                conn.execute(
+                    text(f"CREATE INDEX IF NOT EXISTS {index_name} ON {table} ({columns})")
+                )
             conn.commit()
 
+    def mark_stale_runs_interrupted(self, older_than_hours: float = 1.0) -> int:
+        """Mark long-stuck 'running' rows as interrupted (server startup).
+
+        The in-memory run registry dies with the process; without this,
+        crashed runs stay 'running' forever and pollute every listing.
+        Returns the number of rows updated.
+        """
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=older_than_hours)).isoformat()
+        with self._session() as session:
+            updated = (
+                session.query(TestRunModel)
+                .filter(TestRunModel.status == "running")
+                .filter(TestRunModel.started_at < cutoff)
+                .update({TestRunModel.status: "interrupted"}, synchronize_session=False)
+            )
+            session.commit()
+            return updated
+
     def _session(self) -> Session:
+        return self._SessionLocal()
+
+    def session(self) -> Session:
+        """Public session factory — used by testmcpy.analytics queries."""
         return self._SessionLocal()
 
     def _hash_content(self, content: str) -> str:
@@ -850,6 +902,8 @@ class TestStorage:
                 "environment_id": run.environment_id,
                 "model": run.model,
                 "provider": run.provider,
+                "mcp_profile_id": run.mcp_profile_id,
+                "llm_profile_id": run.llm_profile_id,
                 "runner_tool": run.runner_tool,
                 "mcp_setup_version": run.mcp_setup_version,
                 "started_at": run.started_at,
@@ -869,11 +923,41 @@ class TestStorage:
                 },
             }
 
+    @staticmethod
+    def _apply_run_filters(
+        query,
+        test_id: str | None = None,
+        model: str | None = None,
+        provider: str | None = None,
+        mcp_profile: str | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+    ):
+        """Shared filter chain for list_runs/count_runs.
+
+        Keeping it in one place means a filter added for the list can't
+        silently desync the pager's total/has_more.
+        """
+        if test_id:
+            query = query.filter(TestRunModel.suite_id == test_id)
+        if model:
+            query = query.filter(TestRunModel.model == model)
+        if provider:
+            query = query.filter(TestRunModel.provider == provider)
+        if mcp_profile:
+            query = query.filter(TestRunModel.mcp_profile_id == mcp_profile)
+        if date_from:
+            query = query.filter(TestRunModel.started_at >= date_from)
+        if date_to:
+            query = query.filter(TestRunModel.started_at <= date_to)
+        return query
+
     def list_runs(
         self,
         test_id: str | None = None,
         model: str | None = None,
         provider: str | None = None,
+        mcp_profile: str | None = None,
         date_from: str | None = None,
         date_to: str | None = None,
         sort_by: str = "started_at",
@@ -889,6 +973,8 @@ class TestStorage:
                 TestRunModel.environment_id,
                 TestRunModel.model,
                 TestRunModel.provider,
+                TestRunModel.mcp_profile_id,
+                TestRunModel.llm_profile_id,
                 TestRunModel.runner_tool,
                 TestRunModel.started_at,
                 TestRunModel.completed_at,
@@ -908,16 +994,15 @@ class TestStorage:
                 TestRunModel.run_id == QuestionResultModel.run_id,
             )
 
-            if test_id:
-                query = query.filter(TestRunModel.suite_id == test_id)
-            if model:
-                query = query.filter(TestRunModel.model == model)
-            if provider:
-                query = query.filter(TestRunModel.provider == provider)
-            if date_from:
-                query = query.filter(TestRunModel.started_at >= date_from)
-            if date_to:
-                query = query.filter(TestRunModel.started_at <= date_to)
+            query = self._apply_run_filters(
+                query,
+                test_id=test_id,
+                model=model,
+                provider=provider,
+                mcp_profile=mcp_profile,
+                date_from=date_from,
+                date_to=date_to,
+            )
 
             # Sorting — validate against allowlist
             allowed_sort = {
@@ -942,6 +1027,8 @@ class TestStorage:
                     "environment_id": row.environment_id,
                     "model": row.model,
                     "provider": row.provider,
+                    "mcp_profile_id": row.mcp_profile_id,
+                    "llm_profile_id": row.llm_profile_id,
                     "runner_tool": row.runner_tool,
                     "started_at": row.started_at,
                     "completed_at": row.completed_at,
@@ -961,6 +1048,28 @@ class TestStorage:
                 }
                 for row in rows
             ]
+
+    def count_runs(
+        self,
+        test_id: str | None = None,
+        model: str | None = None,
+        provider: str | None = None,
+        mcp_profile: str | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+    ) -> int:
+        """Count runs matching the same filters as list_runs (for pagination)."""
+        with self._session() as session:
+            query = self._apply_run_filters(
+                session.query(func.count(TestRunModel.run_id)),
+                test_id=test_id,
+                model=model,
+                provider=provider,
+                mcp_profile=mcp_profile,
+                date_from=date_from,
+                date_to=date_to,
+            )
+            return query.scalar() or 0
 
     def get_filter_options(self) -> dict[str, list[str]]:
         """Get distinct values for filter dropdowns."""
@@ -984,10 +1093,18 @@ class TestStorage:
                 .order_by(TestRunModel.suite_id)
                 if r[0]
             ]
+            mcp_profiles = [
+                r[0]
+                for r in session.query(TestRunModel.mcp_profile_id)
+                .distinct()
+                .order_by(TestRunModel.mcp_profile_id)
+                if r[0]
+            ]
             return {
                 "models": models,
                 "providers": providers,
                 "test_files": test_files,
+                "mcp_profiles": mcp_profiles,
             }
 
     # ==================== Smoke Reports ====================
@@ -1233,7 +1350,7 @@ class TestStorage:
             }
 
     def list_generation_logs(
-        self, tool_name: str | None = None, limit: int = 50
+        self, tool_name: str | None = None, limit: int = 50, offset: int = 0
     ) -> list[dict[str, Any]]:
         with self._session() as session:
             query = session.query(GenerationLogModel)
@@ -1241,7 +1358,12 @@ class TestStorage:
             if tool_name:
                 query = query.filter(GenerationLogModel.tool_name == tool_name)
 
-            rows = query.order_by(GenerationLogModel.created_at.desc()).limit(limit).all()
+            rows = (
+                query.order_by(GenerationLogModel.created_at.desc())
+                .limit(limit)
+                .offset(offset)
+                .all()
+            )
 
             return [
                 {
@@ -1262,6 +1384,14 @@ class TestStorage:
                 }
                 for r in rows
             ]
+
+    def count_generation_logs(self, tool_name: str | None = None) -> int:
+        """Count generation logs matching the same filter as list (pagination)."""
+        with self._session() as session:
+            query = session.query(func.count(GenerationLogModel.id))
+            if tool_name:
+                query = query.filter(GenerationLogModel.tool_name == tool_name)
+            return query.scalar() or 0
 
     def list_generated_tools(self) -> list[dict[str, Any]]:
         """Get unique tools with generation counts."""

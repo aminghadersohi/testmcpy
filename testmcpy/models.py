@@ -155,6 +155,15 @@ class TestRunModel(Base):
         Index("idx_runs_test_id", "test_id"),
         Index("idx_runs_started", "started_at"),
         Index("idx_runs_status", "status"),
+        # Per-test × per-config aggregation (performance matrix / leaderboard)
+        Index(
+            "idx_runs_suite_config",
+            "test_id",
+            "model",
+            "provider",
+            "mcp_profile_id",
+            "started_at",
+        ),
         {"sqlite_autoincrement": True},
     )
 
@@ -192,6 +201,8 @@ class QuestionResultModel(Base):
     __table_args__ = (
         Index("idx_question_results_run", "run_id"),
         Index("idx_question_results_run_passed", "run_id", "passed"),
+        # Cross-run lookups by question (per-test history/trends)
+        Index("idx_question_results_question_run", "question_id", "run_id"),
         {"sqlite_autoincrement": True},
     )
 

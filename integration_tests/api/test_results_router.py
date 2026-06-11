@@ -153,32 +153,6 @@ class TestTestHistory:
         assert 0 <= entry["pass_rate"] <= 1
 
 
-class TestCompareRuns:
-    """Tests for GET /api/results/compare."""
-
-    def test_compare_two_runs(self, client):
-        r1 = client.post("/api/results/save", json=_make_test_run_payload()).json()
-        r2 = client.post("/api/results/save", json=_make_test_run_payload()).json()
-        resp = client.get(
-            "/api/results/compare",
-            params={"run_ids": f"{r1['run_id']},{r2['run_id']}"},
-        )
-        assert resp.status_code == 200
-        data = resp.json()
-        assert "runs" in data
-        assert "tests" in data
-        assert len(data["runs"]) == 2
-
-    def test_compare_too_few_ids(self, client):
-        r1 = client.post("/api/results/save", json=_make_test_run_payload()).json()
-        resp = client.get("/api/results/compare", params={"run_ids": r1["run_id"]})
-        assert resp.status_code == 400
-
-    def test_compare_nonexistent_ids(self, client):
-        resp = client.get("/api/results/compare", params={"run_ids": "fake1,fake2"})
-        assert resp.status_code == 404
-
-
 class TestDeleteTestRun:
     """Tests for DELETE /api/results/run/{run_id}."""
 

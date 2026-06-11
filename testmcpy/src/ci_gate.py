@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import yaml
 
@@ -13,7 +14,11 @@ class CIGateConfig:
     required_tests: list[str] = field(default_factory=list)  # Tests that MUST pass
     block_on_regression: bool = True  # Fail if regression detected vs baseline
 
-    def evaluate(self, results: list[dict], regressions: list[dict] | None = None) -> dict:
+    def evaluate(
+        self,
+        results: list[dict[str, Any]],
+        regressions: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
         """Evaluate results against gate config.
 
         Args:
@@ -52,7 +57,7 @@ class CIGateConfig:
         }
 
 
-def _load_yaml(path: str) -> dict:
+def _load_yaml(path: str) -> dict[str, Any]:
     config_path = Path(path)
     if not config_path.exists():
         return {}
@@ -70,7 +75,8 @@ def load_gate_config(path: str = ".testmcpy-gate.yaml") -> CIGateConfig:
         consumed by their respective commands via load_gate_section().
     """
     data = _load_yaml(path)
-    evals = data.get("evals") if isinstance(data.get("evals"), dict) else data
+    evals_section = data.get("evals")
+    evals = evals_section if isinstance(evals_section, dict) else data
 
     return CIGateConfig(
         min_pass_rate=float(evals.get("min_pass_rate", 80.0)),
@@ -80,7 +86,7 @@ def load_gate_config(path: str = ".testmcpy-gate.yaml") -> CIGateConfig:
     )
 
 
-def load_gate_section(section: str, path: str = ".testmcpy-gate.yaml") -> dict:
+def load_gate_section(section: str, path: str = ".testmcpy-gate.yaml") -> dict[str, Any]:
     """Read one section of the unified gate file.
 
     Sections: `conformance` (required, fail_on_warning), `usability`

@@ -58,7 +58,7 @@ def _resolve_connection(
 
     if prof and prof.mcps:
         mcp_server = prof.mcps[0]
-        effective_mcp_url = mcp_url or mcp_server.mcp_url
+        effective_mcp_url: Optional[str] = mcp_url or mcp_server.mcp_url
         auth_config = mcp_server.auth.to_dict() if mcp_server.auth else None
     else:
         effective_mcp_url = mcp_url or DEFAULT_MCP_URL

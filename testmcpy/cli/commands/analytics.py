@@ -10,7 +10,7 @@ import csv
 import io
 import json
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Any, Optional
 
 import typer
 from rich.table import Table
@@ -42,7 +42,7 @@ def _pct(rate: float) -> str:
     return f"{rate * 100:.0f}%"
 
 
-def _emit_csv(rows: list[dict]) -> str:
+def _emit_csv(rows: list[dict[str, Any]]) -> str:
     if not rows:
         return ""
     buf = io.StringIO()

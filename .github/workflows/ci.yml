@@ -70,10 +70,18 @@ jobs:
           pip install -e ".[dev,server]"
           pip install --upgrade --pre mcp fastmcp
           pip list | grep -E "^(mcp|fastmcp) "
-      - name: pip check (resolver conflicts with pre-releases)
-        run: pip check
-      - name: Run unit tests against pre-releases
-        run: pytest unit_tests/ -q
+      - name: Run unit tests against pre-releases (signal via warnings, never red)
+        run: |
+          # Force-upgrading past our own pins makes `pip check` complain by
+          # construction — that line is noise. The real canary signal is
+          # whether the suite still passes on the next mcp/fastmcp line.
+          pip check | grep -v "testmcpy .* has requirement" || true
+          if pytest unit_tests/ -q; then
+            echo "Canary green: unit suite passes against pre-release mcp/fastmcp" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::warning title=mcp pre-release canary::unit suite FAILS against pre-release mcp/fastmcp — start the stateless-spec migration (see plan risk #1)"
+            echo "Canary RED: unit suite fails against pre-release mcp/fastmcp — migration needed" >> "$GITHUB_STEP_SUMMARY"
+          fi
 
   ui:
     runs-on: ubuntu-latest

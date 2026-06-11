@@ -53,7 +53,9 @@ def bench(
         raise typer.Exit(1)
 
     model_list = [m.strip() for m in models.split(",") if m.strip()]
-    profile_list = [p.strip() for p in (profiles or "").split(",") if p.strip()] or [None]
+    profile_list: list[Optional[str]] = [
+        p.strip() for p in (profiles or "").split(",") if p.strip()
+    ] or [None]
 
     provider_list: list[Optional[str]]
     if providers:

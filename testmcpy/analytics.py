@@ -34,7 +34,7 @@ def config_key(model: str, provider: str, mcp_profile_id: str | None = None) -> 
     return key
 
 
-def _pass_rate_expr():
+def _pass_rate_expr() -> Any:
     """Portable AVG over a boolean column (0.0–1.0)."""
     return func.avg(case((QuestionResultModel.passed.is_(True), 1.0), else_=0.0))
 
@@ -70,7 +70,7 @@ def test_matrix(
     each row carries one cell per config with n, pass_rate, flaky flag,
     avg score/cost/latency, and a day-bucketed pass-rate trend.
     """
-    config_cols = [TestRunModel.model, TestRunModel.provider]
+    config_cols: list[Any] = [TestRunModel.model, TestRunModel.provider]
     if include_profile:
         config_cols.append(TestRunModel.mcp_profile_id)
 

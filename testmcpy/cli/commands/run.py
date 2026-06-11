@@ -309,6 +309,11 @@ def run(
             "process. (SC-106138)"
         ),
     ),
+    junit_xml: Optional[Path] = typer.Option(
+        None,
+        "--junit-xml",
+        help="Write a JUnit XML report to this path (for CI test summaries)",
+    ),
     gate: bool = typer.Option(
         False,
         "--gate",
@@ -865,18 +870,32 @@ def run(
 
             console.print(f"\n[green]Report saved to {output}[/green]")
 
-        # Generate markdown eval report if requested
+        # Generate eval report if requested (.md/.json/.html via
+        # ReportGenerator, .xml as JUnit for CI systems)
+        suite_name = test_path.stem if test_path.is_file() else test_path.name
         if report:
-            from testmcpy.src.report_generator import ReportGenerator
+            if report.suffix == ".xml":
+                from testmcpy.src.emitters import to_junit_xml
 
-            suite_name = test_path.stem if test_path.is_file() else test_path.name
-            gen = ReportGenerator.from_test_results(
-                suite_name=suite_name,
-                results=results,
-                title=report_title or suite_name,
-            )
-            saved_path = gen.save(str(report))
-            console.print(f"\n[green]Eval report saved to {saved_path}[/green]")
+                report.write_text(to_junit_xml([r.to_dict() for r in results], suite_name))
+                console.print(f"\n[green]JUnit report saved to {report}[/green]")
+            else:
+                from testmcpy.src.report_generator import ReportGenerator
+
+                gen = ReportGenerator.from_test_results(
+                    suite_name=suite_name,
+                    results=results,
+                    title=report_title or suite_name,
+                )
+                saved_path = gen.save(str(report))
+                console.print(f"\n[green]Eval report saved to {saved_path}[/green]")
+
+        if junit_xml:
+            from testmcpy.src.emitters import to_junit_xml
+
+            junit_xml.parent.mkdir(parents=True, exist_ok=True)
+            junit_xml.write_text(to_junit_xml([r.to_dict() for r in results], suite_name))
+            console.print(f"[green]JUnit report saved to {junit_xml}[/green]")
 
         # CI gate: evaluated last so results are already saved for the UI
         # even when the gate fails the build.

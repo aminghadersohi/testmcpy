@@ -105,3 +105,16 @@ def test_missing_gate_config_errors(runner, cli_app, suite_file, stub_execution,
     )
     assert result.exit_code == 1
     assert "gate config does not exist" in result.stdout
+
+
+def test_junit_xml_written(runner, cli_app, suite_file, stub_execution, tmp_path):
+    import xml.etree.ElementTree as ET
+
+    stub_execution(passed=False)
+    junit_path = tmp_path / "reports" / "junit.xml"
+    result = runner.invoke(cli_app, ["run", str(suite_file), "--junit-xml", str(junit_path)])
+    assert result.exit_code == 0
+    root = ET.parse(junit_path).getroot()
+    assert root.get("tests") == "1"
+    assert root.get("failures") == "1"
+    assert root.find("testcase").get("name") == "t1"

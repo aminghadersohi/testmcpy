@@ -138,21 +138,38 @@ class TestStorage:
         # a manual `alembic upgrade` on existing DB files.
         self._apply_column_migrations()
 
+    @staticmethod
+    def _sqlite_default_literal(column) -> str | None:
+        """SQLite DDL DEFAULT literal for a mapped column's scalar default.
+
+        Only plain scalar defaults are rendered (bool/int/float/str) — callables
+        and server-side expressions return None so the column is added without
+        a DEFAULT (NULL for existing rows, Python-side default for new ones).
+        """
+        default = column.default
+        if default is None or not getattr(default, "is_scalar", False):
+            return None
+        value = default.arg
+        if isinstance(value, bool):
+            return str(int(value))
+        if isinstance(value, (int, float)):
+            return str(value)
+        if isinstance(value, str):
+            escaped = value.replace("'", "''")
+            return f"'{escaped}'"
+        return None
+
     def _apply_column_migrations(self) -> None:
         """Idempotently add columns that were introduced after the initial schema.
 
         create_all() creates missing *tables* but never alters existing ones, so
         users who created their DB before a new column was added will hit
-        OperationalError on INSERT.  This method uses PRAGMA table_info to detect
-        missing columns and issues ALTER TABLE … ADD COLUMN for each one.
+        OperationalError on SELECT/INSERT.  Missing columns are derived from the
+        ORM metadata (every mapped column not present in the live table) rather
+        than a hand-maintained list — the previous list drifted from the models
+        more than once (e.g. ``manual_false_positive`` was missed, breaking
+        ``GET /api/results/run/{id}`` on older DB files with a 500).
         """
-        # (table, column, DDL type)
-        migrations = [
-            ("question_results", "tool_call_counts", "JSON"),
-            ("question_results", "false_positive_rate", "FLOAT DEFAULT 0.0"),
-            ("test_runs", "total_cost", "FLOAT DEFAULT 0.0"),
-            ("test_runs", "heartbeat_at", "VARCHAR"),
-        ]
         # (index name, table, columns) — indexes added after the initial
         # schema; create_all skips existing tables so these need explicit DDL
         index_migrations = [
@@ -172,11 +189,20 @@ class TestStorage:
             if is_sqlite:
                 # PRAGMA is SQLite-only; non-SQLite backends are expected
                 # to be managed with `alembic upgrade head`.
-                for table, column, col_type in migrations:
-                    result = conn.execute(text(f"PRAGMA table_info({table})"))
+                for table in Base.metadata.sorted_tables:
+                    result = conn.execute(text(f"PRAGMA table_info({table.name})"))
                     existing = {row[1] for row in result}
-                    if column not in existing:
-                        conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}"))
+                    if not existing:
+                        continue  # create_all just made it; nothing to alter
+                    for column in table.columns:
+                        if column.name in existing:
+                            continue
+                        ddl_type = column.type.compile(self._engine.dialect)
+                        ddl = f"ALTER TABLE {table.name} ADD COLUMN {column.name} {ddl_type}"
+                        default = self._sqlite_default_literal(column)
+                        if default is not None:
+                            ddl += f" DEFAULT {default}"
+                        conn.execute(text(ddl))
             for index_name, table, columns in index_migrations:
                 conn.execute(
                     text(f"CREATE INDEX IF NOT EXISTS {index_name} ON {table} ({columns})")

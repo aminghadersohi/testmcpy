@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.2] - 2026-06-11
+
+### Fixed
+- **Reports tab 500 on older DB files**: `GET /api/results/run/{id}` failed
+  with `no such column: question_results.manual_false_positive` for DBs
+  created before that column existed. The SQLite column auto-migration now
+  derives missing columns from the ORM model metadata instead of a
+  hand-maintained list that had drifted from the models
+
 ## [0.9.0] - 2026-06-11
 
 Crash-safe UI test runs: the results DB is now the source of truth for

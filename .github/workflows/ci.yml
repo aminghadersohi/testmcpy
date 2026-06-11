@@ -48,6 +48,33 @@ jobs:
           file: ./coverage.xml
           fail_ci_if_error: false
 
+  mcp-prerelease-canary:
+    # Early warning for the MCP stateless-spec transition (2026-07-28 RC):
+    # installs mcp/fastmcp pre-releases on top of our pins and runs the
+    # unit suite. Never blocks CI — a red canary means "start the
+    # migration", not "this PR is broken".
+    name: Canary (mcp/fastmcp pre-releases)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: 'pip'
+          cache-dependency-path: pyproject.toml
+      - name: Install with mcp/fastmcp pre-releases
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,server]"
+          pip install --upgrade --pre mcp fastmcp
+          pip list | grep -E "^(mcp|fastmcp) "
+      - name: pip check (resolver conflicts with pre-releases)
+        run: pip check
+      - name: Run unit tests against pre-releases
+        run: pytest unit_tests/ -q
+
   ui:
     runs-on: ubuntu-latest
 

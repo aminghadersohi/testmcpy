@@ -28,7 +28,13 @@ except ImportError:
     import sys
 
     sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-    from mcp_client import MCPClient, MCPError, MCPTool, MCPToolCall, MCPToolResult
+    from mcp_client import (  # type: ignore[no-redef]
+        MCPClient,
+        MCPError,
+        MCPTool,
+        MCPToolCall,
+        MCPToolResult,
+    )
 
     # Config will fall back to environment variables
     def get_config():

@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react'
-import { BrowserRouter as Router, Routes, Route, NavLink, useNavigate, useLocation } from 'react-router-dom'
+import { BrowserRouter as Router, Routes, Route, NavLink, Navigate, useNavigate, useLocation } from 'react-router-dom'
 import {
   Package,
   MessageSquare,
@@ -18,7 +18,6 @@ import {
   Sun,
   Moon,
   Monitor,
-  GitCompare,
   Heart,
   TrendingUp,
 } from 'lucide-react'
@@ -33,8 +32,7 @@ import AuthDebugger from './pages/AuthDebugger'
 import GenerationHistory from './pages/GenerationHistory'
 import Reports from './pages/Reports'
 import CompatibilityMatrix from './pages/CompatibilityMatrix'
-import MetricsDashboard from './pages/MetricsDashboard'
-import RunComparison from './pages/RunComparison'
+import Performance from './pages/Performance'
 import MCPHealth from './pages/MCPHealth'
 import SecurityDashboard from './pages/SecurityDashboard'
 import { TestRunProvider } from './contexts/TestRunContext'
@@ -346,12 +344,11 @@ function AppContent() {
     { path: '/', label: 'Explorer', icon: Package },
     { path: '/tests', label: 'Tests', icon: FileText },
     { path: '/reports', label: 'Reports', icon: BarChart3 },
+    { path: '/performance', label: 'Performance', icon: TrendingUp },
     { path: '/compatibility', label: 'Compat', icon: Grid3X3 },
     { path: '/generation-history', label: 'Gen History', icon: History },
     { path: '/chat', label: 'Interact', icon: MessageSquare },
     { section: 'Analytics' },
-    { path: '/metrics', label: 'Metrics', icon: TrendingUp },
-    { path: '/compare', label: 'Compare', icon: GitCompare },
     { path: '/mcp-health', label: 'MCP Health', icon: Heart },
     { path: '/security', label: 'Security', icon: Shield },
     { section: 'Settings' },
@@ -614,8 +611,9 @@ function AppContent() {
               <Route path="/reports" element={<Reports />} />
               <Route path="/compatibility" element={<CompatibilityMatrix />} />
               <Route path="/generation-history" element={<GenerationHistory />} />
-              <Route path="/metrics" element={<MetricsDashboard />} />
-              <Route path="/compare" element={<RunComparison />} />
+              <Route path="/performance" element={<Performance />} />
+              <Route path="/metrics" element={<Navigate to="/performance" replace />} />
+              <Route path="/compare" element={<Navigate to="/performance" replace />} />
               <Route path="/mcp-health" element={<MCPHealth />} />
               <Route path="/security" element={<SecurityDashboard />} />
               <Route path="/auth-debugger" element={<AuthDebugger />} />

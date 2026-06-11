@@ -95,7 +95,8 @@ async def test_get_run_serialises_handle_with_meta(client):
     body = r.json()
     assert body["run_id"] == handle.run_id
     assert body["kind"] == "directory"
-    assert body["status"] == "running"
+    # Created directly on the registry (no slot acquired) — still queued.
+    assert body["status"] == "queued"
     assert body["meta"]["folder"] == "chatbot"
     assert [f["name"] for f in body["meta"]["files"]] == ["C01.yaml", "C02.yaml"]
     assert body["meta"]["model"] == "claude"

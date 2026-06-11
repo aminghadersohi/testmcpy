@@ -147,7 +147,10 @@ async def test_buffered_replay_returns_logs_then_structured_events():
 @pytest.mark.asyncio
 async def test_finalize_marks_status_and_finished_at():
     handle = await run_registry.create_run(kind="single", meta={})
-    assert handle.status == "running"
+    # Fresh handles are queued until acquire_slot grants a concurrency
+    # slot; both queued and running count as active (not finished).
+    assert handle.status == "queued"
+    assert not handle.is_finished
     assert handle.finished_at is None
 
     summary = {"total": 1, "passed": 1, "failed": 0}

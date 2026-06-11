@@ -420,3 +420,110 @@ async def test_attach_unknown_run_id_returns_error_and_continues():
     await ws.disconnect()
     with contextlib.suppress(asyncio.TimeoutError):
         await asyncio.wait_for(dispatcher, timeout=1.0)
+
+
+# ---------------------------------------------------------------------------
+# Concurrency slots (TESTMCPY_MAX_CONCURRENT_RUNS)
+# ---------------------------------------------------------------------------
+
+
+def _gated_command(started_run_ids: list, release: asyncio.Event):
+    """A run command that records execution start order and parks until
+    ``release`` is set — lets tests hold a slot open deliberately."""
+
+    async def _command(handle, data, config) -> None:
+        started_run_ids.append(handle.run_id)
+        await release.wait()
+        ws_module._emit_event(handle, {"type": "all_complete", "summary": {}})
+
+    return _command
+
+
+async def _run_id_from(ws: _FakeWebSocket) -> str:
+    while True:
+        for m in ws.outbound:
+            if m.get("type") == "run_started":
+                return m["run_id"]
+        await asyncio.sleep(0.01)
+
+
+@pytest.mark.asyncio
+async def test_second_run_queues_until_slot_frees(monkeypatch):
+    """With one slot, a second run must sit at status=queued (visible to
+    /api/runs polling) and start only after the first finishes."""
+    monkeypatch.setenv("TESTMCPY_MAX_CONCURRENT_RUNS", "1")
+    started: list[str] = []
+    release = asyncio.Event()
+    monkeypatch.setattr(ws_module, "_run_test_command", _gated_command(started, release))
+
+    ws1, ws2 = _FakeWebSocket(), _FakeWebSocket()
+    d1 = asyncio.create_task(ws_module.handle_test_websocket(ws1))
+    d2 = asyncio.create_task(ws_module.handle_test_websocket(ws2))
+    await ws1.inbound.put({"type": "run_test", "test_path": "/a.yaml"})
+    rid1 = await asyncio.wait_for(_run_id_from(ws1), timeout=2.0)
+    await ws2.inbound.put({"type": "run_test", "test_path": "/b.yaml"})
+    rid2 = await asyncio.wait_for(_run_id_from(ws2), timeout=2.0)
+
+    # Let the second spawn reach the semaphore.
+    await asyncio.sleep(0.05)
+    h1 = await run_registry.get_run(rid1)
+    h2 = await run_registry.get_run(rid2)
+    assert h1.status == "running"
+    assert h2.status == "queued"
+    assert started == [rid1]
+    # Queued runs count as active for the background-runs indicator.
+    active_ids = {h.run_id for h in await run_registry.list_active()}
+    assert {rid1, rid2} <= active_ids
+
+    release.set()
+
+    # First finishes, slot frees, second starts and runs straight through.
+    async def _both_started():
+        while len(started) < 2:
+            await asyncio.sleep(0.01)
+
+    await asyncio.wait_for(_both_started(), timeout=2.0)
+    assert started == [rid1, rid2]
+
+    for ws, d in ((ws1, d1), (ws2, d2)):
+        await ws.disconnect()
+        with contextlib.suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(d, timeout=1.0)
+
+
+@pytest.mark.asyncio
+async def test_stop_while_queued_finalizes_as_stopped(monkeypatch):
+    """Cancelling a queued run interrupts the semaphore wait: it must
+    finalize as stopped and never execute."""
+    monkeypatch.setenv("TESTMCPY_MAX_CONCURRENT_RUNS", "1")
+    started: list[str] = []
+    release = asyncio.Event()
+    monkeypatch.setattr(ws_module, "_run_test_command", _gated_command(started, release))
+
+    ws1, ws2 = _FakeWebSocket(), _FakeWebSocket()
+    d1 = asyncio.create_task(ws_module.handle_test_websocket(ws1))
+    d2 = asyncio.create_task(ws_module.handle_test_websocket(ws2))
+    await ws1.inbound.put({"type": "run_test", "test_path": "/a.yaml"})
+    rid1 = await asyncio.wait_for(_run_id_from(ws1), timeout=2.0)
+    await ws2.inbound.put({"type": "run_test", "test_path": "/b.yaml"})
+    rid2 = await asyncio.wait_for(_run_id_from(ws2), timeout=2.0)
+    await asyncio.sleep(0.05)
+
+    h2 = await run_registry.get_run(rid2)
+    assert h2.status == "queued"
+    h2.task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await h2.task
+    assert h2.status == "stopped"
+    assert rid2 not in started
+
+    # The held slot was never disturbed; releasing finishes run 1 normally.
+    release.set()
+    h1 = await run_registry.get_run(rid1)
+    await asyncio.wait_for(asyncio.shield(h1.task), timeout=2.0)
+    assert h1.status == "completed"
+
+    for ws, d in ((ws1, d1), (ws2, d2)):
+        await ws.disconnect()
+        with contextlib.suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(d, timeout=1.0)

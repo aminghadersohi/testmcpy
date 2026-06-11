@@ -909,7 +909,14 @@ async def handle_test_websocket(websocket: WebSocket):
         async def _run() -> None:
             heartbeat_task = asyncio.create_task(_heartbeat())
             try:
-                await command_coro(handle, data, config)
+                if not run_registry.slots_available():
+                    _emit_log(
+                        handle,
+                        "⏳ Run queued — waiting for a free run slot "
+                        "(TESTMCPY_MAX_CONCURRENT_RUNS)…",
+                    )
+                async with run_registry.acquire_slot(handle):
+                    await command_coro(handle, data, config)
                 await run_registry.finalize(
                     handle.run_id, status="completed", summary=handle.summary
                 )

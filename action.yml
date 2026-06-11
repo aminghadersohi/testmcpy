@@ -1,5 +1,13 @@
 name: 'testmcpy Eval Runner'
-description: 'Run MCP eval suites with testmcpy and report results'
+description: >-
+  Run LLM-driven evals against an MCP server with testmcpy: CI gate with
+  exit codes, JUnit output, job-summary report, and optional sticky PR
+  comment.
+author: 'Preset'
+branding:
+  icon: 'check-circle'
+  color: 'blue'
+
 inputs:
   test_path:
     description: 'Path to test files or directory'
@@ -8,123 +16,286 @@ inputs:
   model:
     description: 'LLM model to use'
     required: false
-    default: 'claude-sonnet-4-20250514'
+    default: ''
   provider:
     description: 'LLM provider'
     required: false
-    default: 'anthropic'
+    default: ''
   mcp_url:
     description: 'MCP service URL'
     required: false
+    default: ''
   profile:
     description: 'MCP profile ID'
     required: false
+    default: ''
   pass_threshold:
     description: 'Minimum pass rate to succeed (0-100)'
     required: false
     default: '80'
+  gate_config:
+    description: 'Path to a .testmcpy-gate.yaml (overrides pass_threshold)'
+    required: false
+    default: ''
   report_format:
     description: 'Report format: md, html, json'
     required: false
     default: 'md'
+  junit:
+    description: 'Emit junit.xml ("true"/"false")'
+    required: false
+    default: 'true'
+  pr_comment:
+    description: 'Post/update a sticky PR comment with the report ("true"/"false")'
+    required: false
+    default: 'false'
+  github_token:
+    description: 'Token used for the PR comment'
+    required: false
+    default: ${{ github.token }}
+  version:
+    description: 'testmcpy version to install (PyPI version), e.g. 0.8.0'
+    required: false
+    default: ''
+  extra_args:
+    description: 'Extra arguments appended to testmcpy run'
+    required: false
+    default: ''
   anthropic_api_key:
     description: 'Anthropic API key'
     required: false
+    default: ''
   openai_api_key:
     description: 'OpenAI API key'
     required: false
+    default: ''
   mcp_api_token:
     description: 'MCP JWT API token'
     required: false
+    default: ''
   mcp_api_secret:
     description: 'MCP JWT API secret'
     required: false
+    default: ''
   mcp_api_url:
     description: 'MCP JWT auth URL'
     required: false
+    default: ''
+
 outputs:
   pass_rate:
     description: 'Overall pass rate percentage'
+    value: ${{ steps.parse.outputs.pass_rate }}
   total_tests:
     description: 'Total number of tests run'
+    value: ${{ steps.parse.outputs.total_tests }}
   passed:
     description: 'Number of tests passed'
+    value: ${{ steps.parse.outputs.passed }}
   failed:
     description: 'Number of tests failed'
+    value: ${{ steps.parse.outputs.failed }}
+  gate_passed:
+    description: 'Whether the run passed the gate ("true"/"false")'
+    value: ${{ steps.parse.outputs.gate_passed }}
   report_path:
     description: 'Path to generated report'
+    value: ${{ steps.parse.outputs.report_path }}
+  results_path:
+    description: 'Path to results JSON'
+    value: ${{ steps.parse.outputs.results_path }}
+
 runs:
   using: 'composite'
   steps:
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.11'
-    - name: Install testmcpy
+    - name: Set up uv
+      uses: astral-sh/setup-uv@v5
+
+    - name: Configure MCP profile
       shell: bash
-      run: pip install testmcpy
-    - name: Configure MCP
-      shell: bash
+      env:
+        MCP_URL: ${{ inputs.mcp_url }}
+        MCP_API_URL: ${{ inputs.mcp_api_url }}
+        MCP_API_TOKEN: ${{ inputs.mcp_api_token }}
+        MCP_API_SECRET: ${{ inputs.mcp_api_secret }}
       run: |
-        # Create .mcp_services.yaml if MCP URL provided
-        if [ -n "${{ inputs.mcp_url }}" ]; then
-          cat > .mcp_services.yaml << YAML
-        default: ci
-        profiles:
-          ci:
-            name: CI Environment
-            mcps:
-              - name: MCP Service
-                mcp_url: ${{ inputs.mcp_url }}
-                auth:
-                  type: jwt
-                  api_url: ${{ inputs.mcp_api_url }}
-                  api_token: ${{ inputs.mcp_api_token }}
-                  api_secret: ${{ inputs.mcp_api_secret }}
-        YAML
+        # Create .mcp_services.yaml when a URL with JWT creds is provided;
+        # plain URLs are passed straight to --mcp-url in the next step.
+        if [ -n "$MCP_URL" ] && [ -n "$MCP_API_TOKEN" ]; then
+          python3 - <<'EOF'
+        import json, os
+        # JSON is valid YAML — avoids requiring PyYAML on the runner python
+        config = {
+            "default": "ci",
+            "profiles": {
+                "ci": {
+                    "name": "CI Environment",
+                    "mcps": [
+                        {
+                            "name": "MCP Service",
+                            "mcp_url": os.environ["MCP_URL"],
+                            "auth": {
+                                "type": "jwt",
+                                "api_url": os.environ.get("MCP_API_URL", ""),
+                                "api_token": os.environ["MCP_API_TOKEN"],
+                                "api_secret": os.environ.get("MCP_API_SECRET", ""),
+                            },
+                        }
+                    ],
+                }
+            },
+        }
+        with open(".mcp_services.yaml", "w") as f:
+            json.dump(config, f, indent=2)
+        EOF
+          echo "MCP_PROFILE_CREATED=true" >> "$GITHUB_ENV"
         fi
+
     - name: Run eval suite
+      id: run
       shell: bash
       env:
         ANTHROPIC_API_KEY: ${{ inputs.anthropic_api_key }}
         OPENAI_API_KEY: ${{ inputs.openai_api_key }}
+        INPUT_TEST_PATH: ${{ inputs.test_path }}
+        INPUT_MODEL: ${{ inputs.model }}
+        INPUT_PROVIDER: ${{ inputs.provider }}
+        INPUT_MCP_URL: ${{ inputs.mcp_url }}
+        INPUT_PROFILE: ${{ inputs.profile }}
+        INPUT_PASS_THRESHOLD: ${{ inputs.pass_threshold }}
+        INPUT_GATE_CONFIG: ${{ inputs.gate_config }}
+        INPUT_REPORT_FORMAT: ${{ inputs.report_format }}
+        INPUT_JUNIT: ${{ inputs.junit }}
+        INPUT_VERSION: ${{ inputs.version }}
+        INPUT_EXTRA_ARGS: ${{ inputs.extra_args }}
       run: |
+        set -uo pipefail
         mkdir -p results
-        PROFILE_ARGS=""
-        if [ -n "${{ inputs.profile }}" ]; then
-          PROFILE_ARGS="--profile ${{ inputs.profile }}"
+        PKG="testmcpy"
+        if [ -n "$INPUT_VERSION" ]; then PKG="testmcpy==$INPUT_VERSION"; fi
+
+        ARGS=(run "$INPUT_TEST_PATH"
+              --report "results/report.$INPUT_REPORT_FORMAT"
+              --output results/results.json)
+        if [ -n "$INPUT_MODEL" ]; then ARGS+=(--model "$INPUT_MODEL"); fi
+        if [ -n "$INPUT_PROVIDER" ]; then ARGS+=(--provider "$INPUT_PROVIDER"); fi
+        if [ "${MCP_PROFILE_CREATED:-false}" = "true" ]; then
+          ARGS+=(--profile ci)
+        elif [ -n "$INPUT_PROFILE" ]; then
+          ARGS+=(--profile "$INPUT_PROFILE")
+        elif [ -n "$INPUT_MCP_URL" ]; then
+          ARGS+=(--mcp-url "$INPUT_MCP_URL")
         fi
-        testmcpy run ${{ inputs.test_path }} \
-          --model ${{ inputs.model }} \
-          --provider ${{ inputs.provider }} \
-          ${PROFILE_ARGS} \
-          --report results/report.${{ inputs.report_format }} \
-          --output results/results.json
-    - name: Check pass threshold and set outputs
+        if [ -n "$INPUT_GATE_CONFIG" ]; then
+          ARGS+=(--gate-config "$INPUT_GATE_CONFIG")
+        else
+          ARGS+=(--min-pass-rate "$INPUT_PASS_THRESHOLD")
+        fi
+        if [ "$INPUT_JUNIT" = "true" ]; then ARGS+=(--junit-xml results/junit.xml); fi
+        if [ -n "$INPUT_EXTRA_ARGS" ]; then
+          # shellcheck disable=SC2206
+          ARGS+=($INPUT_EXTRA_ARGS)
+        fi
+
+        set +e
+        uvx "$PKG" "${ARGS[@]}"
+        EXIT_CODE=$?
+        set -e
+        echo "exit_code=$EXIT_CODE" >> "$GITHUB_OUTPUT"
+        # Defer failing until outputs are parsed and the PR comment posts
+        exit 0
+
+    - name: Parse results
+      id: parse
       shell: bash
+      env:
+        EXIT_CODE: ${{ steps.run.outputs.exit_code }}
+        INPUT_REPORT_FORMAT: ${{ inputs.report_format }}
       run: |
-        RESULTS=$(python3 -c "
+        set -euo pipefail
+        if [ -f results/results.json ]; then
+          python3 - <<'EOF' >> "$GITHUB_OUTPUT"
         import json
-        d = json.load(open('results/results.json'))
-        s = d.get('summary', {})
-        total = s.get('total', 0)
-        passed = s.get('passed', 0)
-        failed = s.get('failed', 0)
-        rate = int(passed * 100 / total) if total > 0 else 0
-        print(f'{rate} {total} {passed} {failed}')
-        ")
-        read PASS_RATE TOTAL PASSED FAILED <<< "$RESULTS"
-        echo "pass_rate=$PASS_RATE" >> $GITHUB_OUTPUT
-        echo "total_tests=$TOTAL" >> $GITHUB_OUTPUT
-        echo "passed=$PASSED" >> $GITHUB_OUTPUT
-        echo "failed=$FAILED" >> $GITHUB_OUTPUT
-        echo "report_path=results/report.${{ inputs.report_format }}" >> $GITHUB_OUTPUT
-        if [ "$PASS_RATE" -lt "${{ inputs.pass_threshold }}" ]; then
-          echo "::error::Pass rate ${PASS_RATE}% is below threshold ${{ inputs.pass_threshold }}%"
-          exit 1
+        data = json.load(open("results/results.json"))
+        summary = data.get("summary", {})
+        total = summary.get("total", 0)
+        passed = summary.get("passed", 0)
+        failed = summary.get("failed", 0)
+        rate = (passed / total * 100) if total else 0.0
+        print(f"total_tests={total}")
+        print(f"passed={passed}")
+        print(f"failed={failed}")
+        print(f"pass_rate={rate:.1f}")
+        EOF
+        else
+          { echo "total_tests=0"; echo "passed=0"; echo "failed=0"; echo "pass_rate=0"; } >> "$GITHUB_OUTPUT"
         fi
-    - name: Upload report
+        if [ "${EXIT_CODE:-1}" = "0" ]; then
+          echo "gate_passed=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "gate_passed=false" >> "$GITHUB_OUTPUT"
+        fi
+        echo "report_path=results/report.$INPUT_REPORT_FORMAT" >> "$GITHUB_OUTPUT"
+        echo "results_path=results/results.json" >> "$GITHUB_OUTPUT"
+
+    - name: Sticky PR comment
+      if: ${{ inputs.pr_comment == 'true' && github.event_name == 'pull_request' }}
+      uses: actions/github-script@v7
+      env:
+        REPORT_PATH: ${{ steps.parse.outputs.report_path }}
+        GATE_PASSED: ${{ steps.parse.outputs.gate_passed }}
+        PASS_RATE: ${{ steps.parse.outputs.pass_rate }}
+        PASSED: ${{ steps.parse.outputs.passed }}
+        TOTAL: ${{ steps.parse.outputs.total_tests }}
+      with:
+        github-token: ${{ inputs.github_token }}
+        script: |
+          const fs = require('fs');
+          const marker = '<!-- testmcpy-action-report -->';
+          let report = 'No report generated.';
+          if (fs.existsSync(process.env.REPORT_PATH)) {
+            report = fs.readFileSync(process.env.REPORT_PATH, 'utf8');
+            if (report.length > 60000) {
+              report = report.slice(0, 60000) + '\n\n…(truncated)';
+            }
+          }
+          const gate = process.env.GATE_PASSED === 'true' ? '✅ Gate passed' : '❌ Gate failed';
+          const body = [
+            marker,
+            `## testmcpy results — ${gate}`,
+            `**${process.env.PASSED}/${process.env.TOTAL} passed** (${process.env.PASS_RATE}%)`,
+            '',
+            report,
+          ].join('\n');
+          const { data: comments } = await github.rest.issues.listComments({
+            ...context.repo,
+            issue_number: context.issue.number,
+            per_page: 100,
+          });
+          const existing = comments.find(c => c.body && c.body.startsWith(marker));
+          if (existing) {
+            await github.rest.issues.updateComment({
+              ...context.repo, comment_id: existing.id, body,
+            });
+          } else {
+            await github.rest.issues.createComment({
+              ...context.repo, issue_number: context.issue.number, body,
+            });
+          }
+
+    - name: Upload report artifact
       uses: actions/upload-artifact@v4
       with:
-        name: eval-report
+        name: testmcpy-eval-report
         path: results/
+        if-no-files-found: ignore
+
+    - name: Enforce gate
+      shell: bash
+      env:
+        EXIT_CODE: ${{ steps.run.outputs.exit_code }}
+      run: |
+        if [ "${EXIT_CODE:-1}" != "0" ]; then
+          echo "::error::testmcpy gate failed (exit code $EXIT_CODE)"
+          exit "$EXIT_CODE"
+        fi

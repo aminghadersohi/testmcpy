@@ -4,180 +4,85 @@
 name: MCP Integration Tests
 
 on:
-  # Run on pushes to main/dev branches
   push:
     branches: [main, dev]
-
-  # Run on pull requests
   pull_request:
     branches: [main]
-
-  # Allow manual triggers
   workflow_dispatch:
-
-  # Optional: Run on a schedule (daily at 2 AM UTC)
+  # Optional: nightly to track flakiness over time (feeds `testmcpy matrix`)
   schedule:
     - cron: '0 2 * * *'
 
 jobs:
-  test-mcp-service:
+  # Simplest path: the reusable action — gate, JUnit, job summary,
+  # sticky PR comment, artifact upload.
+  eval:
     runs-on: ubuntu-latest
-
-    strategy:
-      matrix:
-        # Test with multiple LLM models
-        model:
-          - provider: anthropic
-            name: claude-haiku-4-5
-          - provider: anthropic
-            name: claude-sonnet-4-5
-      # Continue testing other models even if one fails
-      fail-fast: false
-
+    permissions:
+      contents: read
+      pull-requests: write   # only needed when pr_comment: true
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v4
+      - uses: preset-io/testmcpy@v1
         with:
-          python-version: '3.11'
-          cache: 'pip'
+          test_path: tests/
+          model: claude-haiku-4-5
+          provider: anthropic
+          mcp_url: ${{ vars.MCP_URL }}
+          pass_threshold: '85'
+          pr_comment: 'true'
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
 
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install testmcpy[all]
-
-      # Option 1: If your MCP service is in the same repo
-      - name: Start MCP service
-        run: |
-          # Start your MCP service in the background
-          python -m your_mcp_service.server &
-          # Save the PID
-          echo $! > mcp_service.pid
+  # Equivalent without the action — direct uvx invocation:
+  eval-direct:
+    runs-on: ubuntu-latest
+    if: false  # enable instead of `eval` if you prefer no action dependency
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Run MCP eval suite
         env:
-          DATABASE_URL: ${{ secrets.TEST_DATABASE_URL }}
-          PORT: 5008
-
-      # Option 2: If using Docker
-      # - name: Start MCP service (Docker)
-      #   run: |
-      #     docker-compose -f docker-compose.test.yml up -d
-      #     docker-compose -f docker-compose.test.yml ps
-
-      # Option 3: If MCP service is external
-      # - name: Configure for external MCP service
-      #   run: |
-      #     echo "Using external MCP service at ${{ secrets.MCP_URL }}"
-
-      - name: Wait for MCP service to be ready
-        run: |
-          echo "Waiting for MCP service..."
-          timeout 60 bash -c 'until curl -f http://localhost:5008/health 2>/dev/null; do
-            echo "Service not ready, waiting..."
-            sleep 2
-          done'
-          echo "MCP service is ready!"
-
-      - name: Verify MCP tools are available
-        env:
-          MCP_URL: http://localhost:5008/mcp/
-          MCP_AUTH_TOKEN: ${{ secrets.MCP_AUTH_TOKEN }}
-        run: |
-          testmcpy tools
-
-      - name: Run testmcpy integration tests
-        env:
-          MCP_URL: http://localhost:5008/mcp/
-          MCP_AUTH_TOKEN: ${{ secrets.MCP_AUTH_TOKEN }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          DEFAULT_PROVIDER: ${{ matrix.model.provider }}
-          DEFAULT_MODEL: ${{ matrix.model.name }}
+          MCP_URL: ${{ vars.MCP_URL }}
         run: |
-          echo "Testing with ${{ matrix.model.provider }}:${{ matrix.model.name }}"
-          testmcpy run tests/ --verbose --model ${{ matrix.model.name }} --provider ${{ matrix.model.provider }}
+          uvx testmcpy run tests/ \
+            --mcp-url "$MCP_URL" \
+            --model claude-haiku-4-5 --provider anthropic \
+            --gate --min-pass-rate 85 \
+            --junit-xml junit.xml
+          # The markdown report is appended to the job summary automatically.
 
-      - name: Upload test results
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: test-results-${{ matrix.model.provider }}-${{ matrix.model.name }}
-          path: |
-            reports/
-            *.log
-          retention-days: 30
-
-      - name: Stop MCP service
-        if: always()
-        run: |
-          if [ -f mcp_service.pid ]; then
-            kill $(cat mcp_service.pid) || true
-          fi
-          # Or for Docker:
-          # docker-compose -f docker-compose.test.yml down
-
-      # Optional: Post results to PR comment
-      - name: Comment test results on PR
-        if: github.event_name == 'pull_request' && always()
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const fs = require('fs');
-            const reportPath = 'reports/latest.json';
-
-            if (fs.existsSync(reportPath)) {
-              const report = JSON.parse(fs.readFileSync(reportPath));
-              const passed = report.passed || 0;
-              const failed = report.failed || 0;
-              const total = passed + failed;
-
-              github.rest.issues.createComment({
-                issue_number: context.issue.number,
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                body: `## MCP Test Results (${{ matrix.model.provider }}:${{ matrix.model.name }})\n\n` +
-                      `✅ Passed: ${passed}/${total}\n` +
-                      `❌ Failed: ${failed}/${total}`
-              });
-            }
-
-  # Optional: Compare models and generate report
+  # Multi-model comparison matrix (results feed `testmcpy matrix` /
+  # the /performance page when runs share a results DB)
   compare-models:
-    needs: test-mcp-service
     runs-on: ubuntu-latest
-    if: always()
-
+    if: github.event_name == 'schedule'
+    strategy:
+      fail-fast: false
+      matrix:
+        model:
+          - { provider: anthropic, name: claude-haiku-4-5 }
+          - { provider: anthropic, name: claude-sonnet-4-5 }
+          - { provider: openai, name: gpt-4o }
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Download all test results
-        uses: actions/download-artifact@v4
+      - uses: preset-io/testmcpy@v1
         with:
-          path: all-results/
-
-      - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.11'
-
-      - name: Install testmcpy
-        run: pip install testmcpy[all]
-
-      - name: Generate comparison report
-        run: |
-          testmcpy report all-results/ > model-comparison.md
-
-      - name: Upload comparison report
-        uses: actions/upload-artifact@v4
-        with:
-          name: model-comparison-report
-          path: model-comparison.md
+          test_path: tests/
+          model: ${{ matrix.model.name }}
+          provider: ${{ matrix.model.provider }}
+          mcp_url: ${{ vars.MCP_URL }}
+          pass_threshold: '0'   # comparison run — collect data, never fail
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          openai_api_key: ${{ secrets.OPENAI_API_KEY }}
 
 # Required GitHub Secrets:
 # - ANTHROPIC_API_KEY: Your Anthropic API key
 # - OPENAI_API_KEY: Your OpenAI API key (if testing with GPT models)
-# - MCP_AUTH_TOKEN: Bearer token for your MCP service
-# - TEST_DATABASE_URL: Database connection string for tests (if needed)
+# Required GitHub Variables:
+# - MCP_URL: URL of the MCP service under test
+#
+# If your MCP service starts inside the workflow (same repo), add a step
+# that launches it before the action and pass mcp_url: http://localhost:PORT/mcp

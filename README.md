@@ -503,7 +503,17 @@ jobs:
 - **`--junit-xml`** emits JUnit XML for your CI's native test summary UI (GitHub, Jenkins, GitLab, CircleCI).
 - Inside GitHub Actions, the markdown eval report is **automatically appended to the job summary** — results render on the workflow run page with zero extra steps.
 
-A first-class reusable GitHub Action (`preset-io/testmcpy-action`) with PR comments and badge output is on the roadmap.
+Or use the bundled reusable Action — adds a sticky PR comment, JUnit artifact upload, and structured outputs (`pass-rate`, `gate_passed`):
+
+```yaml
+- uses: preset-io/testmcpy@v1
+  with:
+    test_path: tests/
+    mcp_url: ${{ vars.MCP_URL }}
+    pass_threshold: '85'
+    pr_comment: 'true'
+    anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+```
 
 ## Custom Evaluators
 

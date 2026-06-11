@@ -112,7 +112,7 @@ class LLMProvider(ABC):
         pass
 
 
-def _estimate_cost_from_registry(
+def _estimate_cost_with_fallback(
     model: str,
     prompt_tokens: int,
     completion_tokens: int,
@@ -123,6 +123,8 @@ def _estimate_cost_from_registry(
 
     Falls back to the caller-supplied per-1M rates when the model is not in
     the registry, so unknown/custom models keep their previous estimates.
+    Distinct from ``BaseSDKProvider._estimate_cost_from_registry``, which
+    returns 0.0 for unknown models and resolves ``self._registry_model_id``.
     """
     from .model_registry import get_model  # noqa: PLC0415
 
@@ -510,7 +512,7 @@ class OpenAIProvider(LLMProvider):
                 "total": usage.get("total_tokens", 0),
             }
 
-            cost = _estimate_cost_from_registry(
+            cost = _estimate_cost_with_fallback(
                 self.model,
                 token_usage["prompt"],
                 token_usage["completion"],
@@ -644,7 +646,7 @@ class OpenRouterProvider(OpenAIProvider):
                 cost = float(result["usage"]["cost"])
             else:
                 # Fallback estimate when OpenRouter omits usage cost
-                cost = _estimate_cost_from_registry(
+                cost = _estimate_cost_with_fallback(
                     self.model,
                     token_usage["prompt"],
                     token_usage["completion"],
@@ -1124,7 +1126,7 @@ class AnthropicProvider(LLMProvider):
                 "cache_read": usage.get("cache_read_input_tokens", 0),
             }
 
-            cost = _estimate_cost_from_registry(
+            cost = _estimate_cost_with_fallback(
                 self.model,
                 token_usage["prompt"],
                 token_usage["completion"],
@@ -1189,7 +1191,7 @@ def _normalize_bedrock_model_id(model: str) -> str:
 
     e.g. ``us.anthropic.claude-sonnet-4-20250514-v1:0`` → ``claude-sonnet-4-20250514``.
     """
-    normalized = re.sub(r"^(us|eu|apac)\.", "", model)
+    normalized = re.sub(r"^(us|eu|apac|global|jp)\.", "", model)
     normalized = re.sub(r"^anthropic\.", "", normalized)
     return re.sub(r"-v\d+(:\d+)?$", "", normalized)
 
@@ -1371,7 +1373,7 @@ class BedrockProvider(LLMProvider):
                 "total": usage.input_tokens + usage.output_tokens,
             }
 
-            cost = _estimate_cost_from_registry(
+            cost = _estimate_cost_with_fallback(
                 _normalize_bedrock_model_id(self.model),
                 token_usage["prompt"],
                 token_usage["completion"],
@@ -1661,7 +1663,9 @@ class BaseSDKProvider(LLMProvider, ABC):
         """Estimate USD cost from ``token_usage`` and ``model_registry``
         per-1M prices. Subclasses can store a friendly registry id
         (e.g. ``"codex-o3"``) in ``self._registry_model_id`` separate from
-        the vendor-facing ``self.model`` (``"o3"``); both are tried."""
+        the vendor-facing ``self.model`` (``"o3"``); both are tried.
+        Unknown models cost 0.0 here; the non-SDK providers use module-level
+        ``_estimate_cost_with_fallback`` to keep legacy estimates instead."""
         if not token_usage:
             return 0.0
         from .model_registry import get_model  # noqa: PLC0415
@@ -3387,7 +3391,7 @@ class GeminiProvider(LLMProvider):
                 "total": usage_metadata.get("totalTokenCount", 0),
             }
 
-            cost = _estimate_cost_from_registry(
+            cost = _estimate_cost_with_fallback(
                 self.model,
                 token_usage["prompt"],
                 token_usage["completion"],

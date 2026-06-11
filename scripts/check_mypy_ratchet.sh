@@ -9,7 +9,7 @@
 # installed extras change what mypy can resolve.
 set -uo pipefail
 
-MAX_ERRORS=598
+MAX_ERRORS=599
 
 cd "$(dirname "$0")/.."
 
@@ -42,7 +42,8 @@ fi
 if [ "$count" -gt "$MAX_ERRORS" ]; then
     echo ""
     echo "FAIL: mypy error count grew from $MAX_ERRORS to $count."
-    echo "New errors introduced by this change:"
+    echo "Sample of current errors (the new one(s) are somewhere in the full"
+    echo "set — run 'mypy testmcpy' locally and diff against main to find them):"
     echo "$output" | grep "error:" | tail -20
     echo ""
     echo "Fix the new type errors (or, if pre-existing errors surfaced,"

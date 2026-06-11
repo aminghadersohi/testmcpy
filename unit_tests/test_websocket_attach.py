@@ -68,6 +68,20 @@ async def _isolated_registry():
     await run_registry.reset_for_tests()
 
 
+@pytest.fixture(autouse=True)
+def isolated_storage(tmp_path, monkeypatch):
+    """Point get_storage() at a temp DB — attach falls back to the
+    results DB on a registry miss, and must never touch the developer's
+    real .testmcpy/storage.db."""
+    import testmcpy.storage as storage_module
+    from testmcpy.storage import TestStorage
+
+    storage = TestStorage(db_path=tmp_path / "ws_attach.db")
+    monkeypatch.setattr(storage_module, "_storage", storage)
+    yield storage
+    monkeypatch.setattr(storage_module, "_storage", None)
+
+
 async def _slow_run_command_factory(steps: int, step_delay: float = 0.05):
     """Build a fake run-command coroutine that streams N log lines and a
     terminal all_complete event, sleeping ``step_delay`` between each.
@@ -420,3 +434,189 @@ async def test_attach_unknown_run_id_returns_error_and_continues():
     await ws.disconnect()
     with contextlib.suppress(asyncio.TimeoutError):
         await asyncio.wait_for(dispatcher, timeout=1.0)
+
+
+# ---------------------------------------------------------------------------
+# Concurrency slots (TESTMCPY_MAX_CONCURRENT_RUNS)
+# ---------------------------------------------------------------------------
+
+
+def _gated_command(started_run_ids: list, release: asyncio.Event):
+    """A run command that records execution start order and parks until
+    ``release`` is set — lets tests hold a slot open deliberately."""
+
+    async def _command(handle, data, config) -> None:
+        started_run_ids.append(handle.run_id)
+        await release.wait()
+        ws_module._emit_event(handle, {"type": "all_complete", "summary": {}})
+
+    return _command
+
+
+async def _run_id_from(ws: _FakeWebSocket) -> str:
+    while True:
+        for m in ws.outbound:
+            if m.get("type") == "run_started":
+                return m["run_id"]
+        await asyncio.sleep(0.01)
+
+
+@pytest.mark.asyncio
+async def test_second_run_queues_until_slot_frees(monkeypatch):
+    """With one slot, a second run must sit at status=queued (visible to
+    /api/runs polling) and start only after the first finishes."""
+    monkeypatch.setenv("TESTMCPY_MAX_CONCURRENT_RUNS", "1")
+    started: list[str] = []
+    release = asyncio.Event()
+    monkeypatch.setattr(ws_module, "_run_test_command", _gated_command(started, release))
+
+    ws1, ws2 = _FakeWebSocket(), _FakeWebSocket()
+    d1 = asyncio.create_task(ws_module.handle_test_websocket(ws1))
+    d2 = asyncio.create_task(ws_module.handle_test_websocket(ws2))
+    await ws1.inbound.put({"type": "run_test", "test_path": "/a.yaml"})
+    rid1 = await asyncio.wait_for(_run_id_from(ws1), timeout=2.0)
+    await ws2.inbound.put({"type": "run_test", "test_path": "/b.yaml"})
+    rid2 = await asyncio.wait_for(_run_id_from(ws2), timeout=2.0)
+
+    # Let the second spawn reach the semaphore.
+    await asyncio.sleep(0.05)
+    h1 = await run_registry.get_run(rid1)
+    h2 = await run_registry.get_run(rid2)
+    assert h1.status == "running"
+    assert h2.status == "queued"
+    assert started == [rid1]
+    # Queued runs count as active for the background-runs indicator.
+    active_ids = {h.run_id for h in await run_registry.list_active()}
+    assert {rid1, rid2} <= active_ids
+
+    release.set()
+
+    # First finishes, slot frees, second starts and runs straight through.
+    async def _both_started():
+        while len(started) < 2:
+            await asyncio.sleep(0.01)
+
+    await asyncio.wait_for(_both_started(), timeout=2.0)
+    assert started == [rid1, rid2]
+
+    for ws, d in ((ws1, d1), (ws2, d2)):
+        await ws.disconnect()
+        with contextlib.suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(d, timeout=1.0)
+
+
+@pytest.mark.asyncio
+async def test_stop_while_queued_finalizes_as_stopped(monkeypatch):
+    """Cancelling a queued run interrupts the semaphore wait: it must
+    finalize as stopped and never execute."""
+    monkeypatch.setenv("TESTMCPY_MAX_CONCURRENT_RUNS", "1")
+    started: list[str] = []
+    release = asyncio.Event()
+    monkeypatch.setattr(ws_module, "_run_test_command", _gated_command(started, release))
+
+    ws1, ws2 = _FakeWebSocket(), _FakeWebSocket()
+    d1 = asyncio.create_task(ws_module.handle_test_websocket(ws1))
+    d2 = asyncio.create_task(ws_module.handle_test_websocket(ws2))
+    await ws1.inbound.put({"type": "run_test", "test_path": "/a.yaml"})
+    rid1 = await asyncio.wait_for(_run_id_from(ws1), timeout=2.0)
+    await ws2.inbound.put({"type": "run_test", "test_path": "/b.yaml"})
+    rid2 = await asyncio.wait_for(_run_id_from(ws2), timeout=2.0)
+    await asyncio.sleep(0.05)
+
+    h2 = await run_registry.get_run(rid2)
+    assert h2.status == "queued"
+    h2.task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await h2.task
+    assert h2.status == "stopped"
+    assert rid2 not in started
+
+    # The held slot was never disturbed; releasing finishes run 1 normally.
+    release.set()
+    h1 = await run_registry.get_run(rid1)
+    await asyncio.wait_for(asyncio.shield(h1.task), timeout=2.0)
+    assert h1.status == "completed"
+
+    for ws, d in ((ws1, d1), (ws2, d2)):
+        await ws.disconnect()
+        with contextlib.suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(d, timeout=1.0)
+
+
+# ---------------------------------------------------------------------------
+# Attach fallback to DB history (registry miss)
+# ---------------------------------------------------------------------------
+
+
+def _seed_db_run(storage, run_id, status="completed", n_results=2):
+    from datetime import datetime, timezone
+
+    storage.save_suite(suite_id="suite.yaml", name="suite.yaml", questions=[])
+    storage.save_run(
+        run_id=run_id,
+        test_id="suite.yaml",
+        test_version=1,
+        model="m1",
+        provider="p1",
+        started_at=datetime.now(timezone.utc).isoformat(),
+    )
+    for i in range(n_results):
+        storage.save_question_result(
+            run_id=run_id, question_id=f"t{i}", passed=i % 2 == 0, score=1.0, cost_usd=0.01
+        )
+    if status != "running":
+        storage.finish_run(run_id, status=status)
+
+
+async def _drive_attach(run_id: str) -> list[dict]:
+    ws = _FakeWebSocket()
+    dispatcher = asyncio.create_task(ws_module.handle_test_websocket(ws))
+    await ws.inbound.put({"type": "attach", "run_id": run_id})
+
+    async def _wait_terminal():
+        while True:
+            if any(m.get("type") in ("all_complete", "error") for m in ws.outbound):
+                return
+            await asyncio.sleep(0.01)
+
+    await asyncio.wait_for(_wait_terminal(), timeout=2.0)
+    await ws.disconnect()
+    with contextlib.suppress(asyncio.TimeoutError):
+        await asyncio.wait_for(dispatcher, timeout=1.0)
+    return ws.outbound
+
+
+@pytest.mark.asyncio
+async def test_attach_after_registry_gc_replays_from_db(isolated_storage):
+    """Attaching to a run that was GC'd from the registry (e.g. a tab
+    reopened after CLEANUP_TTL) replays the finished record from the DB
+    instead of erroring."""
+    _seed_db_run(isolated_storage, "gone_but_saved", status="completed")
+    outbound = await _drive_attach("gone_but_saved")
+
+    started = next(m for m in outbound if m.get("type") == "run_started")
+    assert started["reattached"] is True
+    assert started["source"] == "history"
+    assert started["status"] == "completed"
+
+    completes = [m for m in outbound if m.get("type") == "test_complete"]
+    assert [m["test_name"] for m in completes] == ["t0", "t1"]
+
+    terminal = next(m for m in outbound if m.get("type") == "all_complete")
+    assert terminal["status"] == "completed"
+    assert terminal["summary"]["total"] == 2
+    assert terminal["summary"]["passed"] == 1
+
+
+@pytest.mark.asyncio
+async def test_attach_to_crashed_run_reports_interrupted_with_partial_results(isolated_storage):
+    """A DB row stuck at status=running with no registry handle means the
+    server died mid-run. The client must get the partial results and an
+    interrupted terminal status — not a spinner that never resolves."""
+    _seed_db_run(isolated_storage, "crashed_mid_run", status="running", n_results=1)
+    outbound = await _drive_attach("crashed_mid_run")
+
+    terminal = next(m for m in outbound if m.get("type") == "all_complete")
+    assert terminal["status"] == "interrupted"
+    assert len(terminal["results"]) == 1
+    assert not any(m.get("type") == "error" for m in outbound)

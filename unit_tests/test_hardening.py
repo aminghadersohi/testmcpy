@@ -45,7 +45,7 @@ class TestStaleRunReconciliation:
         )
         storage.complete_run("done", old)
 
-        updated = storage.mark_stale_runs_interrupted(older_than_hours=1.0)
+        updated = storage.mark_stale_runs_interrupted(no_heartbeat_older_than_hours=1.0)
         assert updated == 1
 
         with storage.session() as session:

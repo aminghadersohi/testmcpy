@@ -139,6 +139,12 @@ class TestRunModel(Base):
     total_tokens: Mapped[int] = mapped_column(Integer, default=0)
     started_at: Mapped[str] = mapped_column(String, nullable=False)
     completed_at: Mapped[str | None] = mapped_column(String, nullable=True)
+    # Touched every ~30s while the run executes (UTC ISO, same format as
+    # the reconciliation cutoff it's compared against). Lets crash
+    # reconciliation distinguish a live run — possibly owned by another
+    # server sharing this DB — from a dead one, instead of guessing from
+    # started_at age.
+    heartbeat_at: Mapped[str | None] = mapped_column(String, nullable=True)
     metadata_: Mapped[dict | None] = mapped_column("metadata", JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, default=lambda: datetime.now(timezone.utc)

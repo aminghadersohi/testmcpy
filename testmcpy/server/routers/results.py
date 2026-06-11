@@ -11,6 +11,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from testmcpy.server.run_persistence import question_result_kwargs
 from testmcpy.storage import get_storage
 
 router = APIRouter(prefix="/api/results", tags=["results"])
@@ -98,21 +99,7 @@ def save_test_run_to_file(data: dict[str, Any]) -> dict[str, Any]:
 
     # Save individual question results
     for r in results:
-        storage.save_question_result(
-            run_id=run_id,
-            question_id=r.get("test_name", r.get("question_id", "unknown")),
-            passed=r.get("passed", False),
-            score=r.get("score", 0.0),
-            answer=r.get("response", r.get("answer")),
-            tool_uses=r.get("tool_calls", r.get("tool_uses")),
-            tool_results=r.get("tool_results"),
-            tokens_input=(r.get("token_usage") or {}).get("input", 0),
-            tokens_output=(r.get("token_usage") or {}).get("output", 0),
-            duration_ms=int(r.get("duration", 0) * 1000),
-            evaluations=r.get("evaluations"),
-            error=r.get("error"),
-            cost_usd=r.get("cost", r.get("cost_usd", 0.0)),
-        )
+        storage.save_question_result(run_id=run_id, **question_result_kwargs(r))
 
     # Complete the run
     storage.complete_run(run_id, datetime.now().isoformat())

@@ -23,6 +23,19 @@ async def _isolated_registry():
     await run_registry.reset_for_tests()
 
 
+@pytest.fixture(autouse=True)
+def isolated_storage(tmp_path, monkeypatch):
+    """Point get_storage() at a temp DB — the GET /api/runs/{id} history
+    fallback must never read the developer's real .testmcpy/storage.db."""
+    import testmcpy.storage as storage_module
+    from testmcpy.storage import TestStorage
+
+    storage = TestStorage(db_path=tmp_path / "runs_router.db")
+    monkeypatch.setattr(storage_module, "_storage", storage)
+    yield storage
+    monkeypatch.setattr(storage_module, "_storage", None)
+
+
 @pytest_asyncio.fixture
 async def client():
     """Async HTTP client driving the FastAPI app via ASGITransport.
@@ -95,7 +108,8 @@ async def test_get_run_serialises_handle_with_meta(client):
     body = r.json()
     assert body["run_id"] == handle.run_id
     assert body["kind"] == "directory"
-    assert body["status"] == "running"
+    # Created directly on the registry (no slot acquired) — still queued.
+    assert body["status"] == "queued"
     assert body["meta"]["folder"] == "chatbot"
     assert [f["name"] for f in body["meta"]["files"]] == ["C01.yaml", "C02.yaml"]
     assert body["meta"]["model"] == "claude"
@@ -157,3 +171,53 @@ async def test_stop_run_on_finished_handle_is_noop(client):
 async def test_stop_run_404_for_unknown_id(client):
     r = await client.post("/api/runs/nope/stop")
     assert r.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# History fallback (registry miss -> results DB)
+# ---------------------------------------------------------------------------
+
+
+def _seed_db_run(storage, run_id, status="completed"):
+    from datetime import datetime, timezone
+
+    storage.save_suite(suite_id="suite.yaml", name="suite.yaml", questions=[])
+    storage.save_run(
+        run_id=run_id,
+        test_id="suite.yaml",
+        test_version=1,
+        model="m1",
+        provider="p1",
+        started_at=datetime.now(timezone.utc).isoformat(),
+    )
+    storage.save_question_result(
+        run_id=run_id, question_id="t1", passed=True, score=1.0, cost_usd=0.02
+    )
+    if status != "running":
+        storage.finish_run(run_id, status=status)
+
+
+@pytest.mark.asyncio
+async def test_get_run_falls_back_to_db_history(client, isolated_storage):
+    """A run GC'd from the registry (or lost to a restart) must resolve
+    from the results DB instead of 404ing on a stale tab."""
+    _seed_db_run(isolated_storage, "hist_1", status="completed")
+    r = await client.get("/api/runs/hist_1")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["source"] == "history"
+    assert body["status"] == "completed"
+    assert body["result_count"] == 1
+    assert body["meta"]["test_path"] == "suite.yaml"
+    assert body["summary"]["passed"] == 1
+
+
+@pytest.mark.asyncio
+async def test_get_run_history_reports_dead_running_row_as_interrupted(client, isolated_storage):
+    """status=running in the DB with no registry handle means the server
+    died mid-run — the wire status must be interrupted, not a zombie
+    'running' that spins forever in the UI."""
+    _seed_db_run(isolated_storage, "hist_2", status="running")
+    r = await client.get("/api/runs/hist_2")
+    assert r.status_code == 200
+    assert r.json()["status"] == "interrupted"

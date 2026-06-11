@@ -12,6 +12,7 @@ warnings.filterwarnings("ignore", category=DeprecationWarning, module="websocket
 warnings.filterwarnings("ignore", category=DeprecationWarning, module="websockets.legacy")
 warnings.filterwarnings("ignore", category=DeprecationWarning, module="uvicorn")
 
+import contextlib  # noqa: E402
 from contextlib import asynccontextmanager  # noqa: E402
 from datetime import datetime  # noqa: E402
 from enum import Enum  # noqa: E402
@@ -395,6 +396,30 @@ async def lifespan(app: FastAPI):
     except SQLAlchemyError as e:
         print(f"Warning: could not reconcile stale runs: {e}")
 
+    # …and keep reconciling while we run, so a crashed sibling server (or
+    # a row orphaned by an event-loop death that didn't restart the
+    # process) flips to 'interrupted' within minutes rather than at the
+    # next restart. Heartbeat-only (no started_at fallback): legacy rows
+    # without heartbeats carry local-naive timestamps that can't be
+    # compared reliably against a UTC cutoff.
+    async def _stale_run_sweeper() -> None:
+        from testmcpy.storage import get_storage
+
+        while True:
+            await _asyncio.sleep(60)
+            try:
+                get_storage().mark_stale_runs_interrupted(no_heartbeat_older_than_hours=None)
+            except _asyncio.CancelledError:
+                raise
+            except Exception as sweep_err:  # noqa: BLE001 — long-lived loop:
+                # any escaping error (not just SQLAlchemyError — e.g. an
+                # OSError on first-time DB-path init) would otherwise kill
+                # the sweeper permanently and silently, reverting crash
+                # reconciliation to startup-only. (PR #90 review)
+                print(f"Warning: stale-run sweep failed: {sweep_err}")
+
+    sweeper_task = _asyncio.create_task(_stale_run_sweeper())
+
     # Startup
     try:
         mcp_url = config.get_mcp_url()
@@ -410,6 +435,10 @@ async def lifespan(app: FastAPI):
     yield
 
     # Shutdown
+    sweeper_task.cancel()
+    with contextlib.suppress(_asyncio.CancelledError):
+        await sweeper_task
+
     if mcp_client:
         await mcp_client.close()
 

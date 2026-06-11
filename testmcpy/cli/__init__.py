@@ -7,6 +7,7 @@ from testmcpy.cli.commands import (
     agent,  # noqa: F401
     analytics,  # noqa: F401
     baseline,  # noqa: F401
+    bench,  # noqa: F401
     export_db,  # noqa: F401
     mcp,  # noqa: F401
     metamorphic,  # noqa: F401

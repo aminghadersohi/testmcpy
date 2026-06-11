@@ -314,6 +314,12 @@ def run(
         "--junit-xml",
         help="Write a JUnit XML report to this path (for CI test summaries)",
     ),
+    session_id_opt: Optional[str] = typer.Option(
+        None,
+        "--session-id",
+        hidden=True,
+        help="Group this run under an existing session (used by `testmcpy bench`)",
+    ),
     gate: bool = typer.Option(
         False,
         "--gate",
@@ -347,8 +353,9 @@ def run(
         console.print(f"[red]Error: gate config does not exist: {gate_config}[/red]")
         raise typer.Exit(1)
 
-    # Generate session ID to group multiple runs from the same CLI invocation
-    session_id = str(uuid.uuid4())
+    # Group multiple runs from the same CLI invocation (or a parent
+    # `testmcpy bench` invocation, which passes --session-id)
+    session_id = session_id_opt or str(uuid.uuid4())
 
     # Build inline auth dict if --auth-type is provided
     inline_auth = None

@@ -1876,7 +1876,7 @@ function Reports() {
           {/* Details Panel */}
           <div className={`flex-1 overflow-auto bg-background ${selectedRun ? 'block' : 'hidden md:block'}`}>
             {selectedRun && (
-              <button onClick={() => { setSelectedRun(null); setRunDetails(null) }} className="md:hidden flex items-center gap-2 px-4 py-3 text-sm text-text-secondary hover:text-text-primary border-b border-border w-full">
+              <button onClick={() => { setSelectedRun(null); setRunDetails(null); setSearchParams({}, { replace: true }) }} className="md:hidden flex items-center gap-2 px-4 py-3 text-sm text-text-secondary hover:text-text-primary border-b border-border w-full">
                 <ChevronRight size={16} className="rotate-180" />
                 <span>Back to list</span>
               </button>

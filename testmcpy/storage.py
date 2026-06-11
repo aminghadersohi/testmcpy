@@ -850,6 +850,8 @@ class TestStorage:
                 "environment_id": run.environment_id,
                 "model": run.model,
                 "provider": run.provider,
+                "mcp_profile_id": run.mcp_profile_id,
+                "llm_profile_id": run.llm_profile_id,
                 "runner_tool": run.runner_tool,
                 "mcp_setup_version": run.mcp_setup_version,
                 "started_at": run.started_at,
@@ -874,6 +876,7 @@ class TestStorage:
         test_id: str | None = None,
         model: str | None = None,
         provider: str | None = None,
+        mcp_profile: str | None = None,
         date_from: str | None = None,
         date_to: str | None = None,
         sort_by: str = "started_at",
@@ -889,6 +892,8 @@ class TestStorage:
                 TestRunModel.environment_id,
                 TestRunModel.model,
                 TestRunModel.provider,
+                TestRunModel.mcp_profile_id,
+                TestRunModel.llm_profile_id,
                 TestRunModel.runner_tool,
                 TestRunModel.started_at,
                 TestRunModel.completed_at,
@@ -914,6 +919,8 @@ class TestStorage:
                 query = query.filter(TestRunModel.model == model)
             if provider:
                 query = query.filter(TestRunModel.provider == provider)
+            if mcp_profile:
+                query = query.filter(TestRunModel.mcp_profile_id == mcp_profile)
             if date_from:
                 query = query.filter(TestRunModel.started_at >= date_from)
             if date_to:
@@ -942,6 +949,8 @@ class TestStorage:
                     "environment_id": row.environment_id,
                     "model": row.model,
                     "provider": row.provider,
+                    "mcp_profile_id": row.mcp_profile_id,
+                    "llm_profile_id": row.llm_profile_id,
                     "runner_tool": row.runner_tool,
                     "started_at": row.started_at,
                     "completed_at": row.completed_at,
@@ -984,10 +993,18 @@ class TestStorage:
                 .order_by(TestRunModel.suite_id)
                 if r[0]
             ]
+            mcp_profiles = [
+                r[0]
+                for r in session.query(TestRunModel.mcp_profile_id)
+                .distinct()
+                .order_by(TestRunModel.mcp_profile_id)
+                if r[0]
+            ]
             return {
                 "models": models,
                 "providers": providers,
                 "test_files": test_files,
+                "mcp_profiles": mcp_profiles,
             }
 
     # ==================== Smoke Reports ====================

@@ -173,6 +173,10 @@ class TestStorage:
     def _session(self) -> Session:
         return self._SessionLocal()
 
+    def session(self) -> Session:
+        """Public session factory — used by testmcpy.analytics queries."""
+        return self._SessionLocal()
+
     def _hash_content(self, content: str) -> str:
         return hashlib.sha256(content.encode()).hexdigest()[:16]
 

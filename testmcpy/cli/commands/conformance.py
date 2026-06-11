@@ -96,10 +96,12 @@ def conformance(
     if suite:
         cmd += ["--suite", suite]
 
-    console.print(
-        f"[bold]MCP Conformance[/bold] — suite v{suite_version} against {mcp_url}\n"
-        f"[dim]{' '.join(cmd)}[/dim]\n"
-    )
+    if output_format != "json":
+        # Keep stdout pure JSON in --format json so CI can pipe it
+        console.print(
+            f"[bold]MCP Conformance[/bold] — suite v{suite_version} against {mcp_url}\n"
+            f"[dim]{' '.join(cmd)}[/dim]\n"
+        )
 
     # The suite writes results/<scenario>-<timestamp>/checks.json relative
     # to cwd — run in a tempdir so we never litter the user's project.
@@ -139,7 +141,8 @@ def conformance(
     if output:
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(json.dumps({"url": mcp_url, "checks": checks}, indent=2))
-        console.print(f"[dim]Raw checks written to {output}[/dim]")
+        if output_format != "json":
+            console.print(f"[dim]Raw checks written to {output}[/dim]")
 
     if output_format == "json":
         console.print_json(

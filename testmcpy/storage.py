@@ -109,18 +109,26 @@ class TestStorage:
     """SQLAlchemy-based storage for test versioning, results, and metrics."""
 
     def __init__(self, db_path: str | Path | None = None):
-        if db_path is None:
-            db_path = os.environ.get("TESTMCPY_DB_PATH")
-        if db_path is None:
-            db_dir = Path.cwd() / ".testmcpy"
-            db_dir.mkdir(exist_ok=True)
-            db_path = db_dir / "storage.db"
+        # Full SQLAlchemy URL (e.g. postgresql+psycopg://...) wins when no
+        # explicit file path is given; SQLite file path otherwise.
+        db_url = os.environ.get("TESTMCPY_DB_URL") if db_path is None else None
+        if db_url:
+            self.db_path = None
+            url = db_url
+        else:
+            if db_path is None:
+                db_path = os.environ.get("TESTMCPY_DB_PATH")
+            if db_path is None:
+                db_dir = Path.cwd() / ".testmcpy"
+                db_dir.mkdir(exist_ok=True)
+                db_path = db_dir / "storage.db"
+            self.db_path = Path(db_path)
+            url = f"sqlite:///{self.db_path}"
 
-        self.db_path = Path(db_path)
-        url = f"sqlite:///{self.db_path}"
+        connect_args = {"check_same_thread": False} if url.startswith("sqlite") else {}
         self._engine = create_engine(
             url,
-            connect_args={"check_same_thread": False},
+            connect_args=connect_args,
             echo=False,
         )
         self._SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=self._engine)
@@ -158,17 +166,39 @@ class TestStorage:
                 "question_id, run_id",
             ),
         ]
+        is_sqlite = self._engine.dialect.name == "sqlite"
         with self._engine.connect() as conn:
-            for table, column, col_type in migrations:
-                result = conn.execute(text(f"PRAGMA table_info({table})"))
-                existing = {row[1] for row in result}
-                if column not in existing:
-                    conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}"))
+            if is_sqlite:
+                # PRAGMA is SQLite-only; non-SQLite backends are expected
+                # to be managed with `alembic upgrade head`.
+                for table, column, col_type in migrations:
+                    result = conn.execute(text(f"PRAGMA table_info({table})"))
+                    existing = {row[1] for row in result}
+                    if column not in existing:
+                        conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}"))
             for index_name, table, columns in index_migrations:
                 conn.execute(
                     text(f"CREATE INDEX IF NOT EXISTS {index_name} ON {table} ({columns})")
                 )
             conn.commit()
+
+    def mark_stale_runs_interrupted(self, older_than_hours: float = 1.0) -> int:
+        """Mark long-stuck 'running' rows as interrupted (server startup).
+
+        The in-memory run registry dies with the process; without this,
+        crashed runs stay 'running' forever and pollute every listing.
+        Returns the number of rows updated.
+        """
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=older_than_hours)).isoformat()
+        with self._session() as session:
+            updated = (
+                session.query(TestRunModel)
+                .filter(TestRunModel.status == "running")
+                .filter(TestRunModel.started_at < cutoff)
+                .update({TestRunModel.status: "interrupted"}, synchronize_session=False)
+            )
+            session.commit()
+            return updated
 
     def _session(self) -> Session:
         return self._SessionLocal()

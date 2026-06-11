@@ -34,15 +34,28 @@ def get_db_path(db_path: str | Path | None = None) -> Path:
     return path
 
 
+def get_db_url(db_path: str | Path | None = None) -> str:
+    """Resolve the SQLAlchemy database URL.
+
+    TESTMCPY_DB_URL (a full SQLAlchemy URL, e.g.
+    postgresql+psycopg://user:pass@host/db) takes precedence; otherwise
+    a sqlite URL is built from the file-path resolution in get_db_path.
+    """
+    url = os.environ.get("TESTMCPY_DB_URL")
+    if url and db_path is None:
+        return url
+    return f"sqlite:///{get_db_path(db_path)}"
+
+
 def get_engine(db_path: str | Path | None = None):
     """Get or create the SQLAlchemy engine."""
     global _engine
     if _engine is None:
-        path = get_db_path(db_path)
-        url = f"sqlite:///{path}"
+        url = get_db_url(db_path)
+        connect_args = {"check_same_thread": False} if url.startswith("sqlite") else {}
         _engine = create_engine(
             url,
-            connect_args={"check_same_thread": False},
+            connect_args=connect_args,
             echo=False,
         )
     return _engine

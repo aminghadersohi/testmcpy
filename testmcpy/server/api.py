@@ -22,6 +22,7 @@ from fastapi import FastAPI, HTTPException, Query, WebSocket  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 from fastapi.responses import FileResponse, StreamingResponse  # noqa: E402
 from pydantic import BaseModel, Field  # noqa: E402
+from sqlalchemy.exc import SQLAlchemyError  # noqa: E402
 
 from testmcpy.config import get_config  # noqa: E402
 from testmcpy.mcp_profiles import load_profile  # noqa: E402
@@ -381,6 +382,18 @@ async def lifespan(app: FastAPI):
     import asyncio as _asyncio
 
     _asyncio.get_event_loop().set_exception_handler(_mcp_exception_handler)
+
+    # Reconcile runs orphaned by a previous crash/restart — the in-memory
+    # run registry dies with the process, so stuck 'running' rows would
+    # otherwise pollute listings forever.
+    try:
+        from testmcpy.storage import get_storage
+
+        interrupted = get_storage().mark_stale_runs_interrupted()
+        if interrupted:
+            print(f"Marked {interrupted} stale running run(s) as interrupted")
+    except SQLAlchemyError as e:
+        print(f"Warning: could not reconcile stale runs: {e}")
 
     # Startup
     try:

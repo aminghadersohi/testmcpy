@@ -198,6 +198,11 @@ export = [
 bedrock = [
     "boto3>=1.28.0",
 ]
+postgres = [
+    # Enables TESTMCPY_DB_URL=postgresql+psycopg://... for a shared
+    # results database. SQLite stays the default.
+    "psycopg[binary]>=3.1,<4.0",
+]
 all = [
     "fastapi>=0.104.0,<1.0.0",
     "uvicorn[standard]>=0.24.0,<1.0.0",

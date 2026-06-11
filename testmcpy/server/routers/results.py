@@ -364,57 +364,6 @@ async def get_test_history(test_file: str, limit: int = 20) -> dict[str, Any]:
     return {"test_file": test_file, "history": history, "total": len(history)}
 
 
-@router.get("/compare")
-async def compare_runs(run_ids: str) -> dict[str, Any]:
-    """
-    Compare multiple test runs side by side.
-    run_ids: comma-separated list of run IDs
-    """
-    ids = [r.strip() for r in run_ids.split(",") if r.strip()]
-
-    if len(ids) < 2:
-        raise HTTPException(status_code=400, detail="At least 2 run IDs required for comparison")
-
-    storage = get_storage()
-    runs = []
-    for run_id in ids:
-        run = storage.get_run(run_id)
-        if run:
-            runs.append(run)
-
-    if len(runs) < 2:
-        raise HTTPException(status_code=404, detail="Not enough valid runs found for comparison")
-
-    comparison: dict[str, Any] = {"runs": [], "tests": {}}
-
-    for run in runs:
-        total = run["summary"]["total"]
-        passed = run["summary"]["passed"]
-        comparison["runs"].append(
-            {
-                "run_id": run["run_id"],
-                "timestamp": run["started_at"],
-                "provider": run["provider"],
-                "model": run["model"],
-                "pass_rate": (passed / total) if total > 0 else 0,
-            }
-        )
-
-        for qr in run["question_results"]:
-            test_name = qr["question_id"]
-            if test_name not in comparison["tests"]:
-                comparison["tests"][test_name] = {}
-
-            comparison["tests"][test_name][run["run_id"]] = {
-                "passed": qr["passed"],
-                "score": qr["score"],
-                "duration": qr["duration_ms"] / 1000.0,
-                "cost": 0.0,
-            }
-
-    return comparison
-
-
 @router.delete("/run/{run_id}")
 async def delete_test_run(run_id: str) -> dict[str, Any]:
     """Delete a test run result."""

@@ -14,11 +14,9 @@ import {
   Shield,
   History,
   BarChart3,
-  Grid3X3,
   Sun,
   Moon,
   Monitor,
-  Heart,
   TrendingUp,
 } from 'lucide-react'
 
@@ -31,9 +29,8 @@ import LLMProfiles from './pages/LLMProfiles'
 import AuthDebugger from './pages/AuthDebugger'
 import GenerationHistory from './pages/GenerationHistory'
 import Reports from './pages/Reports'
-import CompatibilityMatrix from './pages/CompatibilityMatrix'
 import Performance from './pages/Performance'
-import MCPHealth from './pages/MCPHealth'
+import Servers from './pages/Servers'
 import SecurityDashboard from './pages/SecurityDashboard'
 import { TestRunProvider } from './contexts/TestRunContext'
 import { ThemeProvider, useTheme } from './contexts/ThemeContext'
@@ -343,15 +340,15 @@ function AppContent() {
   const navItems = [
     { path: '/', label: 'Explorer', icon: Package },
     { path: '/tests', label: 'Tests', icon: FileText },
-    { path: '/reports', label: 'Reports', icon: BarChart3 },
-    { path: '/performance', label: 'Performance', icon: TrendingUp },
-    { path: '/compatibility', label: 'Compat', icon: Grid3X3 },
-    { path: '/generation-history', label: 'Gen History', icon: History },
     { path: '/chat', label: 'Interact', icon: MessageSquare },
     { section: 'Analytics' },
-    { path: '/mcp-health', label: 'MCP Health', icon: Heart },
-    { path: '/security', label: 'Security', icon: Shield },
+    { path: '/reports', label: 'Reports', icon: BarChart3 },
+    { path: '/performance', label: 'Performance', icon: TrendingUp },
+    { path: '/generation-history', label: 'Gen History', icon: History },
+    { section: 'Infrastructure' },
+    { path: '/servers', label: 'Servers', icon: Server },
     { section: 'Settings' },
+    { path: '/security', label: 'Security', icon: Shield },
     { path: '/auth-debugger', label: 'Auth Debug', icon: Shield },
     { path: '/config', label: 'Config', icon: Settings },
   ]
@@ -609,12 +606,13 @@ function AppContent() {
               <Route path="/chat" element={<ChatInterface selectedProfiles={selectedProfiles} selectedLlmProfile={selectedLlmProfile} llmProfiles={llmProfiles} />} />
               <Route path="/tests" element={<TestManager selectedProfiles={selectedProfiles} selectedLlmProfile={selectedLlmProfile} llmProfiles={llmProfiles} />} />
               <Route path="/reports" element={<Reports />} />
-              <Route path="/compatibility" element={<CompatibilityMatrix />} />
               <Route path="/generation-history" element={<GenerationHistory />} />
               <Route path="/performance" element={<Performance />} />
               <Route path="/metrics" element={<Navigate to="/performance" replace />} />
               <Route path="/compare" element={<Navigate to="/performance" replace />} />
-              <Route path="/mcp-health" element={<MCPHealth />} />
+              <Route path="/servers" element={<Servers />} />
+              <Route path="/mcp-health" element={<Navigate to="/servers" replace />} />
+              <Route path="/compatibility" element={<Navigate to="/servers" replace />} />
               <Route path="/security" element={<SecurityDashboard />} />
               <Route path="/auth-debugger" element={<AuthDebugger />} />
               <Route path="/config" element={<Configuration />} />

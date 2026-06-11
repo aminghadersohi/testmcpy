@@ -271,6 +271,13 @@ profiles:
 
 The setup command is **idempotent** — safe to run multiple times. Use `--force` to overwrite existing files.
 
+**`TESTMCPY_CHAT_OAUTH_LOGIN`** (default `true`): when a chat message hits an
+OAuth (`oauth_auto_discover`) MCP profile with no cached token, the server opens
+the interactive browser OAuth flow and retries. This assumes a browser is
+available on the machine running the server — in headless deployments set
+`TESTMCPY_CHAT_OAUTH_LOGIN=false` so the request fails fast with a clear error
+instead of blocking on a login that can never complete.
+
 ### 2. Explore Your MCP Service
 
 ```bash

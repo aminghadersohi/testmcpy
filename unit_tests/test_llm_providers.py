@@ -69,6 +69,29 @@ class TestProviderFactory:
         assert type(p1).__name__ == "ClaudeSDKProvider"
         assert type(p2).__name__ == "ClaudeSDKProvider"
 
+    def test_claude_sdk_receives_mcp_url_and_auth(self):
+        auth = {"type": "bearer", "token": "t"}
+        provider = create_llm_provider(
+            "claude-sdk", "claude-sonnet-4-6", mcp_url="http://u/mcp", auth=auth
+        )
+        assert provider.mcp_url == "http://u/mcp"
+        assert provider.auth_config == auth
+
+    def test_anthropic_receives_mcp_url_and_auth(self):
+        auth = {"type": "bearer", "token": "t"}
+        provider = create_llm_provider(
+            "anthropic", "claude-haiku-4-5", api_key="test", mcp_url="http://u/mcp", auth=auth
+        )
+        assert provider.tool_discovery.mcp_url == "http://u/mcp"
+
+    def test_unsupported_mcp_kwargs_filtered(self):
+        # Providers that don't accept mcp_url/auth must not blow up — the
+        # factory filters kwargs by each provider's __init__ signature.
+        provider = create_llm_provider(
+            "openai", "gpt-4o", api_key="test", mcp_url="http://u/mcp", auth={"type": "none"}
+        )
+        assert isinstance(provider, OpenAIProvider)
+
 
 # ---------------------------------------------------------------------------
 # ClaudeSDKProvider OAuth Tests

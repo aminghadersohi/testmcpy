@@ -309,6 +309,24 @@ def run(
             "process. (SC-106138)"
         ),
     ),
+    gate: bool = typer.Option(
+        False,
+        "--gate",
+        help=(
+            "Enforce CI gate thresholds from .testmcpy-gate.yaml (or "
+            "--gate-config) and exit non-zero if the run fails the gate"
+        ),
+    ),
+    gate_config: Optional[Path] = typer.Option(
+        None,
+        "--gate-config",
+        help="Path to a CI gate config YAML (implies --gate)",
+    ),
+    min_pass_rate: Optional[float] = typer.Option(
+        None,
+        "--min-pass-rate",
+        help="Minimum pass rate percentage required, e.g. 85 (implies --gate)",
+    ),
 ):
     """
     Run test cases against MCP service.
@@ -317,6 +335,11 @@ def run(
     """
     if not test_path.exists():
         console.print(f"[red]Error: test path does not exist: {test_path}[/red]")
+        raise typer.Exit(1)
+
+    gate_enabled = gate or gate_config is not None or min_pass_rate is not None
+    if gate_config is not None and not gate_config.exists():
+        console.print(f"[red]Error: gate config does not exist: {gate_config}[/red]")
         raise typer.Exit(1)
 
     # Generate session ID to group multiple runs from the same CLI invocation
@@ -855,7 +878,34 @@ def run(
             saved_path = gen.save(str(report))
             console.print(f"\n[green]Eval report saved to {saved_path}[/green]")
 
-    asyncio.run(run_tests())
+        # CI gate: evaluated last so results are already saved for the UI
+        # even when the gate fails the build.
+        if gate_enabled:
+            from testmcpy.src.ci_gate import load_gate_config
+
+            gate_cfg = (
+                load_gate_config(str(gate_config))
+                if gate_config is not None
+                else load_gate_config()
+            )
+            if min_pass_rate is not None:
+                gate_cfg.min_pass_rate = min_pass_rate
+            verdict = gate_cfg.evaluate([r.to_dict() for r in results])
+
+            status = "[green]PASSED[/green]" if verdict["passed"] else "[red]FAILED[/red]"
+            console.print(
+                f"\n[bold]CI Gate:[/bold] {status} "
+                f"(pass rate {verdict['pass_rate']:.1f}%, "
+                f"minimum {gate_cfg.min_pass_rate:.1f}%)"
+            )
+            for failure in verdict["failures"]:
+                console.print(f"  [red]✗ {escape(failure)}[/red]")
+            return not verdict["passed"]
+        return False
+
+    gate_failed = asyncio.run(run_tests())
+    if gate_failed:
+        raise typer.Exit(1)
 
 
 @app.command()

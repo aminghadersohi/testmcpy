@@ -107,6 +107,20 @@ def test_missing_gate_config_errors(runner, cli_app, suite_file, stub_execution,
     assert "gate config does not exist" in result.stdout
 
 
+def test_github_step_summary_appended(
+    runner, cli_app, suite_file, stub_execution, tmp_path, monkeypatch
+):
+    stub_execution(passed=True)
+    summary_path = tmp_path / "step_summary.md"
+    summary_path.write_text("existing content\n")
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary_path))
+    result = runner.invoke(cli_app, ["run", str(suite_file)])
+    assert result.exit_code == 0
+    content = summary_path.read_text()
+    assert content.startswith("existing content\n")  # appended, not overwritten
+    assert "t1" in content
+
+
 def test_junit_xml_written(runner, cli_app, suite_file, stub_execution, tmp_path):
     import xml.etree.ElementTree as ET
 

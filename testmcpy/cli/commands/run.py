@@ -897,6 +897,27 @@ def run(
             junit_xml.write_text(to_junit_xml([r.to_dict() for r in results], suite_name))
             console.print(f"[green]JUnit report saved to {junit_xml}[/green]")
 
+        # Inside GitHub Actions, append the markdown report to the job
+        # summary so results show on the workflow run page without any
+        # extra workflow steps.
+        import os
+
+        step_summary = os.environ.get("GITHUB_STEP_SUMMARY")
+        if step_summary:
+            try:
+                from testmcpy.src.report_generator import ReportGenerator
+
+                gen = ReportGenerator.from_test_results(
+                    suite_name=suite_name,
+                    results=results,
+                    title=report_title or suite_name,
+                )
+                with open(step_summary, "a") as f:
+                    f.write(gen.generate_markdown() + "\n")
+                console.print("[dim]Report appended to GitHub step summary[/dim]")
+            except OSError as e:
+                console.print(f"[dim]Note: Could not write step summary: {e}[/dim]")
+
         # CI gate: evaluated last so results are already saved for the UI
         # even when the gate fails the build.
         if gate_enabled:

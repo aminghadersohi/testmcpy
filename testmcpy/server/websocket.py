@@ -965,14 +965,37 @@ async def handle_test_websocket(websocket: WebSocket):
         await run_registry.detach(handle, token)
         # DELIBERATELY do not cancel handle.task — disconnects keep it alive.
 
-    async def _attach_existing_run(run_id: str) -> None:
-        nonlocal current_handle, current_token
-        handle = await run_registry.get_run(run_id)
-        if handle is None:
+    async def _attach_history_run(run_id: str) -> None:
+        """Registry miss — serve the run from the results DB instead of
+        'not found'. Sends a synthesized terminal replay; there is no live
+        stream to attach to, so the dispatcher just waits for the next
+        client message afterwards."""
+        from sqlalchemy.exc import SQLAlchemyError
+
+        from testmcpy.server.run_persistence import history_replay_messages
+        from testmcpy.storage import get_storage
+
+        try:
+            record = get_storage().get_run(run_id)
+        except SQLAlchemyError:
+            record = None
+        if record is None:
             await manager.send_message(
                 {"type": "error", "message": f"run_id not found: {run_id}"},
                 websocket,
             )
+            return
+        for msg in history_replay_messages(record):
+            try:
+                await manager.send_message(msg, websocket)
+            except Exception:
+                return
+
+    async def _attach_existing_run(run_id: str) -> None:
+        nonlocal current_handle, current_token
+        handle = await run_registry.get_run(run_id)
+        if handle is None:
+            await _attach_history_run(run_id)
             return
         # Replay backlog so the UI rebuilds state.
         for replay_msg in run_registry.buffered_replay(handle):

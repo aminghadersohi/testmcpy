@@ -956,6 +956,7 @@ class TestStorage:
                 "test_id": run.suite_id,
                 "test_version": run.suite_version,
                 "environment_id": run.environment_id,
+                "status": run.status,
                 "model": run.model,
                 "provider": run.provider,
                 "mcp_profile_id": run.mcp_profile_id,

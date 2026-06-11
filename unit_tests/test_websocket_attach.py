@@ -68,6 +68,20 @@ async def _isolated_registry():
     await run_registry.reset_for_tests()
 
 
+@pytest.fixture(autouse=True)
+def isolated_storage(tmp_path, monkeypatch):
+    """Point get_storage() at a temp DB — attach falls back to the
+    results DB on a registry miss, and must never touch the developer's
+    real .testmcpy/storage.db."""
+    import testmcpy.storage as storage_module
+    from testmcpy.storage import TestStorage
+
+    storage = TestStorage(db_path=tmp_path / "ws_attach.db")
+    monkeypatch.setattr(storage_module, "_storage", storage)
+    yield storage
+    monkeypatch.setattr(storage_module, "_storage", None)
+
+
 async def _slow_run_command_factory(steps: int, step_delay: float = 0.05):
     """Build a fake run-command coroutine that streams N log lines and a
     terminal all_complete event, sleeping ``step_delay`` between each.
@@ -527,3 +541,82 @@ async def test_stop_while_queued_finalizes_as_stopped(monkeypatch):
         await ws.disconnect()
         with contextlib.suppress(asyncio.TimeoutError):
             await asyncio.wait_for(d, timeout=1.0)
+
+
+# ---------------------------------------------------------------------------
+# Attach fallback to DB history (registry miss)
+# ---------------------------------------------------------------------------
+
+
+def _seed_db_run(storage, run_id, status="completed", n_results=2):
+    from datetime import datetime, timezone
+
+    storage.save_suite(suite_id="suite.yaml", name="suite.yaml", questions=[])
+    storage.save_run(
+        run_id=run_id,
+        test_id="suite.yaml",
+        test_version=1,
+        model="m1",
+        provider="p1",
+        started_at=datetime.now(timezone.utc).isoformat(),
+    )
+    for i in range(n_results):
+        storage.save_question_result(
+            run_id=run_id, question_id=f"t{i}", passed=i % 2 == 0, score=1.0, cost_usd=0.01
+        )
+    if status != "running":
+        storage.finish_run(run_id, status=status)
+
+
+async def _drive_attach(run_id: str) -> list[dict]:
+    ws = _FakeWebSocket()
+    dispatcher = asyncio.create_task(ws_module.handle_test_websocket(ws))
+    await ws.inbound.put({"type": "attach", "run_id": run_id})
+
+    async def _wait_terminal():
+        while True:
+            if any(m.get("type") in ("all_complete", "error") for m in ws.outbound):
+                return
+            await asyncio.sleep(0.01)
+
+    await asyncio.wait_for(_wait_terminal(), timeout=2.0)
+    await ws.disconnect()
+    with contextlib.suppress(asyncio.TimeoutError):
+        await asyncio.wait_for(dispatcher, timeout=1.0)
+    return ws.outbound
+
+
+@pytest.mark.asyncio
+async def test_attach_after_registry_gc_replays_from_db(isolated_storage):
+    """Attaching to a run that was GC'd from the registry (e.g. a tab
+    reopened after CLEANUP_TTL) replays the finished record from the DB
+    instead of erroring."""
+    _seed_db_run(isolated_storage, "gone_but_saved", status="completed")
+    outbound = await _drive_attach("gone_but_saved")
+
+    started = next(m for m in outbound if m.get("type") == "run_started")
+    assert started["reattached"] is True
+    assert started["source"] == "history"
+    assert started["status"] == "completed"
+
+    completes = [m for m in outbound if m.get("type") == "test_complete"]
+    assert [m["test_name"] for m in completes] == ["t0", "t1"]
+
+    terminal = next(m for m in outbound if m.get("type") == "all_complete")
+    assert terminal["status"] == "completed"
+    assert terminal["summary"]["total"] == 2
+    assert terminal["summary"]["passed"] == 1
+
+
+@pytest.mark.asyncio
+async def test_attach_to_crashed_run_reports_interrupted_with_partial_results(isolated_storage):
+    """A DB row stuck at status=running with no registry handle means the
+    server died mid-run. The client must get the partial results and an
+    interrupted terminal status — not a spinner that never resolves."""
+    _seed_db_run(isolated_storage, "crashed_mid_run", status="running", n_results=1)
+    outbound = await _drive_attach("crashed_mid_run")
+
+    terminal = next(m for m in outbound if m.get("type") == "all_complete")
+    assert terminal["status"] == "interrupted"
+    assert len(terminal["results"]) == 1
+    assert not any(m.get("type") == "error" for m in outbound)

@@ -55,6 +55,73 @@ def question_result_kwargs(r: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def ui_result_from_question_result(q: dict[str, Any]) -> dict[str, Any]:
+    """Inverse of ``question_result_kwargs``: map a stored question_results
+    row (as returned by ``storage.get_run``) back onto the TestResult
+    wire shape the UI's test_complete / all_complete handlers expect."""
+    return {
+        "test_name": q.get("question_id"),
+        "passed": bool(q.get("passed")),
+        "score": q.get("score", 0.0),
+        "response": q.get("answer"),
+        "tool_calls": q.get("tool_uses") or [],
+        "token_usage": {
+            "input": q.get("tokens_input", 0) or 0,
+            "output": q.get("tokens_output", 0) or 0,
+        },
+        "duration": (q.get("duration_ms") or 0) / 1000,
+        "evaluations": q.get("evaluations") or [],
+        "error": q.get("error"),
+        "cost": q.get("cost_usd", 0.0) or 0.0,
+    }
+
+
+# DB statuses that map straight onto the wire's terminal statuses. A DB
+# row still 'running' (or already 'interrupted') with no registry handle
+# means the server died mid-run — report it as interrupted.
+_TERMINAL_WIRE_STATUS = {"completed": "completed", "stopped": "stopped", "error": "error"}
+
+
+def wire_status_for_db_status(db_status: str | None) -> str:
+    """Map a test_runs.status onto the WebSocket/REST wire status for a
+    run that is NOT in the in-memory registry: terminal statuses pass
+    through, anything else (running / interrupted / unknown) means the
+    owning process died mid-run — interrupted."""
+    return _TERMINAL_WIRE_STATUS.get(db_status or "completed", "interrupted")
+
+
+def history_replay_messages(record: dict[str, Any]) -> list[dict[str, Any]]:
+    """Synthesize the WebSocket message sequence for attaching to a run
+    that's no longer in the in-memory registry (GC'd after CLEANUP_TTL,
+    or lost to a server restart) but lives in the results DB: a
+    ``run_started`` marker, one ``test_complete`` per stored result (so
+    the UI rebuilds its per-test panels), and a terminal ``all_complete``
+    carrying the run's real status — including ``interrupted`` with
+    partial results for runs that died mid-flight."""
+    status = wire_status_for_db_status(record.get("status"))
+    results = [ui_result_from_question_result(q) for q in record.get("question_results", [])]
+    passed = sum(1 for r in results if r["passed"])
+    summary = {
+        "total": len(results),
+        "passed": passed,
+        "failed": len(results) - passed,
+        "total_cost": sum(r["cost"] for r in results),
+        "status": status,
+    }
+    return [
+        {
+            "type": "run_started",
+            "run_id": record.get("run_id"),
+            "kind": "single",
+            "reattached": True,
+            "status": status,
+            "source": "history",
+        },
+        *({"type": "test_complete", "test_name": r["test_name"], "result": r} for r in results),
+        {"type": "all_complete", "status": status, "summary": summary, "results": results},
+    ]
+
+
 class RunRecord:
     """Write-through record of one run (one YAML file) in the results DB.
 

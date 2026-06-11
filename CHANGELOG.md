@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-06-11
+
+### Fixed
+- **Chat uses the selected MCP profile's auth**: `/api/chat` and
+  `/api/chat/stream` now pass the selected profile's `mcp_url`/`auth` to
+  the LLM provider. Previously SDK providers fell back to the *default*
+  profile, so chatting with any other profile failed with "No usable
+  cached OAuth token for <default-profile-url>" even when the selected
+  profile was authenticated
+
+### Added
+- **Interactive OAuth login during chat** (`TESTMCPY_CHAT_OAUTH_LOGIN`,
+  default on): when the selected profile uses OAuth auto-discovery and no
+  cached token exists, chat triggers the browser OAuth flow and retries
+  instead of erroring; the stream shows "Waiting for OAuth login in
+  browser...". Set `TESTMCPY_CHAT_OAUTH_LOGIN=false` to disable
+
 ## [0.9.0] - 2026-06-11
 
 Crash-safe UI test runs: the results DB is now the source of truth for

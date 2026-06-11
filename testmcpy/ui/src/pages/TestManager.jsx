@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
+import { useConfirm } from '../components/ConfirmDialog'
 import { useNotification } from '../components/NotificationProvider'
 import {
   Plus,
@@ -432,6 +433,7 @@ function TestCaseWizard({ onComplete, onCancel }) {
 }
 
 function TestManager({ selectedProfiles = [], selectedLlmProfile = null, llmProfiles = [] }) {
+  const [confirmAction, confirmElement] = useConfirm()
   const { success: notifySuccess, error: notifyError, warning: notifyWarning, info: notifyInfo } = useNotification()
   const { monacoTheme } = useEditorTheme()
   // Get test run state from context (persists across navigation)
@@ -1204,7 +1206,7 @@ tests:
   }
 
   const deleteTestFile = async (relativePath) => {
-    if (!confirm(`Delete ${relativePath}?`)) return
+    if (!(await confirmAction({ title: 'Delete file', message: `Delete ${relativePath}?` }))) return
 
     try {
       await fetch(`/api/tests/${relativePath}`, { method: 'DELETE' })
@@ -1355,6 +1357,7 @@ tests:
 
   return (
     <div className="h-full flex flex-col">
+      {confirmElement}
       <div className="flex-1 flex flex-col md:flex-row overflow-hidden min-h-0 relative">
         {/* Permanent overlay — shown/hidden via ref during drag to prevent Monaco from stealing mouse events. Never triggers React re-render. */}
         <div ref={overlayRef} className="absolute inset-0 z-30" style={{ display: 'none' }} />
@@ -1588,11 +1591,11 @@ tests:
                 pathSubtitle={selectedFile.relative_path || selectedFile.filename}
                 testCount={testLocations.length}
                 dirty={editMode && fileContent !== selectedFile.content}
-                onClose={() => {
+                onClose={async () => {
                   // Confirm before discarding unsaved edits — closing the tab
                   // shouldn't silently lose user work.
                   const dirty = editMode && fileContent !== selectedFile.content
-                  if (dirty && !window.confirm('You have unsaved changes. Close anyway?')) {
+                  if (dirty && !(await confirmAction({ title: 'Unsaved changes', message: 'You have unsaved changes. Close anyway?', confirmLabel: 'Close anyway' }))) {
                     return
                   }
                   setSelectedFile(null)
@@ -2020,7 +2023,7 @@ tests:
                               {historySelectMode && selectedRunIds.size > 0 && (
                                 <button
                                   onClick={async () => {
-                                    if (!confirm(`Delete ${selectedRunIds.size} run${selectedRunIds.size > 1 ? 's' : ''}?`)) return
+                                    if (!(await confirmAction({ title: 'Delete runs', message: `Delete ${selectedRunIds.size} run${selectedRunIds.size > 1 ? 's' : ''}?` }))) return
                                     const ids = Array.from(selectedRunIds)
                                     try {
                                       const res = await fetch('/api/results/runs/bulk-delete', {

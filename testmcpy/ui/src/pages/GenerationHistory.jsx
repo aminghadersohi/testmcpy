@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react'
+import { useConfirm } from '../components/ConfirmDialog'
 import { formatCost } from '../utils/formatters'
 import {
   History,
@@ -28,6 +29,7 @@ import Editor from '@monaco-editor/react'
 import { useEditorTheme } from '../hooks/useEditorTheme'
 
 function GenerationHistory() {
+  const [confirmAction, confirmElement] = useConfirm()
   const { monacoTheme } = useEditorTheme()
   const [logs, setLogs] = useState([])
   const [loading, setLoading] = useState(true)
@@ -78,7 +80,7 @@ function GenerationHistory() {
   }
 
   const deleteLog = async (logId) => {
-    if (!confirm('Delete this generation log?')) return
+    if (!(await confirmAction({ title: 'Delete log', message: 'Delete this generation log?' }))) return
     try {
       await fetch(`/api/generation-logs/log/${logId}`, { method: 'DELETE' })
       setLogs(logs.filter(l => l.log_id !== logId))
@@ -141,6 +143,7 @@ function GenerationHistory() {
 
   return (
     <div className="h-full flex flex-col bg-background">
+      {confirmElement}
       {/* Header */}
       <div className="flex-shrink-0 px-4 md:px-6 py-4 border-b border-border bg-surface-elevated">
         <div className="flex items-center justify-between">

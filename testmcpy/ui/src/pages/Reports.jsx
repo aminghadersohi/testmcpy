@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react'
+import { useConfirm } from '../components/ConfirmDialog'
 import { useNotification } from '../components/NotificationProvider'
 import { useSearchParams } from 'react-router-dom'
 import ReactMarkdown from 'react-markdown'
@@ -940,6 +941,7 @@ function TrendsTab({ testRuns }) {
 }
 
 function Reports() {
+  const [confirmAction, confirmElement] = useConfirm()
   const { success: notifySuccess, error: notifyError, warning: notifyWarning, info: notifyInfo } = useNotification()
   const [searchParams, setSearchParams] = useSearchParams()
   const [activeTab, setActiveTab] = useState('tests')
@@ -1160,7 +1162,7 @@ function Reports() {
   }
 
   const deleteRun = async (runId, type) => {
-    if (!confirm('Delete this report?')) return
+    if (!(await confirmAction({ title: 'Delete report', message: 'Delete this report?' }))) return
     try {
       const endpoint = type === 'tests'
         ? `/api/results/run/${runId}`
@@ -1203,7 +1205,7 @@ function Reports() {
 
   const deleteSelected = async () => {
     if (selectedRuns.size === 0) return
-    if (!confirm(`Delete ${selectedRuns.size} run${selectedRuns.size > 1 ? 's' : ''}?`)) return
+    if (!(await confirmAction({ title: 'Delete runs', message: `Delete ${selectedRuns.size} run${selectedRuns.size > 1 ? 's' : ''}?` }))) return
     try {
       const res = await fetch('/api/results/runs/bulk-delete', {
         method: 'POST',
@@ -1558,6 +1560,7 @@ function Reports() {
 
   return (
     <div className="h-full flex flex-col bg-background">
+      {confirmElement}
       {/* Header */}
       <div className="flex-shrink-0 px-4 md:px-6 py-4 border-b border-border bg-surface-elevated">
         <div className="flex items-center justify-between">

@@ -29,6 +29,7 @@ import {
 } from 'lucide-react'
 import Editor from '@monaco-editor/react'
 import Wizard from '../components/Wizard'
+import Badge from '../components/Badge'
 import TestStatusIndicator from '../components/TestStatusIndicator'
 import TestResultPanel from '../components/TestResultPanel'
 import { useKeyboardShortcuts, useAnnounce } from '../hooks/useKeyboardShortcuts'
@@ -1514,10 +1515,10 @@ tests:
                 <span className="font-medium text-text-primary">{folderName}</span>
                 <span className="text-xs text-text-tertiary ml-auto">{files.length} file{files.length !== 1 ? 's' : ''}</span>
                 {directoryRunProgress?.folder === folderName ? (
-                  <span className="flex items-center gap-1 px-1.5 py-0.5 rounded bg-warning/20 text-warning text-[10px] font-medium">
+                  <Badge variant="warning" size="xs" className="font-medium">
                     <Loader2 size={10} className="animate-spin" />
                     {directoryRunProgress.current}/{directoryRunProgress.total}
-                  </span>
+                  </Badge>
                 ) : (
                   <button
                     onClick={(e) => {

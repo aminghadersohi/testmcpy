@@ -409,7 +409,7 @@ function GenerationHistory() {
                 <div className="flex items-center gap-2 mt-4">
                   <button
                     onClick={() => setExpandedSection('logs')}
-                    className={`px-3 py-1.5 text-sm rounded-lg flex items-center gap-2 transition-colors ${
+                    className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors flex items-center gap-2 ${
                       expandedSection === 'logs'
                         ? 'bg-primary text-white'
                         : 'bg-surface hover:bg-surface-hover text-text-secondary'
@@ -420,7 +420,7 @@ function GenerationHistory() {
                   </button>
                   <button
                     onClick={() => setExpandedSection('prompts')}
-                    className={`px-3 py-1.5 text-sm rounded-lg flex items-center gap-2 transition-colors ${
+                    className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors flex items-center gap-2 ${
                       expandedSection === 'prompts'
                         ? 'bg-primary text-white'
                         : 'bg-surface hover:bg-surface-hover text-text-secondary'
@@ -431,7 +431,7 @@ function GenerationHistory() {
                   </button>
                   <button
                     onClick={() => setExpandedSection('analysis')}
-                    className={`px-3 py-1.5 text-sm rounded-lg flex items-center gap-2 transition-colors ${
+                    className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors flex items-center gap-2 ${
                       expandedSection === 'analysis'
                         ? 'bg-primary text-white'
                         : 'bg-surface hover:bg-surface-hover text-text-secondary'
@@ -442,7 +442,7 @@ function GenerationHistory() {
                   </button>
                   <button
                     onClick={() => setExpandedSection('yaml')}
-                    className={`px-3 py-1.5 text-sm rounded-lg flex items-center gap-2 transition-colors ${
+                    className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors flex items-center gap-2 ${
                       expandedSection === 'yaml'
                         ? 'bg-primary text-white'
                         : 'bg-surface hover:bg-surface-hover text-text-secondary'

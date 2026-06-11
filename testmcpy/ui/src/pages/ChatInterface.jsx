@@ -1229,7 +1229,7 @@ ${evaluators}
               aria-label="Message input"
               aria-describedby="keyboard-hint"
             />
-            <span id="keyboard-hint" className="absolute right-3 bottom-2 text-xs text-text-disabled pointer-events-none">
+            <span id="keyboard-hint" className="hidden sm:block absolute right-3 bottom-2 text-xs text-text-disabled pointer-events-none">
               {navigator.platform.includes('Mac') ? '⌘' : 'Ctrl'}+Enter
             </span>
           </div>

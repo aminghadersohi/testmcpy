@@ -5,6 +5,8 @@ import { useSearchParams, Link } from 'react-router-dom'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import TraceView from '../components/TraceView'
+import Badge from '../components/Badge'
+import { Skeleton, ListItemSkeleton } from '../components/SkeletonLoader'
 import { formatDate, formatDuration, formatCost, formatTokens } from '../utils/formatters'
 import {
   FileText,
@@ -70,7 +72,7 @@ function CollapsibleSection({ title, icon: Icon, badge, defaultOpen = false, chi
         {Icon && <Icon size={14} className="text-text-secondary flex-shrink-0" />}
         <span className="text-xs font-semibold text-text-secondary uppercase tracking-wide">{title}</span>
         {badge !== undefined && (
-          <span className="text-xs px-1.5 py-0.5 rounded bg-surface-elevated text-text-tertiary">{badge}</span>
+          <Badge>{badge}</Badge>
         )}
       </button>
       {open && <div className="mt-2">{children}</div>}
@@ -112,7 +114,7 @@ function ToolCallDisplay({ call, index }) {
       <div className="flex-1 pb-3 min-w-0">
         <div className="flex items-center gap-2 mb-1">
           <span className="font-mono text-sm font-medium text-primary">{displayName}</span>
-          {isError && <span className="text-xs px-1.5 py-0.5 rounded bg-error/20 text-error">error</span>}
+          {isError && <Badge variant="error">error</Badge>}
         </div>
         {!isEmptyArgs && (
           <pre className="text-xs font-mono bg-surface p-2 rounded border border-border overflow-x-auto mb-2 text-text-secondary">
@@ -348,7 +350,7 @@ function TestResultCard({ result, providerHint, onFpToggle }) {
             </span>
           )}
         </div>
-        <div className="flex items-center gap-3 text-xs text-text-tertiary flex-shrink-0 ml-2">
+        <div className="flex items-center flex-wrap gap-3 text-xs text-text-tertiary flex-shrink-0 ml-2">
           <span
             className="font-mono"
             title="Aggregate evaluator score for this test (0.00–1.00). 1.00 = all evaluators passed at 100%."
@@ -1616,8 +1618,11 @@ function Reports() {
               </button>
             )}
             {loadingDetails ? (
-              <div className="flex items-center justify-center h-full">
-                <Loader2 className="animate-spin text-primary" size={32} />
+              <div className="p-4 space-y-2">
+                <Skeleton width="40%" height="24px" className="mb-4" />
+                {Array.from({ length: 6 }).map((_, idx) => (
+                  <ListItemSkeleton key={idx} />
+                ))}
               </div>
             ) : !runDetails ? (
               <div className="flex items-center justify-center h-full">

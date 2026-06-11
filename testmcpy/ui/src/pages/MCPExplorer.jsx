@@ -4,6 +4,7 @@ import { Server, ChevronDown, ChevronRight, Copy, Check, EyeOff, Sparkles, Code2
 import { useNavigate } from 'react-router-dom'
 import ReactJson from '@microlink/react-json-view'
 import ParameterCard from '../components/ParameterCard'
+import Badge from '../components/Badge'
 import TestGenerationModal from '../components/TestGenerationModal'
 import SchemaCodeViewer from '../components/SchemaCodeViewer'
 import OptimizeDocsModal from '../components/OptimizeDocsModal'
@@ -765,9 +766,9 @@ function MCPExplorer({ selectedProfiles = [] }) {
             <p className="text-text-secondary mt-1 text-sm md:text-base">
               Browse tools, resources, and prompts from your MCP service
               {batchMode && selectedTools.size > 0 && (
-                <span className="ml-2 text-xs bg-primary/10 text-primary px-2 py-0.5 rounded border border-primary/20">
+                <Badge variant="primary" className="ml-2">
                   {selectedTools.size} selected
-                </span>
+                </Badge>
               )}
             </p>
           </div>
@@ -1044,7 +1045,7 @@ function MCPExplorer({ selectedProfiles = [] }) {
                         </div>
 
                         {/* Description */}
-                        <p className="text-text-secondary text-xs line-clamp-2 mb-4 leading-relaxed">
+                        <p className="text-text-secondary text-xs line-clamp-2 mb-4 leading-relaxed" title={tool.description}>
                           {tool.description.split('\n')[0]}
                         </p>
 
@@ -1203,7 +1204,7 @@ function MCPExplorer({ selectedProfiles = [] }) {
                         return null
                       })()}
                     </div>
-                    <p className="text-text-secondary mt-2 ml-8 line-clamp-2">
+                    <p className="text-text-secondary mt-2 ml-8 line-clamp-2" title={tool.description}>
                       {tool.description.split('\n')[0]}
                     </p>
                   </div>
@@ -1288,9 +1289,9 @@ function MCPExplorer({ selectedProfiles = [] }) {
                                 <h4 className="text-sm font-semibold text-text-secondary">
                                   Tests for this tool
                                 </h4>
-                                <span className="text-xs bg-primary/10 text-primary px-2 py-0.5 rounded border border-primary/20">
+                                <Badge variant="primary">
                                   {testInfo.count} test file{testInfo.count !== 1 ? 's' : ''}
-                                </span>
+                                </Badge>
                               </div>
                               <button
                                 onClick={(e) => {
@@ -1889,9 +1890,9 @@ function MCPExplorer({ selectedProfiles = [] }) {
                           <h4 className="text-sm font-semibold text-text-secondary">
                             Tests for this tool
                           </h4>
-                          <span className="text-xs bg-primary/10 text-primary px-2 py-0.5 rounded border border-primary/20">
+                          <Badge variant="primary">
                             {testInfo.count} test file{testInfo.count !== 1 ? 's' : ''}
-                          </span>
+                          </Badge>
                         </div>
                         <button
                           onClick={() => runToolTests(expandedToolModal.name)}

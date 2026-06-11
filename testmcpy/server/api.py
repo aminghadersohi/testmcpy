@@ -409,7 +409,13 @@ async def lifespan(app: FastAPI):
             await _asyncio.sleep(60)
             try:
                 get_storage().mark_stale_runs_interrupted(no_heartbeat_older_than_hours=None)
-            except SQLAlchemyError as sweep_err:
+            except _asyncio.CancelledError:
+                raise
+            except Exception as sweep_err:  # noqa: BLE001 — long-lived loop:
+                # any escaping error (not just SQLAlchemyError — e.g. an
+                # OSError on first-time DB-path init) would otherwise kill
+                # the sweeper permanently and silently, reverting crash
+                # reconciliation to startup-only. (PR #90 review)
                 print(f"Warning: stale-run sweep failed: {sweep_err}")
 
     sweeper_task = _asyncio.create_task(_stale_run_sweeper())

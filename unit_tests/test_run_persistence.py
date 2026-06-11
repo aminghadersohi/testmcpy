@@ -37,7 +37,8 @@ def _result(name="t1", passed=True, cost=0.01):
         "score": 1.0 if passed else 0.0,
         "response": "answer text",
         "tool_calls": [{"name": "list_charts"}],
-        "token_usage": {"input": 10, "output": 20},
+        # Live provider shape (llm_integration.py): prompt/completion/total.
+        "token_usage": {"prompt": 10, "completion": 20, "total": 30},
         "duration": 1.5,
         "evaluations": [{"evaluator": "contains", "passed": passed}],
         "error": None,
@@ -54,6 +55,15 @@ def test_question_result_kwargs_mapping():
     assert kwargs["tokens_output"] == 20
     assert kwargs["duration_ms"] == 1500
     assert kwargs["cost_usd"] == 0.01
+
+
+def test_question_result_kwargs_accepts_legacy_token_keys():
+    """POST /api/results/save callers may still send input/output."""
+    r = _result()
+    r["token_usage"] = {"input": 7, "output": 9}
+    kwargs = question_result_kwargs(r)
+    assert kwargs["tokens_input"] == 7
+    assert kwargs["tokens_output"] == 9
 
 
 def test_lifecycle_creates_incremental_rows(isolated_storage):
@@ -137,3 +147,22 @@ def test_storage_finish_run_statuses(isolated_storage):
             row = session.query(TestRunModel).filter_by(run_id=rid).one()
             assert row.status == status
             assert row.completed_at is not None
+
+
+def test_history_replay_round_trips_tokens_and_tool_results(isolated_storage):
+    """Replay results must carry the live wire shape: token_usage with
+    prompt/completion/total (the client sums .total) and tool_results."""
+    from testmcpy.server.run_persistence import ui_result_from_question_result
+
+    record = RunRecord()
+    record.begin(test_file="suite.yaml", model="m1", provider="p1")
+    src = _result()
+    src["tool_results"] = [{"result": "ok"}]
+    record.append(src)
+    record.finish("completed")
+
+    saved = isolated_storage.get_run(record.run_id)
+    replayed = ui_result_from_question_result(saved["question_results"][0])
+    assert replayed["token_usage"] == {"prompt": 10, "completion": 20, "total": 30}
+    assert replayed["tool_results"] == [{"result": "ok"}]
+    assert replayed["cost"] == src["cost"]

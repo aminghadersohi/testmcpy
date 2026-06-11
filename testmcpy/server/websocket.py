@@ -969,7 +969,13 @@ async def handle_test_websocket(websocket: WebSocket):
         """Registry miss — serve the run from the results DB instead of
         'not found'. Sends a synthesized terminal replay; there is no live
         stream to attach to, so the dispatcher just waits for the next
-        client message afterwards."""
+        client message afterwards.
+
+        Known asymmetry: directory-batch run_ids never get a DB row (each
+        file persists under its own per-file id), so a batch id that has
+        aged out of the registry still resolves to 'not found' here even
+        though its per-file rows are in the DB. Closing that needs a
+        parent-row (or metadata.batch_id) scheme — deferred."""
         from sqlalchemy.exc import SQLAlchemyError
 
         from testmcpy.server.run_persistence import history_replay_messages

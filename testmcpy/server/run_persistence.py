@@ -39,6 +39,12 @@ def question_result_kwargs(r: dict[str, Any]) -> dict[str, Any]:
     kwargs. Single source of truth for the mapping — used by both the
     end-of-run ``save_test_run_to_file`` and the incremental ``RunRecord``.
     """
+    # LLM providers report token_usage as {prompt, completion, total}
+    # (see llm_integration.py); the old mapping read input/output and
+    # silently stored 0 for every UI-triggered run. Keep input/output as
+    # a fallback for callers of POST /api/results/save that adopted the
+    # old keys.
+    usage = r.get("token_usage") or {}
     return {
         "question_id": r.get("test_name", r.get("question_id", "unknown")),
         "passed": r.get("passed", False),
@@ -46,8 +52,8 @@ def question_result_kwargs(r: dict[str, Any]) -> dict[str, Any]:
         "answer": r.get("response", r.get("answer")),
         "tool_uses": r.get("tool_calls", r.get("tool_uses")),
         "tool_results": r.get("tool_results"),
-        "tokens_input": (r.get("token_usage") or {}).get("input", 0),
-        "tokens_output": (r.get("token_usage") or {}).get("output", 0),
+        "tokens_input": usage.get("prompt", usage.get("input", 0)),
+        "tokens_output": usage.get("completion", usage.get("output", 0)),
         "duration_ms": int(r.get("duration", 0) * 1000),
         "evaluations": r.get("evaluations"),
         "error": r.get("error"),
@@ -58,16 +64,22 @@ def question_result_kwargs(r: dict[str, Any]) -> dict[str, Any]:
 def ui_result_from_question_result(q: dict[str, Any]) -> dict[str, Any]:
     """Inverse of ``question_result_kwargs``: map a stored question_results
     row (as returned by ``storage.get_run``) back onto the TestResult
-    wire shape the UI's test_complete / all_complete handlers expect."""
+    wire shape the UI's test_complete / all_complete handlers expect —
+    including the live {prompt, completion, total} token_usage keys the
+    client sums (TestRunContext reads token_usage.total)."""
+    tokens_in = q.get("tokens_input", 0) or 0
+    tokens_out = q.get("tokens_output", 0) or 0
     return {
         "test_name": q.get("question_id"),
         "passed": bool(q.get("passed")),
         "score": q.get("score", 0.0),
         "response": q.get("answer"),
         "tool_calls": q.get("tool_uses") or [],
+        "tool_results": q.get("tool_results") or [],
         "token_usage": {
-            "input": q.get("tokens_input", 0) or 0,
-            "output": q.get("tokens_output", 0) or 0,
+            "prompt": tokens_in,
+            "completion": tokens_out,
+            "total": tokens_in + tokens_out,
         },
         "duration": (q.get("duration_ms") or 0) / 1000,
         "evaluations": q.get("evaluations") or [],
@@ -85,9 +97,9 @@ _TERMINAL_WIRE_STATUS = {"completed": "completed", "stopped": "stopped", "error"
 def wire_status_for_db_status(db_status: str | None) -> str:
     """Map a test_runs.status onto the WebSocket/REST wire status for a
     run that is NOT in the in-memory registry: terminal statuses pass
-    through, anything else (running / interrupted / unknown) means the
-    owning process died mid-run — interrupted."""
-    return _TERMINAL_WIRE_STATUS.get(db_status or "completed", "interrupted")
+    through, anything else (running / interrupted / NULL / unknown) means
+    the owning process died mid-run — interrupted."""
+    return _TERMINAL_WIRE_STATUS.get(db_status or "", "interrupted")
 
 
 def history_replay_messages(record: dict[str, Any]) -> list[dict[str, Any]]:

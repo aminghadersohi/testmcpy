@@ -11,6 +11,7 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
+from sqlalchemy.exc import SQLAlchemyError
 
 from testmcpy.server import run_registry
 from testmcpy.server.run_persistence import wire_status_for_db_status
@@ -72,13 +73,21 @@ async def get_run(run_id: str) -> dict[str, Any]:
     # Registry miss (GC'd after CLEANUP_TTL, or a server restart) — fall
     # back to the results DB so a stale tab asking about its run gets the
     # final state instead of a 404. ``source: history`` tells the client
-    # this is a finished record, not a live handle.
-    record = get_storage().get_run(run_id)
+    # this is a finished record, not a live handle. A DB hiccup is treated
+    # as a miss (matching the WS twin, _attach_history_run) rather than
+    # surfacing a 500 to the indicator's poll loop.
+    try:
+        record = get_storage().get_run(run_id)
+    except SQLAlchemyError:
+        record = None
     if record is None:
         raise HTTPException(status_code=404, detail=f"Run not found: {run_id}")
     status = wire_status_for_db_status(record.get("status"))
     return {
         "run_id": run_id,
+        # Only single-run ids ever land a DB row today — directory-batch
+        # ids persist per-file under fresh ids (see _attach_history_run),
+        # so anything resolvable here is a single run by construction.
         "kind": "single",
         "status": status,
         "started_at": record.get("started_at"),

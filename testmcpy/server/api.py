@@ -315,12 +315,15 @@ async def get_mcp_client_for_server(profile_id: str, mcp_name: str) -> MCPClient
         return client
 
 
-async def clear_cached_client(cache_key: str) -> bool:
+async def clear_cached_client(cache_key: str, record_failure: bool = True) -> bool:
     """
     Clear a cached MCP client by its cache key.
 
     Args:
         cache_key: Cache key in format "{profile_id}:{mcp_name}"
+        record_failure: When True (default), throttle the next reconnect via
+            back-off. Pass False for deliberate re-initialization (e.g. an
+            interactive OAuth re-login) where an immediate reconnect is wanted.
 
     Returns:
         True if a client was cleared, False if no client was cached
@@ -329,8 +332,9 @@ async def clear_cached_client(cache_key: str) -> bool:
 
     client = mcp_clients.pop(cache_key, None)
     if client:
-        # Record a failure so the next reconnect is throttled via back-off.
-        _record_failure(cache_key)
+        if record_failure:
+            # Record a failure so the next reconnect is throttled via back-off.
+            _record_failure(cache_key)
         try:
             await client.close()
             print(f"Cleared cached client '{cache_key}'")
@@ -338,6 +342,41 @@ async def clear_cached_client(cache_key: str) -> bool:
             print(f"Warning: Failed to close cached client '{cache_key}': {e}")
         return True
     return False
+
+
+# Marker substring of the ValueError raised by BaseSDKProvider when an
+# oauth_auto_discover profile has no cached token (see
+# llm_integration.BaseSDKProvider._resolve_mcp_bearer_token).
+_OAUTH_TOKEN_ERROR = "No usable cached OAuth token"
+
+
+def _chat_oauth_login_enabled() -> bool:
+    """Feature flag for interactive OAuth login during chat (default ON).
+
+    Disable with TESTMCPY_CHAT_OAUTH_LOGIN=false (or 0/no). Read at call time
+    so tests can monkeypatch the environment.
+    """
+    return os.environ.get("TESTMCPY_CHAT_OAUTH_LOGIN", "true").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+    )
+
+
+async def _relogin_oauth_servers(server_keys: list[str]) -> None:
+    """Deliberate interactive re-auth for the given "profileId:mcpName" keys.
+
+    Drops cached clients WITHOUT recording back-off, clears any pre-existing
+    back-off state, and re-initializes. MCPClient.initialize() with
+    oauth_auto_discover opens the browser OAuth flow and caches the token via
+    fastmcp FileTokenStorage; duplicate popups are prevented by the per-key
+    init locks.
+    """
+    for cache_key in server_keys:
+        await clear_cached_client(cache_key, record_failure=False)
+        _clear_failure(cache_key)  # earlier failures must not block deliberate re-auth
+        profile_id, mcp_name = cache_key.split(":", 1)
+        await get_mcp_client_for_server(profile_id, mcp_name)
 
 
 def is_auth_error(error_msg: str) -> bool:
@@ -953,9 +992,18 @@ async def chat(request: ChatRequest) -> ChatResponse:
         if api_key:
             provider_kwargs["api_key"] = api_key
         provider_kwargs.update(_primary_mcp_provider_kwargs(clients_to_use))
-        llm_provider = create_llm_provider(provider, model, **provider_kwargs)
         print("[Chat] Initializing LLM provider...")
-        await llm_provider.initialize()
+        try:
+            llm_provider = create_llm_provider(provider, model, **provider_kwargs)
+            await llm_provider.initialize()
+        except ValueError as e:
+            if not (_chat_oauth_login_enabled() and _OAUTH_TOKEN_ERROR in str(e)):
+                raise
+            print("[Chat] No cached OAuth token; triggering interactive OAuth login...")
+            await _relogin_oauth_servers(accessed_servers)
+            llm_provider = create_llm_provider(provider, model, **provider_kwargs)
+            # Single retry; a second failure falls to the existing handlers.
+            await llm_provider.initialize()
         print(
             f"[Chat] LLM provider initialized. Generating response with {len(all_tools)} tools..."
         )
@@ -1227,8 +1275,17 @@ async def chat_stream(request: ChatRequest):
             if api_key:
                 provider_kwargs["api_key"] = api_key
             provider_kwargs.update(_primary_mcp_provider_kwargs(clients_to_use))
-            llm_provider = create_llm_provider(provider, model, **provider_kwargs)
-            await llm_provider.initialize()
+            try:
+                llm_provider = create_llm_provider(provider, model, **provider_kwargs)
+                await llm_provider.initialize()
+            except ValueError as e:
+                if not (_chat_oauth_login_enabled() and _OAUTH_TOKEN_ERROR in str(e)):
+                    raise
+                yield send_event("status", "Waiting for OAuth login in browser...")
+                await _relogin_oauth_servers(accessed_servers)
+                llm_provider = create_llm_provider(provider, model, **provider_kwargs)
+                # Single retry; a second failure falls to the existing handlers.
+                await llm_provider.initialize()
 
             # --- Detect if provider is SDK-based (handles its own agentic loop) ---
             from testmcpy.src.llm_integration import ClaudeSDKProvider

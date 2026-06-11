@@ -1,7 +1,6 @@
 """Tests for results endpoints (save, list, get, history, compare, delete)."""
 
 
-
 def _make_test_run_payload(test_file="health/test.yaml", passed=2, failed=1):
     """Build a minimal test run payload for saving."""
     return {

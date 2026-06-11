@@ -180,9 +180,21 @@ async def list_test_runs(
             }
         )
 
-    # total reflects page size; a full count query would be needed for true pagination
-    # For now, signal "there may be more" if we hit the limit
-    return {"runs": runs, "total": len(runs), "has_more": len(runs) >= limit}
+    total = storage.count_runs(
+        test_id=test_file,
+        model=model,
+        provider=provider,
+        mcp_profile=mcp_profile,
+        date_from=date_from,
+        date_to=date_to,
+    )
+    return {
+        "runs": runs,
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "has_more": offset + len(runs) < total,
+    }
 
 
 @router.get("/filters")

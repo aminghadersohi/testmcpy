@@ -989,6 +989,27 @@ class TestRunManagement:
         runs = storage.list_runs()
         assert runs == []
 
+    def test_count_runs_matches_filters(self, storage):
+        now = datetime.now(timezone.utc).isoformat()
+        for i in range(5):
+            storage.save_run(
+                run_id=f"r{i}",
+                test_id="s",
+                test_version=1,
+                model="claude-sonnet-4-5" if i < 3 else "gpt-4o",
+                provider="anthropic" if i < 3 else "openai",
+                started_at=now,
+            )
+        assert storage.count_runs() == 5
+        assert storage.count_runs(model="gpt-4o") == 2
+        assert storage.count_runs(provider="anthropic") == 3
+        # count is unaffected by pagination args on list_runs
+        assert len(storage.list_runs(limit=2)) == 2
+        assert storage.count_runs() == 5
+
+    def test_count_runs_empty(self, storage):
+        assert storage.count_runs() == 0
+
 
 # ---------------------------------------------------------------------------
 # Content hashing

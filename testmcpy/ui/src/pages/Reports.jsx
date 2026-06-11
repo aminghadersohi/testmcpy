@@ -948,6 +948,9 @@ function Reports() {
   const [testRuns, setTestRuns] = useState([])
   const [smokeReports, setSmokeReports] = useState([])
   const [loading, setLoading] = useState(true)
+  const [runsTotal, setRunsTotal] = useState(0)
+  const [loadingMore, setLoadingMore] = useState(false)
+  const loadedCountRef = useRef(0)
   const [selectedRun, setSelectedRun] = useState(null)
   const [runDetails, setRunDetails] = useState(null)
   const [loadingDetails, setLoadingDetails] = useState(false)
@@ -986,17 +989,47 @@ function Reports() {
 
   const loadTestRuns = useCallback(async () => {
     try {
-      const params = new URLSearchParams({ limit: '100' })
+      // Refetch everything loaded so far so auto-refresh doesn't collapse
+      // previously loaded pages back to the first one
+      const params = new URLSearchParams({ limit: String(Math.max(100, loadedCountRef.current)) })
       if (filterModel) params.set('model', filterModel)
       if (filterProvider) params.set('provider', filterProvider)
       if (filterTestFile) params.set('test_file', filterTestFile)
       const res = await fetch(`/api/results/list?${params}`)
       if (res.ok) {
         const data = await res.json()
-        setTestRuns(data.runs || [])
+        const runs = data.runs || []
+        setTestRuns(runs)
+        loadedCountRef.current = runs.length
+        setRunsTotal(data.total ?? runs.length)
       }
     } catch (error) {
       console.error('Failed to load test runs:', error)
+    }
+  }, [filterModel, filterProvider, filterTestFile])
+
+  const loadMoreRuns = useCallback(async () => {
+    setLoadingMore(true)
+    try {
+      const params = new URLSearchParams({
+        limit: '100',
+        offset: String(loadedCountRef.current),
+      })
+      if (filterModel) params.set('model', filterModel)
+      if (filterProvider) params.set('provider', filterProvider)
+      if (filterTestFile) params.set('test_file', filterTestFile)
+      const res = await fetch(`/api/results/list?${params}`)
+      if (res.ok) {
+        const data = await res.json()
+        const next = data.runs || []
+        setTestRuns(prev => [...prev, ...next])
+        loadedCountRef.current += next.length
+        setRunsTotal(data.total ?? loadedCountRef.current)
+      }
+    } catch (error) {
+      console.error('Failed to load more runs:', error)
+    } finally {
+      setLoadingMore(false)
     }
   }, [filterModel, filterProvider, filterTestFile])
 
@@ -1034,6 +1067,7 @@ function Reports() {
       filtersInitialized.current = true
       return  // skip first render — initial load handles it
     }
+    loadedCountRef.current = 0  // filters changed — start from the first page
     loadTestRuns()
   }, [filterModel, filterProvider, filterTestFile]) // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -1609,7 +1643,7 @@ function Reports() {
             <span className={`px-1.5 py-0.5 rounded text-xs ${
               activeTab === 'tests' ? 'bg-surface-hover' : 'bg-surface-elevated'
             }`}>
-              {testRuns.length}
+              {runsTotal || testRuns.length}
             </span>
           </button>
           <button
@@ -1805,6 +1839,19 @@ function Reports() {
                   <div className="divide-y divide-border">
                     {filteredTestRuns.map(renderRunListItem)}
                   </div>
+                  {testRuns.length < runsTotal && (
+                    <div className="p-3 text-center border-t border-border">
+                      <button
+                        onClick={loadMoreRuns}
+                        disabled={loadingMore}
+                        className="text-xs text-text-secondary hover:text-text-primary px-3 py-1.5 rounded bg-surface hover:bg-surface-hover transition-colors disabled:opacity-50"
+                      >
+                        {loadingMore
+                          ? 'Loading…'
+                          : `Load more (${testRuns.length} of ${runsTotal})`}
+                      </button>
+                    </div>
+                  )}
                 </div>
               )
             ) : (

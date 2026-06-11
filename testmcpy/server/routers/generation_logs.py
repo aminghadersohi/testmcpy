@@ -68,14 +68,23 @@ async def save_generation_log_endpoint(log_data: dict[str, Any]) -> dict[str, An
 
 
 @router.get("/list")
-async def list_generation_logs(tool_name: str | None = None, limit: int = 50) -> dict[str, Any]:
+async def list_generation_logs(
+    tool_name: str | None = None, limit: int = 50, offset: int = 0
+) -> dict[str, Any]:
     """
     List all generation logs, optionally filtered by tool name.
     Returns metadata only (not full logs).
     """
     storage = get_storage()
-    logs = storage.list_generation_logs(tool_name=tool_name, limit=limit)
-    return {"logs": logs, "total": len(logs)}
+    logs = storage.list_generation_logs(tool_name=tool_name, limit=limit, offset=offset)
+    total = storage.count_generation_logs(tool_name=tool_name)
+    return {
+        "logs": logs,
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "has_more": offset + len(logs) < total,
+    }
 
 
 @router.get("/log/{log_id}")

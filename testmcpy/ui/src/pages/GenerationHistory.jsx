@@ -32,6 +32,8 @@ function GenerationHistory() {
   const [confirmAction, confirmElement] = useConfirm()
   const { monacoTheme } = useEditorTheme()
   const [logs, setLogs] = useState([])
+  const [logsTotal, setLogsTotal] = useState(0)
+  const [loadingMore, setLoadingMore] = useState(false)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
   const [selectedLog, setSelectedLog] = useState(null)
@@ -56,10 +58,26 @@ function GenerationHistory() {
       if (!res.ok) throw new Error('Failed to load generation logs')
       const data = await res.json()
       setLogs(data.logs || [])
+      setLogsTotal(data.total ?? (data.logs || []).length)
     } catch (err) {
       setError(err.message)
     } finally {
       setLoading(false)
+    }
+  }
+
+  const loadMoreLogs = async () => {
+    setLoadingMore(true)
+    try {
+      const res = await fetch(`/api/generation-logs/list?limit=100&offset=${logs.length}`)
+      if (!res.ok) throw new Error('Failed to load generation logs')
+      const data = await res.json()
+      setLogs(prev => [...prev, ...(data.logs || [])])
+      setLogsTotal(data.total ?? logs.length)
+    } catch (err) {
+      console.error('Failed to load more logs:', err)
+    } finally {
+      setLoadingMore(false)
     }
   }
 
@@ -327,6 +345,17 @@ function GenerationHistory() {
                   </div>
                 </div>
               ))}
+              {logs.length < logsTotal && (
+                <div className="p-3 text-center">
+                  <button
+                    onClick={loadMoreLogs}
+                    disabled={loadingMore}
+                    className="text-xs text-text-secondary hover:text-text-primary px-3 py-1.5 rounded bg-surface hover:bg-surface-hover transition-colors disabled:opacity-50"
+                  >
+                    {loadingMore ? 'Loading…' : `Load more (${logs.length} of ${logsTotal})`}
+                  </button>
+                </div>
+              )}
             </div>
           )}
         </div>

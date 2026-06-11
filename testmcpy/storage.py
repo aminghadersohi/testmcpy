@@ -971,6 +971,32 @@ class TestStorage:
                 for row in rows
             ]
 
+    def count_runs(
+        self,
+        test_id: str | None = None,
+        model: str | None = None,
+        provider: str | None = None,
+        mcp_profile: str | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+    ) -> int:
+        """Count runs matching the same filters as list_runs (for pagination)."""
+        with self._session() as session:
+            query = session.query(func.count(TestRunModel.run_id))
+            if test_id:
+                query = query.filter(TestRunModel.suite_id == test_id)
+            if model:
+                query = query.filter(TestRunModel.model == model)
+            if provider:
+                query = query.filter(TestRunModel.provider == provider)
+            if mcp_profile:
+                query = query.filter(TestRunModel.mcp_profile_id == mcp_profile)
+            if date_from:
+                query = query.filter(TestRunModel.started_at >= date_from)
+            if date_to:
+                query = query.filter(TestRunModel.started_at <= date_to)
+            return query.scalar() or 0
+
     def get_filter_options(self) -> dict[str, list[str]]:
         """Get distinct values for filter dropdowns."""
         with self._session() as session:
@@ -1250,7 +1276,7 @@ class TestStorage:
             }
 
     def list_generation_logs(
-        self, tool_name: str | None = None, limit: int = 50
+        self, tool_name: str | None = None, limit: int = 50, offset: int = 0
     ) -> list[dict[str, Any]]:
         with self._session() as session:
             query = session.query(GenerationLogModel)
@@ -1258,7 +1284,12 @@ class TestStorage:
             if tool_name:
                 query = query.filter(GenerationLogModel.tool_name == tool_name)
 
-            rows = query.order_by(GenerationLogModel.created_at.desc()).limit(limit).all()
+            rows = (
+                query.order_by(GenerationLogModel.created_at.desc())
+                .limit(limit)
+                .offset(offset)
+                .all()
+            )
 
             return [
                 {
@@ -1279,6 +1310,14 @@ class TestStorage:
                 }
                 for r in rows
             ]
+
+    def count_generation_logs(self, tool_name: str | None = None) -> int:
+        """Count generation logs matching the same filter as list (pagination)."""
+        with self._session() as session:
+            query = session.query(func.count(GenerationLogModel.id))
+            if tool_name:
+                query = query.filter(GenerationLogModel.tool_name == tool_name)
+            return query.scalar() or 0
 
     def list_generated_tools(self) -> list[dict[str, Any]]:
         """Get unique tools with generation counts."""

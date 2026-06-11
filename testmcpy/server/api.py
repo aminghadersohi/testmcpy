@@ -151,6 +151,22 @@ def _get_init_lock(cache_key: str) -> asyncio.Lock:
     return _client_init_locks[cache_key]
 
 
+def _primary_mcp_provider_kwargs(
+    clients_to_use: list[tuple[str, str, MCPClient]],
+) -> dict[str, Any]:
+    """mcp_url/auth kwargs from the FIRST selected MCP client.
+
+    SDK providers support a single MCP server; the Chat UI sends exactly one
+    "profileId:mcpName". Without these kwargs the providers fall back to the
+    DEFAULT profile's URL/auth, breaking chat for any other selected profile.
+    create_llm_provider filters these out for providers that don't accept them.
+    """
+    if not clients_to_use:
+        return {}
+    _profile_id, _mcp_name, client = clients_to_use[0]
+    return {"mcp_url": client.base_url, "auth": client.auth_config}
+
+
 async def get_mcp_clients_for_profile(profile_id: str) -> list[tuple[str, MCPClient]]:
     """
     Get or create MCP clients for all MCP servers in a profile.
@@ -299,12 +315,15 @@ async def get_mcp_client_for_server(profile_id: str, mcp_name: str) -> MCPClient
         return client
 
 
-async def clear_cached_client(cache_key: str) -> bool:
+async def clear_cached_client(cache_key: str, record_failure: bool = True) -> bool:
     """
     Clear a cached MCP client by its cache key.
 
     Args:
         cache_key: Cache key in format "{profile_id}:{mcp_name}"
+        record_failure: When True (default), throttle the next reconnect via
+            back-off. Pass False for deliberate re-initialization (e.g. an
+            interactive OAuth re-login) where an immediate reconnect is wanted.
 
     Returns:
         True if a client was cleared, False if no client was cached
@@ -313,8 +332,9 @@ async def clear_cached_client(cache_key: str) -> bool:
 
     client = mcp_clients.pop(cache_key, None)
     if client:
-        # Record a failure so the next reconnect is throttled via back-off.
-        _record_failure(cache_key)
+        if record_failure:
+            # Record a failure so the next reconnect is throttled via back-off.
+            _record_failure(cache_key)
         try:
             await client.close()
             print(f"Cleared cached client '{cache_key}'")
@@ -322,6 +342,69 @@ async def clear_cached_client(cache_key: str) -> bool:
             print(f"Warning: Failed to close cached client '{cache_key}': {e}")
         return True
     return False
+
+
+# Marker substring of the ValueError raised by BaseSDKProvider when an
+# oauth_auto_discover profile has no cached token (see
+# llm_integration.BaseSDKProvider._resolve_mcp_bearer_token).
+_OAUTH_TOKEN_ERROR = "No usable cached OAuth token"
+
+
+def _chat_oauth_login_enabled() -> bool:
+    """Feature flag for interactive OAuth login during chat (default ON).
+
+    Disable with TESTMCPY_CHAT_OAUTH_LOGIN=false (or 0/no). Read at call time
+    so tests can monkeypatch the environment.
+    """
+    return os.environ.get("TESTMCPY_CHAT_OAUTH_LOGIN", "true").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+    )
+
+
+async def _relogin_oauth_servers(server_keys: list[str]) -> dict[str, MCPClient]:
+    """Deliberate interactive re-auth for the given "profileId:mcpName" keys.
+
+    Drops cached clients WITHOUT recording back-off, clears any pre-existing
+    back-off state, and re-initializes. MCPClient.initialize() with
+    oauth_auto_discover opens the browser OAuth flow and caches the token via
+    fastmcp FileTokenStorage; duplicate popups are prevented by the per-key
+    init locks.
+
+    Returns the fresh clients keyed by cache key so callers can replace any
+    references to the old, now-closed client objects.
+    """
+    new_clients: dict[str, MCPClient] = {}
+    for cache_key in server_keys:
+        await clear_cached_client(cache_key, record_failure=False)
+        _clear_failure(cache_key)  # earlier failures must not block deliberate re-auth
+        profile_id, mcp_name = cache_key.split(":", 1)
+        client = await get_mcp_client_for_server(profile_id, mcp_name)
+        if client:
+            new_clients[cache_key] = client
+    return new_clients
+
+
+def _refresh_client_refs(
+    new_clients: dict[str, MCPClient],
+    clients_to_use: list[tuple[str, str, MCPClient]],
+    tool_to_client: dict[str, tuple[MCPClient, str, str]],
+) -> tuple[list[tuple[str, str, MCPClient]], dict[str, tuple[MCPClient, str, str]]]:
+    """Swap re-logged-in clients into the chat endpoints' lookup structures.
+
+    After _relogin_oauth_servers the old client objects are closed; tool
+    execution through tool_to_client must use the replacements.
+    """
+    refreshed_clients = [
+        (pid, name, new_clients.get(f"{pid}:{name}", client))
+        for pid, name, client in clients_to_use
+    ]
+    refreshed_tools = {
+        tool: (new_clients.get(f"{pid}:{name}", client), pid, name)
+        for tool, (client, pid, name) in tool_to_client.items()
+    }
+    return refreshed_clients, refreshed_tools
 
 
 def is_auth_error(error_msg: str) -> bool:
@@ -936,9 +1019,25 @@ async def chat(request: ChatRequest) -> ChatResponse:
         provider_kwargs = {}
         if api_key:
             provider_kwargs["api_key"] = api_key
-        llm_provider = create_llm_provider(provider, model, **provider_kwargs)
+        provider_kwargs.update(_primary_mcp_provider_kwargs(clients_to_use))
         print("[Chat] Initializing LLM provider...")
-        await llm_provider.initialize()
+        try:
+            llm_provider = create_llm_provider(provider, model, **provider_kwargs)
+            await llm_provider.initialize()
+        except ValueError as e:
+            if not (_chat_oauth_login_enabled() and _OAUTH_TOKEN_ERROR in str(e)):
+                raise
+            print("[Chat] No cached OAuth token; triggering interactive OAuth login...")
+            new_clients = await _relogin_oauth_servers(accessed_servers)
+            # The old client objects are closed now — swap in the replacements
+            # so tool execution doesn't hit a closed client.
+            clients_to_use, tool_to_client = _refresh_client_refs(
+                new_clients, clients_to_use, tool_to_client
+            )
+            provider_kwargs.update(_primary_mcp_provider_kwargs(clients_to_use))
+            llm_provider = create_llm_provider(provider, model, **provider_kwargs)
+            # Single retry; a second failure falls to the existing handlers.
+            await llm_provider.initialize()
         print(
             f"[Chat] LLM provider initialized. Generating response with {len(all_tools)} tools..."
         )
@@ -1209,8 +1308,24 @@ async def chat_stream(request: ChatRequest):
             provider_kwargs: dict = {}
             if api_key:
                 provider_kwargs["api_key"] = api_key
-            llm_provider = create_llm_provider(provider, model, **provider_kwargs)
-            await llm_provider.initialize()
+            provider_kwargs.update(_primary_mcp_provider_kwargs(clients_to_use))
+            try:
+                llm_provider = create_llm_provider(provider, model, **provider_kwargs)
+                await llm_provider.initialize()
+            except ValueError as e:
+                if not (_chat_oauth_login_enabled() and _OAUTH_TOKEN_ERROR in str(e)):
+                    raise
+                yield send_event("status", "Waiting for OAuth login in browser...")
+                new_clients = await _relogin_oauth_servers(accessed_servers)
+                # The old client objects are closed now — swap in the replacements
+                # so tool execution doesn't hit a closed client.
+                clients_to_use, tool_to_client = _refresh_client_refs(
+                    new_clients, clients_to_use, tool_to_client
+                )
+                provider_kwargs.update(_primary_mcp_provider_kwargs(clients_to_use))
+                llm_provider = create_llm_provider(provider, model, **provider_kwargs)
+                # Single retry; a second failure falls to the existing handlers.
+                await llm_provider.initialize()
 
             # --- Detect if provider is SDK-based (handles its own agentic loop) ---
             from testmcpy.src.llm_integration import ClaudeSDKProvider

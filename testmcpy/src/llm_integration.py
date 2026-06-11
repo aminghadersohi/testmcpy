@@ -930,6 +930,7 @@ class AnthropicProvider(LLMProvider):
         api_key: str | None = None,
         base_url: str = "https://api.anthropic.com",
         mcp_url: str | None = None,
+        auth: dict[str, Any] | None = None,
     ):
         self.model = model
         # Use config system for API key
@@ -940,11 +941,10 @@ class AnthropicProvider(LLMProvider):
         # Use MCP_URL and auth from default profile if not provided
         if mcp_url is None:
             mcp_url = config.get_mcp_url()
-        # Get auth from default MCP server
-        auth = None
-        default_mcp = config.get_default_mcp_server()
-        if default_mcp and default_mcp.auth:
-            auth = default_mcp.auth.to_dict()
+        if auth is None:
+            default_mcp = config.get_default_mcp_server()
+            if default_mcp and default_mcp.auth:
+                auth = default_mcp.auth.to_dict()
         self.tool_discovery = ToolDiscoveryService(mcp_url, auth=auth)
 
     async def initialize(self):

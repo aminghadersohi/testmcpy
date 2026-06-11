@@ -1113,3 +1113,94 @@ class TestHeartbeatReconciliation:
         storage.finish_run("run-done", status="completed")
         assert storage.mark_stale_runs_interrupted() == 0
         assert self._status(storage, "run-done")["status"] == "completed"
+
+
+# ---------------------------------------------------------------------------
+# Schema auto-migration (metadata-driven)
+# ---------------------------------------------------------------------------
+
+
+class TestColumnAutoMigration:
+    """Old DB files must be migrated to the current model schema on open.
+
+    Regression: the previous hand-maintained migration list drifted from the
+    models (manual_false_positive was missing), so GET /api/results/run/{id}
+    500'd with "no such column: question_results.manual_false_positive" on
+    DBs created before that column existed.
+    """
+
+    OLD_QUESTION_RESULTS_DDL = """
+        CREATE TABLE question_results (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id VARCHAR NOT NULL,
+            question_id VARCHAR NOT NULL,
+            answer TEXT,
+            tool_uses JSON,
+            tool_results JSON,
+            tokens_input INTEGER DEFAULT 0,
+            tokens_output INTEGER DEFAULT 0,
+            tti_ms FLOAT,
+            duration_ms FLOAT DEFAULT 0.0,
+            evaluations JSON,
+            score FLOAT DEFAULT 0.0,
+            passed BOOLEAN DEFAULT 0,
+            error TEXT,
+            cost_usd FLOAT DEFAULT 0.0,
+            created_at VARCHAR NOT NULL
+        )
+    """
+
+    def _make_old_db(self, tmp_path):
+        """Create a DB whose question_results predates several columns."""
+        db_path = tmp_path / "old_storage.db"
+        con = sqlite3.connect(db_path)
+        con.execute(self.OLD_QUESTION_RESULTS_DDL)
+        con.execute(
+            "INSERT INTO question_results (run_id, question_id, answer, created_at)"
+            " VALUES ('r1', 'q1', 'a1', '2026-01-01T00:00:00')"
+        )
+        con.commit()
+        con.close()
+        return db_path
+
+    def test_missing_model_columns_added_on_open(self, tmp_path):
+        db_path = self._make_old_db(tmp_path)
+        TestStorage(db_path=db_path)
+        con = sqlite3.connect(db_path)
+        cols = {r[1] for r in con.execute("PRAGMA table_info(question_results)")}
+        con.close()
+        # Every column on the ORM model must now exist in the live table.
+        from testmcpy.models import QuestionResultModel
+
+        model_cols = {c.name for c in QuestionResultModel.__table__.columns}
+        assert model_cols <= cols
+
+    def test_orm_select_works_after_migration(self, tmp_path):
+        db_path = self._make_old_db(tmp_path)
+        storage = TestStorage(db_path=db_path)
+        # This SELECTs all mapped columns — exactly what get_run() does and
+        # what previously raised OperationalError on old DBs.
+        from testmcpy.models import QuestionResultModel
+
+        with storage._SessionLocal() as session:
+            rows = session.query(QuestionResultModel).filter_by(run_id="r1").all()
+        assert len(rows) == 1
+        assert rows[0].manual_false_positive in (False, 0)
+
+    def test_scalar_defaults_backfill_existing_rows(self, tmp_path):
+        db_path = self._make_old_db(tmp_path)
+        TestStorage(db_path=db_path)
+        con = sqlite3.connect(db_path)
+        row = con.execute(
+            "SELECT manual_false_positive, false_positive_rate FROM question_results"
+        ).fetchone()
+        con.close()
+        # SQLite applies the DDL DEFAULT to pre-existing rows on ADD COLUMN.
+        assert row[0] == 0
+        assert row[1] == 0.0
+
+    def test_migration_idempotent(self, tmp_path):
+        db_path = self._make_old_db(tmp_path)
+        TestStorage(db_path=db_path)
+        # Re-opening must not fail on already-added columns.
+        TestStorage(db_path=db_path)

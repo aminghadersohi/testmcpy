@@ -31,6 +31,20 @@
 - **Prevent regressions**: Catch breaking changes in your MCP service with CI/CD
 - **Optimize costs**: Track token usage and identify the most cost-effective models
 
+### How it compares
+
+| | testmcpy | [MCP Inspector](https://github.com/modelcontextprotocol/inspector) | [MCPJam](https://github.com/MCPJam/inspector) | [promptfoo](https://github.com/promptfoo/promptfoo) |
+|---|---|---|---|---|
+| Automated LLM-driven evals of MCP servers | ✅ YAML suites, 40+ evaluators | ❌ manual testing | ✅ | ⚠️ generic LLM eval with an MCP provider |
+| Multi-provider (Claude / GPT / Gemini / Ollama / Bedrock…) | ✅ 11 providers incl. agent SDKs | n/a | ✅ | ✅ |
+| CI gate with exit codes + JUnit | ✅ `--gate`, `--junit-xml` | ❌ | ✅ | ✅ |
+| Cost & token tracking per test/model | ✅ | ❌ | ⚠️ | ⚠️ |
+| Multi-turn, mutation & metamorphic testing | ✅ | ❌ | ❌ | ⚠️ |
+| Auth testing (JWT/OAuth/mTLS) + debugger | ✅ 7 auth types | ⚠️ OAuth only | ✅ OAuth debugger | ❌ |
+| Python-native (`pip`/`uvx`, pytest-friendly) | ✅ | ❌ npm | ❌ npm | ❌ npm |
+
+Use MCP Inspector for quick manual poking; reach for testmcpy when you want repeatable, scored, CI-gated evaluation of how real models use your server.
+
 ## Quick Start
 
 ```bash
@@ -454,17 +468,42 @@ openai:
       default: true
 ```
 
-## CI/CD Integration
+## CI in 60 Seconds
 
-testmcpy ships as a GitHub Action:
+Gate your MCP service on eval results in any CI system — no wrapper required:
 
 ```yaml
-- uses: preset-io/testmcpy@v1
-  with:
-    test-path: tests/
-    model: claude-haiku-4-5
-    mcp-profile: prod
+# .github/workflows/mcp-tests.yml
+jobs:
+  mcp-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Run MCP eval suite
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          uvx testmcpy run tests/ \
+            --mcp-url "$MCP_URL" \
+            --gate --min-pass-rate 85 \
+            --junit-xml junit.xml
 ```
+
+- **`--gate`** exits non-zero when the run fails your thresholds, so the build fails. Tune thresholds in `.testmcpy-gate.yaml`:
+
+  ```yaml
+  min_pass_rate: 85.0       # % of tests that must pass
+  max_failures: 3           # absolute failure budget
+  required_tests:           # these must always pass
+    - critical_auth_flow
+  block_on_regression: true # fail on baseline regressions
+  ```
+
+- **`--junit-xml`** emits JUnit XML for your CI's native test summary UI (GitHub, Jenkins, GitLab, CircleCI).
+- Inside GitHub Actions, the markdown eval report is **automatically appended to the job summary** — results render on the workflow run page with zero extra steps.
+
+A first-class reusable GitHub Action (`preset-io/testmcpy-action`) with PR comments and badge output is on the roadmap.
 
 ## Custom Evaluators
 

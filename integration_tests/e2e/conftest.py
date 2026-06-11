@@ -1,3 +1,4 @@
+import importlib.util
 import os
 import subprocess
 import time
@@ -5,6 +6,13 @@ from pathlib import Path
 
 import httpx
 import pytest
+
+# E2E modules import playwright at module level, which breaks pytest
+# COLLECTION (not just execution) in environments without it — e.g. CI,
+# which runs `-m "not e2e"` and doesn't install playwright. Skip collecting
+# this directory entirely when playwright isn't available.
+if importlib.util.find_spec("playwright") is None:
+    collect_ignore_glob = ["test_*.py"]
 
 
 @pytest.fixture(scope="session")

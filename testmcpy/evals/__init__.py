@@ -2,7 +2,10 @@
 
 from testmcpy.evals.auth_evaluators import (
     AuthErrorHandlingEvaluator,
+    AuthRejectsInvalidTokenEvaluator,
+    AuthRejectsMissingTokenEvaluator,
     AuthSuccessfulEvaluator,
+    AuthTokenNotEchoedEvaluator,
     JWTClaimsValidEvaluator,
     OAuth2FlowEvaluator,
     TokenValidEvaluator,
@@ -33,6 +36,7 @@ from testmcpy.evals.evaluator_packs import (
     resolve_evaluator_pack,
     resolve_evaluators,
 )
+from testmcpy.evals.security_evaluators import NoInjectionEcho
 
 # Backward compatibility alias
 WasSupersetChartCreated = WasChartCreated
@@ -57,12 +61,17 @@ __all__ = [
     "SQLQueryValid",
     "CompositeEvaluator",
     "create_evaluator",
+    # Security evaluators
+    "NoInjectionEcho",
     # Auth evaluators
     "AuthSuccessfulEvaluator",
     "TokenValidEvaluator",
     "OAuth2FlowEvaluator",
     "AuthErrorHandlingEvaluator",
     "JWTClaimsValidEvaluator",
+    "AuthRejectsMissingTokenEvaluator",
+    "AuthRejectsInvalidTokenEvaluator",
+    "AuthTokenNotEchoedEvaluator",
     # Evaluator packs
     "resolve_evaluator_pack",
     "resolve_evaluators",

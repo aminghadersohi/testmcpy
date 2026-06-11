@@ -40,6 +40,33 @@ BUILTIN_PACKS: dict[str, dict[str, Any]] = {
             {"name": "no_hallucination"},
         ],
     },
+    "security": {
+        "version": "1.0",
+        "description": (
+            "Active security probes: prompt-injection canary echo "
+            "(default canary ZX-CANARY-1138), leaked data, internal error disclosure"
+        ),
+        "evaluators": [
+            {"name": "no_injection_echo"},
+            {"name": "no_leaked_data"},
+            {
+                "name": "response_not_includes",
+                "args": {"content": ["Traceback", "stack trace", "Internal Server Error"]},
+            },
+        ],
+    },
+    "auth-security": {
+        "version": "1.0",
+        "description": (
+            "Auth enforcement assertions: endpoint rejects missing/invalid tokens, "
+            "auth token is never echoed in output"
+        ),
+        "evaluators": [
+            {"name": "auth_rejects_missing_token"},
+            {"name": "auth_rejects_invalid_token"},
+            {"name": "auth_token_not_echoed"},
+        ],
+    },
     "chart-creation": {
         "version": "1.0",
         "description": "Chart creation validation",

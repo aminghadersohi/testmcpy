@@ -2785,15 +2785,19 @@ def create_evaluator(name: str, **kwargs) -> BaseEvaluator:
     Raises:
         ValueError: If evaluator name is unknown
     """
-    # Import auth evaluators here to avoid circular imports
+    # Import auth/security evaluators here to avoid circular imports
     from testmcpy.evals.auth_evaluators import (
         AuthErrorHandlingEvaluator,
+        AuthRejectsInvalidTokenEvaluator,
+        AuthRejectsMissingTokenEvaluator,
         AuthSuccessfulEvaluator,
+        AuthTokenNotEchoedEvaluator,
         JWTClaimsValidEvaluator,
         OAuth2FlowEvaluator,
         OAuthDiscoveryEvaluator,
         TokenValidEvaluator,
     )
+    from testmcpy.evals.security_evaluators import NoInjectionEcho
 
     evaluators = {
         # Basic evaluators
@@ -2822,6 +2826,11 @@ def create_evaluator(name: str, **kwargs) -> BaseEvaluator:
         "response_matches_pattern": ResponseMatchesPattern,
         "url_is_valid": UrlIsValid,
         "no_leaked_data": NoLeakedData,
+        "no_injection_echo": NoInjectionEcho,
+        # Auth enforcement probes
+        "auth_rejects_missing_token": AuthRejectsMissingTokenEvaluator,
+        "auth_rejects_invalid_token": AuthRejectsInvalidTokenEvaluator,
+        "auth_token_not_echoed": AuthTokenNotEchoedEvaluator,
         # Auth evaluators
         "auth_successful": AuthSuccessfulEvaluator,
         "token_valid": TokenValidEvaluator,

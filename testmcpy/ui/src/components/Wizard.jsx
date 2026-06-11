@@ -82,8 +82,8 @@ function Wizard({ steps, onComplete, onCancel, title, data, setData }) {
   }
 
   return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-0 md:p-4">
-      <div className="bg-surface-elevated border border-border rounded-none md:rounded-xl w-full h-full md:h-auto md:max-w-3xl md:max-h-[85vh] flex flex-col shadow-xl">
+    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-0 sm:p-4">
+      <div className="bg-surface-elevated border border-border rounded-none sm:rounded-xl w-full h-full sm:h-auto sm:max-h-[90vh] md:max-h-[85vh] sm:max-w-xl md:max-w-2xl lg:max-w-3xl flex flex-col shadow-xl">
         {/* Header */}
         <div className="px-6 py-4 border-b border-border flex-shrink-0">
           <h2 className="text-lg font-bold text-text-primary">{title}</h2>

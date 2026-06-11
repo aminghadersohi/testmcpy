@@ -79,11 +79,11 @@ function ProfileEditorModal({ profile, onSave, onCancel }) {
               />
             </div>
           </div>
-          <div className="flex justify-end gap-3 mt-6">
-            <button type="button" onClick={onCancel} className="btn btn-secondary">
+          <div className="flex flex-col-reverse sm:flex-row sm:justify-end gap-3 mt-6">
+            <button type="button" onClick={onCancel} className="btn btn-secondary w-full sm:w-auto">
               Cancel
             </button>
-            <button type="submit" className="btn btn-primary">
+            <button type="submit" className="btn btn-primary w-full sm:w-auto">
               <Save size={16} />
               Save
             </button>
@@ -450,11 +450,11 @@ function MCPEditorModal({ mcp, onSave, onCancel }) {
             </div>
           </div>
 
-          <div className="flex justify-end gap-3 mt-6 pt-4 border-t border-border">
-            <button type="button" onClick={onCancel} className="btn btn-secondary">
+          <div className="flex flex-col-reverse sm:flex-row sm:justify-end gap-3 mt-6 pt-4 border-t border-border">
+            <button type="button" onClick={onCancel} className="btn btn-secondary w-full sm:w-auto">
               Cancel
             </button>
-            <button type="submit" className="btn btn-primary">
+            <button type="submit" className="btn btn-primary w-full sm:w-auto">
               <Save size={16} />
               Save MCP
             </button>
@@ -583,7 +583,7 @@ function MCPWizard({ profiles, onComplete, onCancel }) {
           </div>
           <div>
             <label className="block text-sm font-medium mb-1">Transport Type</label>
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               {[
                 { value: 'sse', label: 'HTTP / SSE', desc: 'Remote server over HTTP with SSE streaming' },
                 { value: 'stdio', label: 'Stdio', desc: 'Local subprocess via stdin/stdout JSON-RPC' },
@@ -657,7 +657,7 @@ function MCPWizard({ profiles, onComplete, onCancel }) {
               />
             </div>
           )}
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div>
               <label className="block text-sm font-medium mb-1">Timeout (seconds)</label>
               <input

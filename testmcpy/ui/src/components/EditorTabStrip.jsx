@@ -19,7 +19,7 @@ export default function EditorTabStrip({
   return (
     <div className="flex-shrink-0 flex items-stretch border-b border-border bg-surface">
       <div
-        className="group relative flex items-center gap-2 px-3 h-9 bg-surface-elevated border-r border-border max-w-md"
+        className="group relative flex items-center gap-2 px-3 h-9 bg-surface-elevated border-r border-border max-w-md min-w-0"
         title={pathSubtitle || filename}
       >
         {/* Active-tab underline */}
@@ -45,10 +45,11 @@ export default function EditorTabStrip({
               e.stopPropagation()
               onClose()
             }}
-            // Hidden by default (cosmetic) but always discoverable via keyboard
-            // — group-focus-within reveals when the tab itself is focused, and
+            // Always visible below md (touch devices have no hover); hidden
+            // by default on desktop but discoverable via keyboard —
+            // group-focus-within reveals when the tab itself is focused, and
             // focus:opacity-100 keeps it visible while the close button has focus.
-            className="p-0.5 rounded text-text-disabled opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus:opacity-100 hover:text-text-primary hover:bg-surface-hover transition"
+            className="p-0.5 rounded text-text-disabled opacity-100 md:opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus:opacity-100 hover:text-text-primary hover:bg-surface-hover transition"
             title="Close file"
             aria-label="Close file"
           >

@@ -67,7 +67,12 @@ function Sparkline({ trend }) {
 function MatrixCell({ cell, onClick }) {
   if (!cell) {
     return (
-      <td className="px-2 py-2 text-center text-text-disabled border-b border-border">—</td>
+      <td
+        className="px-2 py-2 text-center text-text-disabled border-b border-border min-w-[88px]"
+        title="No runs for this test under this config"
+      >
+        —
+      </td>
     )
   }
 
@@ -84,7 +89,7 @@ function MatrixCell({ cell, onClick }) {
     : `${formatPct(cell.pass_rate)} over ${cell.n} results · avg score ${cell.avg_score} · ${formatDurationMs(cell.avg_duration_ms)} · ${formatCost(cell.avg_cost)}`
 
   return (
-    <td className="px-1 py-1 border-b border-border">
+    <td className="px-1 py-1 border-b border-border min-w-[88px]">
       <button
         onClick={onClick}
         title={title}
@@ -133,7 +138,7 @@ function DrillPanel({ drill, suite, onClose }) {
   }, [drill, suite])
 
   return (
-    <div className="w-full md:w-96 flex-shrink-0 border-t md:border-t-0 md:border-l border-border bg-surface-elevated overflow-auto">
+    <div className="fixed inset-0 z-40 md:static md:z-auto md:inset-auto w-full md:w-96 flex-shrink-0 md:border-l border-border bg-surface-elevated overflow-auto">
       <div className="sticky top-0 bg-surface-elevated border-b border-border px-4 py-3 flex items-start justify-between gap-2 z-10">
         <div className="min-w-0">
           <h3 className="text-sm font-semibold text-text-primary truncate" title={drill.questionId}>
@@ -464,13 +469,13 @@ function Performance() {
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="border-b border-border">
-                      <th className="px-3 py-2 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide sticky left-0 bg-surface-elevated">
+                      <th className="px-3 py-2 text-left text-xs font-semibold text-text-secondary uppercase tracking-wide sticky left-0 z-[1] bg-surface-elevated">
                         Test
                       </th>
                       {configs.map(cfg => (
                         <th
                           key={cfg.key}
-                          className="px-2 py-2 text-center text-xs font-semibold text-text-secondary max-w-[140px]"
+                          className="px-2 py-2 text-center text-xs font-semibold text-text-secondary min-w-[88px] max-w-[140px]"
                           title={cfg.key}
                         >
                           <div className="truncate">{cfg.key}</div>
@@ -482,7 +487,7 @@ function Performance() {
                     {rows.map(row => (
                       <tr key={row.question_id} className="hover:bg-surface-hover/40">
                         <td
-                          className="px-3 py-2 text-xs font-mono text-text-primary border-b border-border sticky left-0 bg-surface-elevated max-w-[220px] truncate"
+                          className="px-3 py-2 text-xs font-mono text-text-primary border-b border-border sticky left-0 z-[1] bg-surface-elevated max-w-[140px] md:max-w-[220px] truncate"
                           title={row.question_id}
                         >
                           {row.question_id}
@@ -499,7 +504,7 @@ function Performance() {
                   </tbody>
                   <tfoot>
                     <tr className="bg-surface">
-                      <td className="px-3 py-2 text-xs font-semibold text-text-secondary sticky left-0 bg-surface">
+                      <td className="px-3 py-2 text-xs font-semibold text-text-secondary sticky left-0 z-[1] bg-surface">
                         All tests
                       </td>
                       {configs.map(cfg => (

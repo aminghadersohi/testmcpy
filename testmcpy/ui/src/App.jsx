@@ -439,7 +439,7 @@ function AppContent() {
                   setSidebarOpen(!sidebarOpen)
                 }
               }}
-              className="p-1.5 hover:bg-surface-hover rounded-lg transition-all duration-200 text-text-tertiary hover:text-text-primary"
+              className="min-w-[44px] min-h-[44px] -m-2.5 flex items-center justify-center hover:bg-surface-hover rounded-lg transition-all duration-200 text-text-tertiary hover:text-text-primary"
               aria-label="Toggle sidebar"
             >
               {showLabels ? <X size={16} /> : <Menu size={18} />}
@@ -581,7 +581,7 @@ function AppContent() {
           <div className="md:hidden flex items-center justify-between px-4 py-2.5 border-b border-border bg-surface-elevated">
             <button
               onClick={() => setMobileMenuOpen(true)}
-              className="p-1.5 hover:bg-surface-hover rounded-lg transition-all duration-200 text-text-secondary hover:text-text-primary"
+              className="min-w-[44px] min-h-[44px] -ml-2.5 flex items-center justify-center hover:bg-surface-hover rounded-lg transition-all duration-200 text-text-secondary hover:text-text-primary"
               aria-label="Open menu"
             >
               <Menu size={20} />

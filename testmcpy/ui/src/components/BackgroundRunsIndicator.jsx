@@ -81,7 +81,7 @@ export default function BackgroundRunsIndicator({ showLabels = true }) {
         )}
       </button>
       {open && (
-        <div className="absolute z-50 left-2 right-2 mt-1 max-w-[28rem] min-w-[20rem] rounded-lg border border-border bg-surface-elevated shadow-lg overflow-hidden">
+        <div className="absolute z-50 left-2 right-2 mt-1 max-w-[28rem] sm:min-w-[20rem] rounded-lg border border-border bg-surface-elevated shadow-lg overflow-hidden">
           <div className="px-3 py-2 border-b border-border text-[11px] font-semibold uppercase tracking-wider text-text-tertiary flex items-center gap-2">
             <Activity size={12} />
             <span>In-flight runs</span>

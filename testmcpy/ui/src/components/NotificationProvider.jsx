@@ -93,7 +93,7 @@ export function NotificationProvider({ children }) {
       {children}
       {/* Toast container - bottom right */}
       {toasts.length > 0 && (
-        <div className="fixed bottom-4 right-4 z-50 flex flex-col gap-2">
+        <div className="fixed bottom-2 left-2 right-2 sm:left-auto sm:bottom-4 sm:right-4 z-50 flex flex-col gap-2">
           {toasts.map(toast => (
             <Toast key={toast.id} toast={toast} onDismiss={dismiss} />
           ))}

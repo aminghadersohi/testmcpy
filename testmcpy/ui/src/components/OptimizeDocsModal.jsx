@@ -205,8 +205,8 @@ function OptimizeDocsModal({ tool, onClose }) {
   }
 
   return (
-    <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-0 md:p-4">
-      <div className="bg-surface border border-border rounded-none md:rounded-xl shadow-strong md:max-w-5xl w-full h-full md:h-auto max-h-full md:max-h-[90vh] overflow-hidden flex flex-col">
+    <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-0 sm:p-4">
+      <div className="bg-surface border border-border rounded-none sm:rounded-xl shadow-strong sm:max-w-xl md:max-w-3xl lg:max-w-5xl w-full h-full sm:h-auto max-h-full sm:max-h-[90vh] overflow-hidden flex flex-col">
         {/* Header */}
         <div className="p-4 md:p-6 border-b border-border flex items-center justify-between">
           <div className="flex items-center gap-3">

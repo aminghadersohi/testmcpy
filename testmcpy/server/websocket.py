@@ -21,6 +21,11 @@ from testmcpy.src.llm_integration import create_llm_provider
 from testmcpy.src.mcp_client import MCPClient, MCPToolCall
 from testmcpy.src.test_runner import TestCase, TestRunner
 
+# How often a live run stamps its DB row's heartbeat_at. Must be much
+# smaller than storage.mark_stale_runs_interrupted's cutoff (minutes) so
+# a few missed beats never get a live run marked interrupted.
+HEARTBEAT_INTERVAL_S = 30
+
 
 def strip_mcp_prefix(tool_name: str) -> str:
     """Strip MCP namespace prefix from tool name.
@@ -880,7 +885,29 @@ async def handle_test_websocket(websocket: WebSocket):
         """Wrap ``command_coro`` so the registry status is finalized when
         it ends regardless of exit path."""
 
+        async def _heartbeat() -> None:
+            # Stamp the current DB row every ~30s so crash reconciliation
+            # (storage.mark_stale_runs_interrupted) can tell a live run
+            # from a dead one. db_run_id is None until RunRecord.begin()
+            # and swaps per file during a directory batch.
+            from sqlalchemy.exc import SQLAlchemyError
+
+            from testmcpy.storage import get_storage
+
+            while True:
+                await asyncio.sleep(HEARTBEAT_INTERVAL_S)
+                db_run_id = handle.db_run_id
+                if db_run_id is None:
+                    continue
+                try:
+                    get_storage().touch_run_heartbeat(db_run_id)
+                except SQLAlchemyError:
+                    # Missing a beat is harmless — the reconcile cutoff
+                    # (minutes) tolerates several failures in a row.
+                    pass
+
         async def _run() -> None:
+            heartbeat_task = asyncio.create_task(_heartbeat())
             try:
                 await command_coro(handle, data, config)
                 await run_registry.finalize(
@@ -906,6 +933,10 @@ async def handle_test_websocket(websocket: WebSocket):
             except Exception:
                 await run_registry.finalize(handle.run_id, status="error", summary=handle.summary)
                 raise
+            finally:
+                heartbeat_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await heartbeat_task
 
         handle.task = asyncio.create_task(_run())
 

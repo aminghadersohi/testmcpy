@@ -18,7 +18,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import create_engine, func, text
+from sqlalchemy import and_, create_engine, func, or_, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from testmcpy.models import (
@@ -151,6 +151,7 @@ class TestStorage:
             ("question_results", "tool_call_counts", "JSON"),
             ("question_results", "false_positive_rate", "FLOAT DEFAULT 0.0"),
             ("test_runs", "total_cost", "FLOAT DEFAULT 0.0"),
+            ("test_runs", "heartbeat_at", "VARCHAR"),
         ]
         # (index name, table, columns) — indexes added after the initial
         # schema; create_all skips existing tables so these need explicit DDL
@@ -182,23 +183,70 @@ class TestStorage:
                 )
             conn.commit()
 
-    def mark_stale_runs_interrupted(self, older_than_hours: float = 1.0) -> int:
-        """Mark long-stuck 'running' rows as interrupted (server startup).
+    def mark_stale_runs_interrupted(
+        self,
+        heartbeat_older_than_minutes: float = 3.0,
+        no_heartbeat_older_than_hours: float | None = 1.0,
+    ) -> int:
+        """Mark dead 'running' rows as interrupted.
 
-        The in-memory run registry dies with the process; without this,
-        crashed runs stay 'running' forever and pollute every listing.
+        Live runs touch ``heartbeat_at`` every ~30s (see the websocket
+        runner), so a heartbeat older than ``heartbeat_older_than_minutes``
+        means the owning process died — this is safe even when several
+        servers share one Postgres DB, because another server's live run
+        always has a fresh heartbeat. Rows with NO heartbeat (written by
+        pre-heartbeat versions, or by the CLI's instant save-and-complete
+        path) fall back to the legacy started_at age check; pass
+        ``no_heartbeat_older_than_hours=None`` to skip that check — the
+        periodic sweeper does, because started_at timestamps written by
+        older versions are local-naive and can't be compared reliably
+        against a UTC cutoff.
+
         Returns the number of rows updated.
         """
-        cutoff = (datetime.now(timezone.utc) - timedelta(hours=older_than_hours)).isoformat()
+        now = datetime.now(timezone.utc)
+        hb_cutoff = (now - timedelta(minutes=heartbeat_older_than_minutes)).isoformat()
         with self._session() as session:
+            stale = or_(
+                and_(
+                    TestRunModel.heartbeat_at.isnot(None),
+                    TestRunModel.heartbeat_at < hb_cutoff,
+                ),
+                *(
+                    [
+                        and_(
+                            TestRunModel.heartbeat_at.is_(None),
+                            TestRunModel.started_at
+                            < (now - timedelta(hours=no_heartbeat_older_than_hours)).isoformat(),
+                        )
+                    ]
+                    if no_heartbeat_older_than_hours is not None
+                    else []
+                ),
+            )
             updated = (
                 session.query(TestRunModel)
                 .filter(TestRunModel.status == "running")
-                .filter(TestRunModel.started_at < cutoff)
-                .update({TestRunModel.status: "interrupted"}, synchronize_session=False)
+                .filter(stale)
+                .update(
+                    {
+                        TestRunModel.status: "interrupted",
+                        TestRunModel.completed_at: now.isoformat(),
+                    },
+                    synchronize_session=False,
+                )
             )
             session.commit()
             return updated
+
+    def touch_run_heartbeat(self, run_id: str) -> None:
+        """Stamp ``heartbeat_at`` = now (UTC ISO) on a live run row."""
+        with self._session() as session:
+            session.query(TestRunModel).filter_by(run_id=run_id).update(
+                {TestRunModel.heartbeat_at: datetime.now(timezone.utc).isoformat()},
+                synchronize_session=False,
+            )
+            session.commit()
 
     def _session(self) -> Session:
         return self._SessionLocal()

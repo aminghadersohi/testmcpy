@@ -16,6 +16,7 @@ from testmcpy.cli.commands import (
     mutate,  # noqa: F401
     push,  # noqa: F401
     run,  # noqa: F401
+    score,  # noqa: F401
     server,  # noqa: F401
     tools,  # noqa: F401
     tui,  # noqa: F401

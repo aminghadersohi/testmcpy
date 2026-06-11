@@ -90,11 +90,22 @@ export default function BackgroundRunsIndicator({ showLabels = true }) {
             {runs.map(run => {
               const label = describeRun(run)
               const isStopping = stoppingIds.has(run.run_id)
+              const isQueued = run.status === 'queued'
               return (
                 <div key={run.run_id} className="px-3 py-2 flex items-center gap-3">
                   <div className="flex-1 min-w-0">
-                    <div className="text-xs font-medium text-text-primary truncate" title={label}>
-                      {label}
+                    <div className="text-xs font-medium text-text-primary truncate flex items-center gap-1.5" title={label}>
+                      {isQueued ? (
+                        <span
+                          className="px-1.5 py-px rounded text-[9px] font-semibold uppercase tracking-wide bg-warning/15 text-warning border border-warning/30 flex-shrink-0"
+                          title="Waiting for a free run slot (TESTMCPY_MAX_CONCURRENT_RUNS)"
+                        >
+                          queued
+                        </span>
+                      ) : (
+                        <Loader2 size={10} className="animate-spin text-warning flex-shrink-0" />
+                      )}
+                      <span className="truncate">{label}</span>
                     </div>
                     <div className="text-[10px] text-text-tertiary font-mono truncate">
                       {run.run_id} · {run.kind}

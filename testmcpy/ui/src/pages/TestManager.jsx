@@ -463,6 +463,8 @@ function TestManager({ selectedProfiles = [], selectedLlmProfile = null, llmProf
     setDirectoryRunProgress,
     currentRunId,
     stopping,
+    connectionState,
+    attachToRun,
   } = useTestRun()
 
   // Local UI state (doesn't need to persist)
@@ -2282,6 +2284,26 @@ tests:
                     total={runningTests.total}
                     status={runningTests.status}
                   />
+                </div>
+              )}
+
+              {/* Connection-health banner — the run survives server-side;
+                  this strip only reports the state of the streaming pipe. */}
+              {connectionState === 'reconnecting' && (
+                <div className="absolute top-2 left-1/2 -translate-x-1/2 z-20 flex items-center gap-2 px-3 py-1.5 rounded-lg border border-warning/30 bg-warning/10 text-warning text-xs shadow-lg">
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  <span>Connection lost — reconnecting to the run…</span>
+                </div>
+              )}
+              {connectionState === 'disconnected' && (
+                <div className="absolute top-2 left-1/2 -translate-x-1/2 z-20 flex items-center gap-2 px-3 py-1.5 rounded-lg border border-error/30 bg-error/10 text-error text-xs shadow-lg">
+                  <span>Disconnected — the run may still be going on the server.</span>
+                  <button
+                    onClick={() => attachToRun(currentRunId)}
+                    className="px-2 py-0.5 rounded bg-error/20 hover:bg-error/30 font-medium transition-colors"
+                  >
+                    Reattach
+                  </button>
                 </div>
               )}
 

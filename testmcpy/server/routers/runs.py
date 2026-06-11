@@ -11,8 +11,11 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
+from sqlalchemy.exc import SQLAlchemyError
 
 from testmcpy.server import run_registry
+from testmcpy.server.run_persistence import wire_status_for_db_status
+from testmcpy.storage import get_storage
 
 router = APIRouter(prefix="/api", tags=["runs"])
 
@@ -65,9 +68,40 @@ async def list_runs(active_only: bool = True) -> dict[str, Any]:
 @router.get("/runs/{run_id}")
 async def get_run(run_id: str) -> dict[str, Any]:
     handle = await run_registry.get_run(run_id)
-    if handle is None:
+    if handle is not None:
+        return _serialise(handle)
+    # Registry miss (GC'd after CLEANUP_TTL, or a server restart) — fall
+    # back to the results DB so a stale tab asking about its run gets the
+    # final state instead of a 404. ``source: history`` tells the client
+    # this is a finished record, not a live handle. A DB hiccup is treated
+    # as a miss (matching the WS twin, _attach_history_run) rather than
+    # surfacing a 500 to the indicator's poll loop.
+    try:
+        record = get_storage().get_run(run_id)
+    except SQLAlchemyError:
+        record = None
+    if record is None:
         raise HTTPException(status_code=404, detail=f"Run not found: {run_id}")
-    return _serialise(handle)
+    status = wire_status_for_db_status(record.get("status"))
+    return {
+        "run_id": run_id,
+        # Only single-run ids ever land a DB row today — directory-batch
+        # ids persist per-file under fresh ids (see _attach_history_run),
+        # so anything resolvable here is a single run by construction.
+        "kind": "single",
+        "status": status,
+        "started_at": record.get("started_at"),
+        "finished_at": record.get("completed_at"),
+        "meta": {
+            "test_path": record.get("test_id"),
+            "model": record.get("model"),
+            "provider": record.get("provider"),
+        },
+        "summary": record.get("summary"),
+        "result_count": len(record.get("question_results") or []),
+        "is_attached": False,
+        "source": "history",
+    }
 
 
 @router.post("/runs/{run_id}/stop")

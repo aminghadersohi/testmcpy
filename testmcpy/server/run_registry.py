@@ -15,8 +15,11 @@ still pick up the final state, then GC'd lazily on the next ``create_run``.
 from __future__ import annotations
 
 import asyncio
+import os
 import uuid
 from collections import deque
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Literal
@@ -32,8 +35,14 @@ LOG_BUFFER_MAX = 20_000
 # attach and see the final state. After this, lazy GC discards it.
 CLEANUP_TTL = timedelta(minutes=30)
 
-RunStatus = Literal["running", "completed", "error", "stopped"]
+RunStatus = Literal["queued", "running", "completed", "error", "stopped"]
 RunKind = Literal["single", "directory"]
+
+# Concurrency cap for simultaneously EXECUTING runs. Excess runs queue
+# (status="queued") and start in FIFO-ish order as slots free up — an
+# unbounded number of concurrent LLM suites would melt rate limits and
+# make every run slower than running them back-to-back.
+DEFAULT_MAX_CONCURRENT_RUNS = 2
 
 
 def _mint_run_id() -> str:
@@ -64,11 +73,15 @@ class RunHandle:
     # so the UI can rebuild its results/progress panels without us having
     # to peek inside test_runner.
     structured_events: list[dict[str, Any]] = field(default_factory=list)
-    status: RunStatus = "running"
+    status: RunStatus = "queued"
     finished_at: datetime | None = None
     summary: dict[str, Any] | None = None
     results: list[dict[str, Any]] = field(default_factory=list)
     task: asyncio.Task | None = None
+    # run_id of the DB history row currently being written by this run's
+    # RunRecord — equal to ``run_id`` for single-file runs, but a fresh
+    # per-file id while a directory batch is executing.
+    db_run_id: str | None = None
     # Queue published to by send_log + send_structured. Replaced when a
     # new client attaches; ``None`` when no client is currently watching.
     attached_queue: asyncio.Queue | None = None
@@ -78,13 +91,56 @@ class RunHandle:
 
     @property
     def is_finished(self) -> bool:
-        return self.status != "running"
+        # queued and running both count as active — a queued run has a
+        # live task (parked on the slot semaphore) and must show up in
+        # list_active / survive GC.
+        return self.status in ("completed", "error", "stopped")
 
 
 # Module-level registry. Reads from a single uvicorn worker, so a plain
 # dict + asyncio.Lock is enough — no cross-process or threading concerns.
 _runs: dict[str, RunHandle] = {}
 _lock = asyncio.Lock()
+
+# Lazily-built so tests (and a future config reload) can reset it; the
+# env var is read once at first use.
+_slot_semaphore: asyncio.Semaphore | None = None
+
+
+def _get_slot_semaphore() -> asyncio.Semaphore:
+    global _slot_semaphore
+    if _slot_semaphore is None:
+        raw = os.environ.get("TESTMCPY_MAX_CONCURRENT_RUNS", "")
+        try:
+            limit = max(1, int(raw)) if raw else DEFAULT_MAX_CONCURRENT_RUNS
+        except ValueError:
+            limit = DEFAULT_MAX_CONCURRENT_RUNS
+        _slot_semaphore = asyncio.Semaphore(limit)
+    return _slot_semaphore
+
+
+def slots_available() -> bool:
+    """True when a new run would start executing immediately rather than
+    queue. Used by the websocket runner to log a 'waiting…' line."""
+    return not _get_slot_semaphore().locked()
+
+
+@asynccontextmanager
+async def acquire_slot(handle: RunHandle) -> AsyncIterator[None]:
+    """Hold a concurrency slot for the duration of a run.
+
+    The handle stays ``queued`` while parked on the semaphore and flips
+    to ``running`` on acquisition. Cancellation while waiting propagates
+    cleanly (no permit is leaked) — the caller's CancelledError path
+    finalizes the handle as ``stopped``.
+    """
+    sem = _get_slot_semaphore()
+    await sem.acquire()
+    handle.status = "running"
+    try:
+        yield
+    finally:
+        sem.release()
 
 
 def _gc_finished_unlocked(now: datetime | None = None) -> None:
@@ -243,8 +299,11 @@ def buffered_replay(handle: RunHandle) -> list[dict[str, Any]]:
 
 
 async def reset_for_tests() -> None:
-    """Test-only: clear the entire registry. Keeps unit tests
-    independent of one another even when they share the module-level
-    state."""
+    """Test-only: clear the entire registry and drop the slot semaphore
+    (so per-test TESTMCPY_MAX_CONCURRENT_RUNS overrides take effect).
+    Keeps unit tests independent of one another even when they share the
+    module-level state."""
+    global _slot_semaphore
     async with _lock:
         _runs.clear()
+    _slot_semaphore = None

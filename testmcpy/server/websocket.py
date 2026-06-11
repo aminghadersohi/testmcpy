@@ -14,11 +14,17 @@ from fastapi import WebSocket, WebSocketDisconnect
 
 from testmcpy.config import get_config
 from testmcpy.server import run_registry
+from testmcpy.server.run_persistence import RunRecord
 from testmcpy.server.run_registry import RunHandle
 from testmcpy.server.state import get_or_create_mcp_client
 from testmcpy.src.llm_integration import create_llm_provider
 from testmcpy.src.mcp_client import MCPClient, MCPToolCall
 from testmcpy.src.test_runner import TestCase, TestRunner
+
+# How often a live run stamps its DB row's heartbeat_at. Must be much
+# smaller than storage.mark_stale_runs_interrupted's cutoff (minutes) so
+# a few missed beats never get a live run marked interrupted.
+HEARTBEAT_INTERVAL_S = 30
 
 
 def strip_mcp_prefix(tool_name: str) -> str:
@@ -262,6 +268,29 @@ def _emit_run_error(
     _emit_event(handle, payload)
 
 
+def _display_test_file_name(test_path: Path) -> str:
+    """Relativize ``test_path`` for history grouping: relative to ./tests
+    when inside it, ``<extra-root-name>/<rel>`` for configured extra test
+    dirs, bare filename otherwise."""
+    from testmcpy.server.routers.tests import _extra_tests_dirs
+
+    test_file_name = test_path.name
+    tests_dir = Path.cwd() / "tests"
+    try:
+        resolved = test_path.resolve()
+        if resolved.is_relative_to(tests_dir.resolve()):
+            test_file_name = str(resolved.relative_to(tests_dir.resolve()))
+        else:
+            for extra_root in _extra_tests_dirs():
+                extra_real = extra_root.resolve()
+                if resolved.is_relative_to(extra_real):
+                    test_file_name = f"{extra_root.name}/{resolved.relative_to(extra_real)}"
+                    break
+    except OSError:
+        pass
+    return test_file_name
+
+
 async def _run_test_command(handle: RunHandle, data: dict, config) -> None:
     """Execute a single 'run_test' command tied to ``handle``.
 
@@ -283,6 +312,10 @@ async def _run_test_command(handle: RunHandle, data: dict, config) -> None:
         return
 
     _emit_log(handle, f"📁 Loading test file: {test_path}")
+
+    # Incremental history record — begun once the runner is ready, appended
+    # per test, finished on every exit path (crash-safe partial results).
+    record: RunRecord | None = None
 
     try:
         # Load test cases
@@ -437,6 +470,23 @@ async def _run_test_command(handle: RunHandle, data: dict, config) -> None:
         await runner.initialize()
         _emit_log(handle, "✅ Test runner ready")
 
+        # For single-file runs, reuse the registry's run_id so the live
+        # "Reattached to run …" banner and the /reports entry show the same
+        # id. Directory sub-calls mint a fresh per-file id — each YAML keeps
+        # its own /reports row.
+        record = RunRecord(
+            run_id=handle.run_id if not data.get("_in_batch") else None,
+            log=lambda msg: _emit_log(handle, msg),
+        )
+        record.begin(
+            test_file=_display_test_file_name(test_path),
+            model=effective_model,
+            provider=effective_provider,
+            mcp_profile=effective_profile,
+            llm_profile=llm_profile_id,
+        )
+        handle.db_run_id = record.run_id
+
         # Run each test one at a time
         all_results = []
         for i, tc in enumerate(test_cases):
@@ -476,17 +526,21 @@ async def _run_test_command(handle: RunHandle, data: dict, config) -> None:
             if result.error:
                 _emit_log(handle, f"⚠️ Error: {result.error}")
 
+            result_dict = result.to_dict()
             _emit_event(
                 handle,
                 {
                     "type": "test_complete",
                     "test_name": tc.name,
-                    "result": result.to_dict(),
+                    "result": result_dict,
                 },
             )
 
             all_results.append(result)
-            handle.results.append(result.to_dict())
+            handle.results.append(result_dict)
+            # Persist immediately — a crash mid-suite keeps every test
+            # completed so far.
+            record.append(result_dict)
 
         # Send final summary
         passed = sum(1 for r in all_results if r.passed)
@@ -507,48 +561,10 @@ async def _run_test_command(handle: RunHandle, data: dict, config) -> None:
         }
         handle.summary = summary
 
-        # Save results to history
-        try:
-            from testmcpy.server.routers.results import save_test_run_to_file
-            from testmcpy.server.routers.tests import _extra_tests_dirs
-
-            tests_dir = Path.cwd() / "tests"
-            test_file_name = test_path.name
-            try:
-                resolved_test_path = test_path.resolve()
-                if resolved_test_path.is_relative_to(tests_dir.resolve()):
-                    test_file_name = str(resolved_test_path.relative_to(tests_dir.resolve()))
-                else:
-                    for extra_root in _extra_tests_dirs():
-                        extra_real = extra_root.resolve()
-                        if resolved_test_path.is_relative_to(extra_real):
-                            test_file_name = (
-                                f"{extra_root.name}/{resolved_test_path.relative_to(extra_real)}"
-                            )
-                            break
-            except OSError:
-                pass
-
-            save_data = {
-                "test_file": test_file_name,
-                "test_file_path": str(test_path),
-                "provider": provider,
-                "model": model,
-                "mcp_profile": effective_profile,
-                "results": results_list,
-                "summary": summary,
-            }
-            # For single-file runs, reuse the registry's run_id so the
-            # live "Reattached to run …" banner and the /reports entry
-            # show the same id. For directory sub-calls, leave run_id
-            # unset so each file's save_test_run_to_file mints a fresh
-            # id — each YAML still gets its own /reports row.
-            if handle.kind == "single":
-                save_data["run_id"] = handle.run_id
-            save_result = save_test_run_to_file(save_data)
-            _emit_log(handle, f"💾 Results saved: {save_result.get('run_id')}")
-        except Exception as save_err:
-            _emit_log(handle, f"⚠️ Failed to save results: {save_err}")
+        # Per-test results were persisted incrementally via record.append();
+        # stamp the terminal status + denormalized totals.
+        record.finish("completed")
+        _emit_log(handle, f"💾 Results saved: {record.run_id}")
 
         # `all_complete` is a TERMINAL signal on the wire (the UI sets
         # running=false, clears directoryRunProgress, and closes the WS).
@@ -569,12 +585,17 @@ async def _run_test_command(handle: RunHandle, data: dict, config) -> None:
             )
 
     except asyncio.CancelledError:
-        # Stopped by user — let the caller emit the user-facing message.
+        # Stopped by user — keep the partial results, let the caller emit
+        # the user-facing message.
+        if record is not None:
+            record.finish("stopped")
         raise
     except Exception as e:
         import traceback
 
         tb = traceback.format_exc()
+        if record is not None:
+            record.finish("error")
         _emit_log(handle, f"❌ Error: {str(e)}")
         _emit_log(handle, f"Traceback:\n{tb}")
         _emit_run_error(handle, data, str(e), traceback=tb)
@@ -864,9 +885,38 @@ async def handle_test_websocket(websocket: WebSocket):
         """Wrap ``command_coro`` so the registry status is finalized when
         it ends regardless of exit path."""
 
+        async def _heartbeat() -> None:
+            # Stamp the current DB row every ~30s so crash reconciliation
+            # (storage.mark_stale_runs_interrupted) can tell a live run
+            # from a dead one. db_run_id is None until RunRecord.begin()
+            # and swaps per file during a directory batch.
+            from sqlalchemy.exc import SQLAlchemyError
+
+            from testmcpy.storage import get_storage
+
+            while True:
+                await asyncio.sleep(HEARTBEAT_INTERVAL_S)
+                db_run_id = handle.db_run_id
+                if db_run_id is None:
+                    continue
+                try:
+                    get_storage().touch_run_heartbeat(db_run_id)
+                except SQLAlchemyError:
+                    # Missing a beat is harmless — the reconcile cutoff
+                    # (minutes) tolerates several failures in a row.
+                    pass
+
         async def _run() -> None:
+            heartbeat_task = asyncio.create_task(_heartbeat())
             try:
-                await command_coro(handle, data, config)
+                if not run_registry.slots_available():
+                    _emit_log(
+                        handle,
+                        "⏳ Run queued — waiting for a free run slot "
+                        "(TESTMCPY_MAX_CONCURRENT_RUNS)…",
+                    )
+                async with run_registry.acquire_slot(handle):
+                    await command_coro(handle, data, config)
                 await run_registry.finalize(
                     handle.run_id, status="completed", summary=handle.summary
                 )
@@ -890,6 +940,10 @@ async def handle_test_websocket(websocket: WebSocket):
             except Exception:
                 await run_registry.finalize(handle.run_id, status="error", summary=handle.summary)
                 raise
+            finally:
+                heartbeat_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await heartbeat_task
 
         handle.task = asyncio.create_task(_run())
 
@@ -911,14 +965,43 @@ async def handle_test_websocket(websocket: WebSocket):
         await run_registry.detach(handle, token)
         # DELIBERATELY do not cancel handle.task — disconnects keep it alive.
 
-    async def _attach_existing_run(run_id: str) -> None:
-        nonlocal current_handle, current_token
-        handle = await run_registry.get_run(run_id)
-        if handle is None:
+    async def _attach_history_run(run_id: str) -> None:
+        """Registry miss — serve the run from the results DB instead of
+        'not found'. Sends a synthesized terminal replay; there is no live
+        stream to attach to, so the dispatcher just waits for the next
+        client message afterwards.
+
+        Known asymmetry: directory-batch run_ids never get a DB row (each
+        file persists under its own per-file id), so a batch id that has
+        aged out of the registry still resolves to 'not found' here even
+        though its per-file rows are in the DB. Closing that needs a
+        parent-row (or metadata.batch_id) scheme — deferred."""
+        from sqlalchemy.exc import SQLAlchemyError
+
+        from testmcpy.server.run_persistence import history_replay_messages
+        from testmcpy.storage import get_storage
+
+        try:
+            record = get_storage().get_run(run_id)
+        except SQLAlchemyError:
+            record = None
+        if record is None:
             await manager.send_message(
                 {"type": "error", "message": f"run_id not found: {run_id}"},
                 websocket,
             )
+            return
+        for msg in history_replay_messages(record):
+            try:
+                await manager.send_message(msg, websocket)
+            except Exception:
+                return
+
+    async def _attach_existing_run(run_id: str) -> None:
+        nonlocal current_handle, current_token
+        handle = await run_registry.get_run(run_id)
+        if handle is None:
+            await _attach_history_run(run_id)
             return
         # Replay backlog so the UI rebuilds state.
         for replay_msg in run_registry.buffered_replay(handle):

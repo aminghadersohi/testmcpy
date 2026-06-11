@@ -14,7 +14,7 @@ Tests cover:
 
 import json
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -1030,3 +1030,86 @@ class TestContentHashing:
     def test_hash_length(self, storage):
         h = storage._hash_content("test")
         assert len(h) == 16  # SHA256 truncated to 16 chars
+
+
+# ---------------------------------------------------------------------------
+# Heartbeat + stale-run reconciliation
+# ---------------------------------------------------------------------------
+
+
+class TestHeartbeatReconciliation:
+    def _save_running(self, storage, run_id, started_at=None, heartbeat_at=None):
+        storage.save_run(
+            run_id=run_id,
+            test_id="s1",
+            test_version=1,
+            model="m",
+            provider="p",
+            started_at=started_at or datetime.now(timezone.utc).isoformat(),
+        )
+        if heartbeat_at is not None:
+            with sqlite3.connect(storage.db_path) as conn:
+                conn.execute(
+                    "UPDATE test_runs SET heartbeat_at = ? WHERE run_id = ?",
+                    (heartbeat_at, run_id),
+                )
+
+    def _status(self, storage, run_id):
+        with sqlite3.connect(storage.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT status, completed_at FROM test_runs WHERE run_id = ?", (run_id,)
+            ).fetchone()
+        return row
+
+    def test_touch_run_heartbeat(self, storage):
+        self._save_running(storage, "run-hb")
+        storage.touch_run_heartbeat("run-hb")
+        with sqlite3.connect(storage.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT heartbeat_at FROM test_runs WHERE run_id = ?", ("run-hb",)
+            ).fetchone()
+        assert row["heartbeat_at"] is not None
+        # Same clock + format as the reconcile cutoff (UTC-aware ISO).
+        assert "+00:00" in row["heartbeat_at"]
+
+    def test_fresh_heartbeat_survives(self, storage):
+        fresh = datetime.now(timezone.utc).isoformat()
+        self._save_running(storage, "run-live", heartbeat_at=fresh)
+        assert storage.mark_stale_runs_interrupted() == 0
+        assert self._status(storage, "run-live")["status"] == "running"
+
+    def test_stale_heartbeat_marked_interrupted(self, storage):
+        stale = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+        self._save_running(storage, "run-dead", heartbeat_at=stale)
+        assert storage.mark_stale_runs_interrupted() == 1
+        row = self._status(storage, "run-dead")
+        assert row["status"] == "interrupted"
+        assert row["completed_at"] is not None
+
+    def test_no_heartbeat_falls_back_to_started_at(self, storage):
+        old = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+        recent = datetime.now(timezone.utc).isoformat()
+        self._save_running(storage, "run-legacy-old", started_at=old)
+        self._save_running(storage, "run-legacy-new", started_at=recent)
+        assert storage.mark_stale_runs_interrupted() == 1
+        assert self._status(storage, "run-legacy-old")["status"] == "interrupted"
+        assert self._status(storage, "run-legacy-new")["status"] == "running"
+
+    def test_sweeper_mode_skips_no_heartbeat_rows(self, storage):
+        old = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+        self._save_running(storage, "run-legacy", started_at=old)
+        stale_hb = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+        self._save_running(storage, "run-dead", heartbeat_at=stale_hb)
+        # Sweeper passes None: only heartbeat-bearing rows are eligible.
+        assert storage.mark_stale_runs_interrupted(no_heartbeat_older_than_hours=None) == 1
+        assert self._status(storage, "run-legacy")["status"] == "running"
+        assert self._status(storage, "run-dead")["status"] == "interrupted"
+
+    def test_finished_rows_untouched(self, storage):
+        stale = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+        self._save_running(storage, "run-done", heartbeat_at=stale)
+        storage.finish_run("run-done", status="completed")
+        assert storage.mark_stale_runs_interrupted() == 0
+        assert self._status(storage, "run-done")["status"] == "completed"

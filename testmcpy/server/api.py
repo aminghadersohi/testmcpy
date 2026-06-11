@@ -26,6 +26,7 @@ from pydantic import BaseModel, Field  # noqa: E402
 from testmcpy.config import get_config  # noqa: E402
 from testmcpy.mcp_profiles import load_profile  # noqa: E402
 from testmcpy.server.routers import agent as agent_router  # noqa: E402
+from testmcpy.server.routers import analytics as analytics_router  # noqa: E402
 from testmcpy.server.routers import auth as auth_router  # noqa: E402
 from testmcpy.server.routers import compare as compare_router  # noqa: E402
 from testmcpy.server.routers import compatibility as compatibility_router  # noqa: E402
@@ -467,6 +468,7 @@ app.exception_handler(Exception)(global_exception_handler)
 
 # Register routers
 app.include_router(agent_router.router)
+app.include_router(analytics_router.router)
 app.include_router(auth_router.router)
 app.include_router(generation_logs_router.router)
 app.include_router(llm_router.router)

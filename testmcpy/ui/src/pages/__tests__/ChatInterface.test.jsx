@@ -2,6 +2,7 @@ import { render, screen, fireEvent, act } from '@testing-library/react'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { BrowserRouter } from 'react-router-dom'
 import ChatInterface from '../ChatInterface'
+import { NotificationProvider } from '../../components/NotificationProvider'
 
 vi.mock('@microlink/react-json-view', () => ({ default: () => null }))
 vi.mock('react-markdown', () => ({ default: ({ children }) => children }))
@@ -26,11 +27,11 @@ beforeEach(() => {
 
 describe('ChatInterface', () => {
   it('renders without crashing', () => {
-    render(<BrowserRouter><ChatInterface /></BrowserRouter>)
+    render(<BrowserRouter><NotificationProvider><ChatInterface /></NotificationProvider></BrowserRouter>)
   })
 
   it('shows input textarea', () => {
-    render(<BrowserRouter><ChatInterface /></BrowserRouter>)
+    render(<BrowserRouter><NotificationProvider><ChatInterface /></NotificationProvider></BrowserRouter>)
     const textarea = document.querySelector('textarea')
     expect(textarea).toBeTruthy()
   })
@@ -49,7 +50,7 @@ describe('ChatInterface', () => {
       Promise.resolve({ ok: true, body: mockStream })
     )
 
-    render(<BrowserRouter><ChatInterface /></BrowserRouter>)
+    render(<BrowserRouter><NotificationProvider><ChatInterface /></NotificationProvider></BrowserRouter>)
 
     const textarea = document.querySelector('textarea')
     fireEvent.change(textarea, { target: { value: 'hello' } })

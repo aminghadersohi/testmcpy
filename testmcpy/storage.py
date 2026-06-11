@@ -203,9 +203,9 @@ class TestStorage:
                         if default is not None:
                             ddl += f" DEFAULT {default}"
                         conn.execute(text(ddl))
-            for index_name, table, columns in index_migrations:
+            for index_name, table_name, columns in index_migrations:
                 conn.execute(
-                    text(f"CREATE INDEX IF NOT EXISTS {index_name} ON {table} ({columns})")
+                    text(f"CREATE INDEX IF NOT EXISTS {index_name} ON {table_name} ({columns})")
                 )
             conn.commit()
 

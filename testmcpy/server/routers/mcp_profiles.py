@@ -1,6 +1,7 @@
 """MCP profile management endpoints."""
 
 import copy
+import logging
 import re
 from pathlib import Path
 
@@ -15,6 +16,8 @@ from testmcpy.server.helpers import (
     save_mcp_yaml,
 )
 from testmcpy.src.mcp_client import MCPClient, MCPError, StdioMCPClient
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/mcp", tags=["mcp-profiles"])
 
@@ -883,32 +886,6 @@ async def test_mcp_connection(profile_id: str, mcp_index: int):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-def _auth_to_dict(auth: AuthConfig | None) -> dict:
-    """Convert an AuthConfig request model to the dict format MCPClient expects."""
-    if auth is None or auth.type == AuthType.NONE:
-        return {"type": "none"}
-    if auth.type == AuthType.BEARER:
-        return {"type": "bearer", "token": auth.token}
-    if auth.type == AuthType.JWT:
-        return {
-            "type": "jwt",
-            "api_url": auth.api_url,
-            "api_token": auth.api_token,
-            "api_secret": auth.api_secret,
-        }
-    if auth.type == AuthType.OAUTH:
-        return {
-            "type": "oauth",
-            "client_id": auth.client_id,
-            "client_secret": auth.client_secret,
-            "token_url": auth.token_url,
-            "scopes": auth.scopes or [],
-            "oauth_auto_discover": auth.oauth_auto_discover,
-            "insecure": auth.insecure,
-        }
-    return {"type": "none"}
-
-
 @router.post("/test-connection")
 async def test_connection_standalone(request: TestConnectionRequest):
     """Test connection to an MCP server from an inline config.
@@ -927,7 +904,10 @@ async def test_connection_standalone(request: TestConnectionRequest):
     else:
         if not request.mcp_url:
             raise HTTPException(status_code=400, detail="mcp_url is required")
-        client = MCPClient(request.mcp_url, auth=_auth_to_dict(request.auth))
+        # AuthConfig already matches the {type, token, ...} dict shape
+        # MCPClient._setup_auth() reads (it tolerates extra keys).
+        auth_dict = request.auth.model_dump(exclude_none=True) if request.auth else {"type": "none"}
+        client = MCPClient(request.mcp_url, auth=auth_dict)
 
     try:
         await client.initialize(timeout=timeout)
@@ -945,4 +925,4 @@ async def test_connection_standalone(request: TestConnectionRequest):
         try:
             await client.close()
         except (MCPError, ConnectionError, OSError, RuntimeError) as e:
-            print(f"Warning: failed to close test client: {e}")
+            logger.warning("Failed to close test client: %s", e)

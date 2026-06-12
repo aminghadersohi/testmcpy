@@ -48,7 +48,13 @@ def test_test_connection_success(client):
     assert data["tool_count"] == 2
     assert data["tools"] == ["list_charts", "run_sql"]
     mock_cls.assert_called_once_with(
-        "https://mcp.example.com/mcp/", auth={"type": "bearer", "token": "abc123"}
+        "https://mcp.example.com/mcp/",
+        auth={
+            "type": "bearer",
+            "token": "abc123",
+            "insecure": False,
+            "oauth_auto_discover": False,
+        },
     )
     instance.close.assert_awaited()
 

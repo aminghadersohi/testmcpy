@@ -1037,7 +1037,10 @@ async def compare_tools(request: ToolCompareRequest):
             result["duration_ms"] = (time.time() - start_time) * 1000
         finally:
             if client:
-                await client.close()
+                try:
+                    await client.close()
+                except (MCPError, ConnectionError, OSError, RuntimeError) as e:
+                    logger.warning("Failed to close comparison client: %s", e)
 
         return result
 

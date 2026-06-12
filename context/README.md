@@ -1,5 +1,10 @@
 # testmcpy Context
 
+> **User-facing docs are published at https://preset-io.github.io/testmcpy**
+> (source in [`docs-site/`](../docs-site/)). The docs site adapts the files in
+> this directory — when you edit a concept or guide here, mirror the change in
+> the corresponding `docs-site/pages/` MDX file (each page notes its source).
+
 This directory contains modular knowledge files that document testmcpy's concepts, architecture, and best practices. These files are designed to be:
 
 - **Composable** - Load only what you need

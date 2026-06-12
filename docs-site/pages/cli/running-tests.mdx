@@ -1,0 +1,138 @@
+---
+title: Running Tests Commands
+description: testmcpy run, research, compare, and multi-env — execute test suites and compare models or environments.
+---
+
+{/* Source: live `testmcpy --help` output — regenerate when CLI changes */}
+
+import { Callout } from 'nextra/components'
+
+# Running Tests
+
+Commands that execute test cases against an MCP service. Tests are YAML/JSON files described in [Test Format](/concepts/test-format) and graded by [Evaluators](/concepts/evaluators).
+
+## testmcpy run
+
+Run test cases against an MCP service. Executes test cases defined in YAML/JSON files, prints per-test pass/fail with evaluator detail, and can emit reports, JUnit XML, and enforce CI gates.
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `TEST_PATH` | PATH | required | Path to test file or directory |
+| `--model`, `-m` | TEXT | `claude-sonnet-4-20250514` | Model to use |
+| `--provider`, `-p` | choice | `claude-sdk` | Model provider: `ollama`, `openai`, `local`, `anthropic`, `claude-sdk`, `claude-cli`, `claude-code`, `assistant`, `chatbot` |
+| `--mcp-url` | TEXT | — | MCP service URL (overrides profile) |
+| `--profile` | TEXT | — | MCP service profile from `.mcp_services.yaml` |
+| `--output`, `-o` | PATH | — | Output report file |
+| `--verbose`, `-v` | flag | off | Verbose output |
+| `--dry-run` | flag | off | Don't actually run tests |
+| `--hide-tool-output` | flag | off | Hide detailed tool call output in verbose mode |
+| `--report` | PATH | — | Generate eval report (`.md`, `.json`, or `.html`) to this file path |
+| `--report-title` | TEXT | — | Title for the eval report |
+| `--system-prompt` | TEXT | — | System prompt to inject into all test cases (for harness imitation) |
+| `--system-prompt-file` | PATH | — | File containing the system prompt text |
+| `--auth-type` | TEXT | — | MCP auth type: `jwt`, `bearer`, `oauth`, `api_key`, `none` |
+| `--auth-token` | TEXT | — | Bearer token or API key for MCP auth |
+| `--jwt-url` | TEXT | — | MCP JWT auth endpoint URL (for `--auth-type jwt`) |
+| `--jwt-token` | TEXT | — | MCP JWT API token / key name (for `--auth-type jwt`) |
+| `--jwt-secret` | TEXT | — | MCP JWT API secret (for `--auth-type jwt`) |
+| `--workspace-hash` | TEXT | — | Workspace hash (assistant/chatbot provider only) |
+| `--domain` | TEXT | — | Workspace domain (assistant/chatbot provider only) |
+| `--environment` | TEXT | — | Environment name: `staging`, `production`, `local` (assistant/chatbot provider only) |
+| `--assistant-api-url` | TEXT | — | JWT auth endpoint URL for the assistant/chatbot provider |
+| `--assistant-api-token` | TEXT | — | JWT API token for the assistant/chatbot provider |
+| `--assistant-api-secret` | TEXT | — | JWT API secret for the assistant/chatbot provider |
+| `--assistant-conversations-path` | TEXT | provider default | Override the conversations endpoint path on the assistant/chatbot provider |
+| `--assistant-completions-path` | TEXT | provider default | Override the completions endpoint path on the assistant/chatbot provider |
+| `--max-concurrent-streams` | INTEGER | unbounded | Process-wide cap on concurrent SSE streams for the assistant/chatbot provider; useful when a parent harness spawns many testmcpy children at once |
+| `--junit-xml` | PATH | — | Write a JUnit XML report to this path (for CI test summaries) |
+| `--gate` | flag | off | Enforce CI gate thresholds from `.testmcpy-gate.yaml` (or `--gate-config`) and exit non-zero if the run fails the gate |
+| `--gate-config` | PATH | — | Path to a CI gate config YAML (implies `--gate`) |
+| `--min-pass-rate` | FLOAT | — | Minimum pass rate percentage required, e.g. `85` (implies `--gate`) |
+
+```bash
+# Run all tests in a directory against the default profile
+testmcpy run tests/
+
+# CI: gate on pass rate and emit JUnit XML
+testmcpy run tests/ --profile prod --gate --min-pass-rate 85 --junit-xml results.xml
+
+# No config file: pass MCP auth inline
+testmcpy run tests/ \
+  --mcp-url https://workspace.example.com/mcp \
+  --auth-type jwt \
+  --jwt-url https://auth.example.com/v1/auth/ \
+  --jwt-token "$MCP_JWT_TOKEN" \
+  --jwt-secret "$MCP_JWT_SECRET"
+```
+
+<Callout type="info">
+The inline auth flags (`--auth-type`, `--auth-token`, `--jwt-*`) bypass `.mcp_services.yaml` entirely — handy in CI. The matching environment variables `MCP_AUTH_TOKEN`, `MCP_JWT_URL`, `MCP_JWT_TOKEN`, and `MCP_JWT_SECRET` are also supported. See [Authentication](/concepts/authentication).
+</Callout>
+
+The `--gate` family is shared with [`score`](/cli/generation#testmcpy-score), [`scan`](/cli/generation#testmcpy-scan), and [`conformance`](/cli/benchmarking#testmcpy-conformance), all of which can read thresholds from the unified `.testmcpy-gate.yaml`.
+
+## testmcpy research
+
+Research and test LLM tool calling capabilities. Tests whether a given LLM model can successfully call MCP tools.
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `--model`, `-m` | TEXT | `claude-sonnet-4-20250514` | Model to test |
+| `--provider`, `-p` | choice | `claude-sdk` | Model provider: `ollama`, `openai`, `local`, `anthropic`, `claude-sdk`, `claude-cli`, `claude-code`, `assistant`, `chatbot` |
+| `--mcp-url` | TEXT | — | MCP service URL (overrides profile) |
+| `--profile` | TEXT | — | MCP service profile from `.mcp_services.yaml` |
+| `--output`, `-o` | PATH | — | Output file for results |
+| `--format`, `-f` | `yaml`, `json`, `table` | `table` | Output format |
+
+```bash
+# Can this model drive my MCP tools?
+testmcpy research --model llama3.1:8b --provider ollama --profile localhost
+
+# Save the findings as JSON
+testmcpy research --model gpt-4o --provider openai --format json -o research.json
+```
+
+## testmcpy compare
+
+Compare multiple LLM models against the same test suite. Runs all test cases against each model and produces a comparison matrix showing pass/fail, score, cost, tokens, and duration per model.
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `TEST_PATH` | PATH | required | Path to test file or directory |
+| `--models` | TEXT | — | Comma-separated `provider:model` pairs (e.g. `anthropic:claude-sonnet-4-6,openai:gpt-5.4`) |
+| `--models-file` | PATH | — | YAML file with the model list (versioned alongside the test suite) |
+| `--mcp-url` | TEXT | — | MCP service URL (overrides profile) |
+| `--profile` | TEXT | — | MCP service profile from `.mcp_services.yaml` |
+| `--output`, `-o` | PATH | — | Output file for results |
+| `--output-csv` | PATH | — | Export results as CSV |
+| `--verbose`, `-v` | flag | off | Verbose output |
+
+```bash
+# Head-to-head: Claude vs GPT on the same suite
+testmcpy compare tests/ --models "anthropic:claude-sonnet-4-20250514,openai:gpt-4o"
+
+# Use a versioned models file and export a CSV
+testmcpy compare tests/ --models-file models.yaml --output-csv comparison.csv
+```
+
+For repeated runs and statistical analysis across models and profiles, see [`testmcpy bench`](/cli/benchmarking#testmcpy-bench).
+
+## testmcpy multi-env
+
+Run an eval suite across multiple environments and compare results. Runs the same test cases against different MCP profiles (environments) using a single LLM model, then produces a comparison matrix highlighting environment-specific failures.
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `TEST_PATH` | PATH | required | Path to test file or directory |
+| `--envs` | TEXT | required | Comma-separated `name:profile_id` pairs (e.g. `staging:localhost,sandbox:sandbox-profile`) |
+| `--model`, `-m` | TEXT | `claude-sonnet-4-20250514` | LLM model to use |
+| `--provider`, `-p` | choice | `claude-sdk` | LLM provider: `ollama`, `openai`, `local`, `anthropic`, `claude-sdk`, `claude-cli`, `claude-code`, `assistant`, `chatbot` |
+| `--output`, `-o` | PATH | — | Output file for results (JSON) |
+| `--verbose`, `-v` | flag | off | Verbose output |
+
+```bash
+# Same suite, two environments, one model
+testmcpy multi-env tests/ \
+  --envs "staging:localhost,sandbox:sandbox-profile" \
+  --model claude-sonnet-4 --provider anthropic
+```

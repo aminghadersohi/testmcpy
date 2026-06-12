@@ -1,0 +1,125 @@
+---
+title: CLI Reference
+description: Complete reference for all 38 testmcpy CLI commands, grouped by workflow.
+---
+
+{/* Source: live `testmcpy --help` output — regenerate when CLI changes */}
+
+# CLI Reference
+
+`testmcpy` is a single command-line entry point for everything in the toolkit: configuring MCP servers and LLM providers, discovering tools, running YAML test suites, chatting interactively, generating tests, benchmarking models, and gating CI. Every command supports `--help` for the authoritative option list.
+
+```bash
+testmcpy [GLOBAL_OPTIONS] COMMAND [COMMAND_OPTIONS]
+```
+
+## Global Options
+
+| Option | Description |
+|---|---|
+| `--version` | Show the installed testmcpy version and exit |
+| `--help` | Show help. Also works per command: `testmcpy run --help` |
+
+## All Commands
+
+### Setup & Config — [docs](/cli/setup)
+
+| Command | What it does |
+|---|---|
+| [`setup`](/cli/setup#testmcpy-setup) | Interactive setup wizard for MCP profiles and LLM providers |
+| [`init`](/cli/setup#testmcpy-init) | Initialize a new MCP test project structure |
+| [`doctor`](/cli/setup#testmcpy-doctor) | Run health checks to diagnose installation issues |
+| [`config-cmd`](/cli/setup#testmcpy-config-cmd) | Display current configuration and its sources |
+| [`config-mcp`](/cli/setup#testmcpy-config-mcp) | Add your MCP server to Claude Desktop, Claude Code, or ChatGPT Desktop |
+| [`add-mcp`](/cli/setup#testmcpy-add-mcp) | Wizard to add an MCP server to your configuration |
+| [`add-llm`](/cli/setup#testmcpy-add-llm) | Wizard to add an LLM provider to your configuration |
+| [`add-test`](/cli/setup#testmcpy-add-test) | Wizard to create a test case YAML file |
+
+### Discovery & Tools — [docs](/cli/discovery)
+
+| Command | What it does |
+|---|---|
+| [`tools`](/cli/discovery#testmcpy-tools) | List available MCP tools with descriptions and schemas |
+| [`export`](/cli/discovery#testmcpy-export) | Export tool schemas (TypeScript, Python, protobuf, GraphQL, curl, …) |
+| [`profiles`](/cli/discovery#testmcpy-profiles) | List MCP profiles, get/set the default |
+| [`status`](/cli/discovery#testmcpy-status) | Show MCP connection status |
+| [`explore-cli`](/cli/discovery#testmcpy-explore-cli) | List MCP tools (non-interactive CLI parity command) |
+| [`smoke-test`](/cli/discovery#testmcpy-smoke-test) | Health-check an MCP server and exercise its tools |
+
+### Running Tests — [docs](/cli/running-tests)
+
+| Command | What it does |
+|---|---|
+| [`run`](/cli/running-tests#testmcpy-run) | Run YAML/JSON test cases against an MCP service |
+| [`research`](/cli/running-tests#testmcpy-research) | Test whether an LLM can call your MCP tools |
+| [`compare`](/cli/running-tests#testmcpy-compare) | Compare multiple LLM models on the same suite |
+| [`multi-env`](/cli/running-tests#testmcpy-multi-env) | Run one suite across multiple MCP environments |
+
+### Chat & Serve — [docs](/cli/chat-and-serve)
+
+| Command | What it does |
+|---|---|
+| [`chat`](/cli/chat-and-serve#testmcpy-chat) | Interactive chat with an LLM that can use MCP tools |
+| [`serve`](/cli/chat-and-serve#testmcpy-serve) | Start the [Web UI](/web-ui) server |
+| [`push`](/cli/chat-and-serve#testmcpy-push) | Push local results to a remote testmcpy server |
+
+### Generation & Quality — [docs](/cli/generation)
+
+| Command | What it does |
+|---|---|
+| [`generate`](/cli/generation#testmcpy-generate) | Generate a test suite from an MCP server's tools |
+| [`scan`](/cli/generation#testmcpy-scan) | Scan tool metadata for poisoning and rug-pull patterns |
+| [`score`](/cli/generation#testmcpy-score) | Grade a tool surface for LLM usability (0-100, A-F) |
+
+### Benchmarking & Analytics — [docs](/cli/benchmarking)
+
+| Command | What it does |
+|---|---|
+| [`bench`](/cli/benchmarking#testmcpy-bench) | Run a suite across models × profiles × repeats |
+| [`conformance`](/cli/benchmarking#testmcpy-conformance) | Run the official MCP spec conformance suite |
+| [`matrix`](/cli/benchmarking#testmcpy-matrix) | Per-test × per-config performance matrix |
+| [`leaderboard`](/cli/benchmarking#testmcpy-leaderboard) | Rank configs by pass rate, cost-per-pass, latency |
+| [`flaky`](/cli/benchmarking#testmcpy-flaky) | Find intermittently failing tests |
+
+### Baselines — [docs](/cli/baselines)
+
+| Command | What it does |
+|---|---|
+| [`baseline-save`](/cli/baselines#testmcpy-baseline-save) | Run tests and save results as a named baseline |
+| [`baseline-compare`](/cli/baselines#testmcpy-baseline-compare) | Run tests and compare against a saved baseline |
+| [`baseline-list`](/cli/baselines#testmcpy-baseline-list) | List saved baselines |
+
+### Advanced — [docs](/cli/advanced)
+
+| Command | What it does |
+|---|---|
+| [`mutate`](/cli/advanced#testmcpy-mutate) | Prompt mutation testing for robustness |
+| [`metamorphic`](/cli/advanced#testmcpy-metamorphic) | Metamorphic relation tests (invariants across related inputs) |
+| [`coverage`](/cli/advanced#testmcpy-coverage) | Analyze test coverage of MCP tools |
+| [`export-db`](/cli/advanced#testmcpy-export-db) | Export results to an external database for dashboarding |
+| [`badge`](/cli/advanced#testmcpy-badge) | Emit shields.io endpoint JSON for a quality badge |
+| [`agent`](/cli/advanced#testmcpy-agent) | Natural-language test execution agent (Claude Agent SDK) |
+
+## Quick Examples
+
+```bash
+# Run a test suite against your default MCP profile
+testmcpy run tests/
+
+# Run against a specific profile with a CI gate
+testmcpy run tests/ --profile prod --gate --junit-xml results.xml
+
+# List the tools your MCP server exposes
+testmcpy tools --profile staging --detail
+
+# Chat interactively with an LLM that can call your MCP tools
+testmcpy chat --profile prod
+
+# Start the web UI on http://localhost:8000
+testmcpy serve
+
+# Generate a starter test suite from a live server
+testmcpy generate --mcp-url http://localhost:5008/mcp
+```
+
+New to testmcpy? Start with [Getting Started](/getting-started), then learn the [test file format](/concepts/test-format) and [evaluators](/concepts/evaluators).

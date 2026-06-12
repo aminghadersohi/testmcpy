@@ -1,0 +1,73 @@
+---
+title: Baselines Commands
+description: testmcpy baseline-save, baseline-compare, and baseline-list — regression testing against named snapshots.
+---
+
+{/* Source: live `testmcpy --help` output — regenerate when CLI changes */}
+
+# Baselines
+
+Baselines are named snapshots of test results. Save one at a known-good point (e.g. a release), then compare future runs against it to catch regressions. Baselines are stored as files in `.baselines/` by default, so they can be committed alongside your suite.
+
+## testmcpy baseline-save
+
+Run tests and save the results as a named baseline.
+
+| Argument / Option | Type | Default | Description |
+|---|---|---|---|
+| `NAME` | TEXT | required | Name for the baseline |
+| `TEST_PATH` | PATH | required | Path to test file or directory |
+| `--model`, `-m` | TEXT | `claude-sonnet-4-20250514` | Model to use |
+| `--provider`, `-p` | choice | `claude-sdk` | Model provider: `ollama`, `openai`, `local`, `anthropic`, `claude-sdk`, `claude-cli`, `claude-code`, `assistant`, `chatbot` |
+| `--mcp-url` | TEXT | — | MCP service URL (overrides profile) |
+| `--profile` | TEXT | — | MCP service profile from `.mcp_services.yaml` |
+| `--baseline-dir` | TEXT | `.baselines` | Directory to store baselines |
+| `--verbose`, `-v` | flag | off | Verbose output |
+| `--hide-tool-output` | flag | off | Hide detailed tool call output |
+
+```bash
+# Snapshot results at release time
+testmcpy baseline-save v1.0 tests/
+
+# Save against a specific profile and model
+testmcpy baseline-save v1.0-prod tests/ --profile prod --model claude-sonnet-4-5
+```
+
+## testmcpy baseline-compare
+
+Run tests and compare the results against a saved baseline. Highlights regressions (tests that used to pass and now fail) and improvements.
+
+| Argument / Option | Type | Default | Description |
+|---|---|---|---|
+| `NAME` | TEXT | required | Baseline name to compare against |
+| `TEST_PATH` | PATH | required | Path to test file or directory |
+| `--model`, `-m` | TEXT | `claude-sonnet-4-20250514` | Model to use |
+| `--provider`, `-p` | choice | `claude-sdk` | Model provider: `ollama`, `openai`, `local`, `anthropic`, `claude-sdk`, `claude-cli`, `claude-code`, `assistant`, `chatbot` |
+| `--mcp-url` | TEXT | — | MCP service URL (overrides profile) |
+| `--profile` | TEXT | — | MCP service profile from `.mcp_services.yaml` |
+| `--baseline-dir` | TEXT | `.baselines` | Directory where baselines are stored |
+| `--output`, `-o` | PATH | — | Save regression report to file (`.md` or `.json`) |
+| `--verbose`, `-v` | flag | off | Verbose output |
+| `--hide-tool-output` | flag | off | Hide detailed tool call output |
+
+```bash
+# Did anything regress since v1.0?
+testmcpy baseline-compare v1.0 tests/
+
+# Save a markdown regression report for the PR
+testmcpy baseline-compare v1.0 tests/ --output regression-report.md
+```
+
+## testmcpy baseline-list
+
+List saved baselines.
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `--baseline-dir` | TEXT | `.baselines` | Directory where baselines are stored |
+
+```bash
+testmcpy baseline-list
+```
+
+Use the same model, provider, and profile for `baseline-save` and `baseline-compare` — otherwise differences may reflect the configuration change rather than a real regression. For comparing configurations on purpose, use [`compare`](/cli/running-tests#testmcpy-compare) or [`bench`](/cli/benchmarking#testmcpy-bench). For tool-metadata baselines (rug-pull detection), see [`scan --save-baseline`](/cli/generation#testmcpy-scan).

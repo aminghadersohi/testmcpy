@@ -40,6 +40,20 @@
 
 Always run `npm run build` in `testmcpy/ui/` after frontend changes.
 
+## Documentation Site
+
+- `docs-site/` is a Nextra 3 (Next.js 14, npm) static site published to
+  https://preset-io.github.io/testmcpy by `.github/workflows/deploy-docs.yml`
+  on pushes to main; PRs touching it are build-checked by `docs-pr-check.yml`.
+- Local dev: `cd docs-site && npm install && npm run dev` (port 3001).
+- Production builds need `NEXT_PUBLIC_BASE_PATH=/testmcpy` (project pages
+  basePath) — the workflows set it.
+- Screenshots/logo are NOT duplicated: `scripts/sync-assets.mjs` copies them
+  from `docs/screenshots/` and `docs/logos/` into `public/` at build time.
+- `context/` stays the agent-facing source of truth. Docs pages adapted from
+  it carry a `{/* Source: context/... — keep in sync */}` comment — when you
+  edit one side, mirror the change on the other.
+
 ## No Preset Infrastructure URLs in Code
 
 This is an open-source repo. Never add Preset-specific infrastructure URLs

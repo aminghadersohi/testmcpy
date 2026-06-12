@@ -1,0 +1,127 @@
+---
+title: Setup & Config Commands
+description: testmcpy setup, init, doctor, config-cmd, config-mcp, add-mcp, add-llm, and add-test.
+---
+
+{/* Source: live `testmcpy --help` output — regenerate when CLI changes */}
+
+import { Callout } from 'nextra/components'
+
+# Setup & Config
+
+Commands for bootstrapping a project, configuring MCP servers and LLM providers, and diagnosing your installation. See [Configuration](/concepts/configuration) and [MCP Profiles](/concepts/mcp-profiles) for the underlying file formats.
+
+## testmcpy setup
+
+Interactive setup wizard for testmcpy configuration. Guides you through configuring MCP service profiles and LLM providers, and creates `.llm_providers.yaml` and `.mcp_services.yaml` in the current directory.
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `--force`, `-f` | flag | off | Overwrite existing config files |
+
+```bash
+# First-time setup in the current directory
+testmcpy setup
+
+# Re-run and overwrite existing config files
+testmcpy setup --force
+```
+
+<Callout type="info">
+After setup, verify your configuration with `testmcpy doctor` and `testmcpy tools`. See [Getting Started](/getting-started) for the full walkthrough.
+</Callout>
+
+## testmcpy init
+
+Initialize a new MCP test project. Creates the standard directory structure and example files.
+
+| Argument / Option | Type | Default | Description |
+|---|---|---|---|
+| `PATH` | PATH | `.` | Directory to initialize |
+
+```bash
+# Initialize the current directory
+testmcpy init
+
+# Initialize a new project directory
+testmcpy init my-mcp-tests
+```
+
+## testmcpy doctor
+
+Run health checks to diagnose installation issues. Checks Python version, dependencies, configuration, and MCP connectivity to help identify and resolve problems.
+
+This command takes no options besides `--help`.
+
+```bash
+testmcpy doctor
+```
+
+## testmcpy config-cmd
+
+Display the current testmcpy configuration — values and their sources (environment, config file, etc.).
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `--all`, `-a` | flag | off | Show all config values including unset ones |
+
+```bash
+# Show current configuration
+testmcpy config-cmd
+
+# Include unset values
+testmcpy config-cmd --all
+```
+
+## testmcpy config-mcp
+
+Configure your MCP server for Claude Desktop, Claude Code, or ChatGPT Desktop. Automatically adds your MCP service configuration (URL and auth from your current testmcpy config) to the target application's config file:
+
+- `claude-desktop`: `~/Library/Application Support/Claude/claude_desktop_config.json`
+- `claude-code`: `~/.claude.json` or `.mcp.json`
+- `chatgpt-desktop`: similar to the claude-desktop format
+
+| Argument / Option | Type | Default | Description |
+|---|---|---|---|
+| `TARGET` | TEXT | required | Target application: `claude-desktop`, `claude-code`, or `chatgpt-desktop` |
+| `--name`, `-n` | TEXT | `superset` | Server name in the config |
+| `--mcp-url` | TEXT | config default | MCP service URL |
+| `--token` | TEXT | dynamic JWT | Bearer token |
+
+```bash
+# Add your MCP server to Claude Desktop
+testmcpy config-mcp claude-desktop
+
+# Add to Claude Code under a custom name with an explicit token
+testmcpy config-mcp claude-code --name my-server --token "$MCP_TOKEN"
+```
+
+## testmcpy add-mcp
+
+Interactive wizard to add an MCP server to your configuration. Walks you through: name, transport, connection, auth, test, and save. See [Authentication](/concepts/authentication) for the auth types it supports.
+
+This command takes no options besides `--help`.
+
+```bash
+testmcpy add-mcp
+```
+
+## testmcpy add-llm
+
+Interactive wizard to add an LLM provider to your configuration. Walks you through: provider type, model, API key, test, and save.
+
+This command takes no options besides `--help`.
+
+```bash
+testmcpy add-llm
+```
+
+## testmcpy add-test
+
+Interactive wizard to create a test case YAML file. Walks you through: file name, prompts, evaluators, and a YAML preview. See [Test Format](/concepts/test-format) for what the generated file contains.
+
+This command takes no options besides `--help`.
+
+```bash
+testmcpy add-test
+```

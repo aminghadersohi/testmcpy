@@ -1,0 +1,60 @@
+---
+title: Test Manager
+description: Browse, edit, and run YAML test suites with live log streaming, run history, and crash-safe reconnection.
+---
+
+{/* Source: testmcpy/ui/src/pages/TestManager.jsx + README.md — keep in sync */}
+
+import { Callout } from 'nextra/components'
+
+# Test Manager
+
+**Route:** `/tests`
+
+The Test Manager is a small IDE for your YAML test suites: a file tree on the left, a code editor in the middle, and a bottom panel that streams logs and results as tests run.
+
+![Test Manager](/screenshots/test-manager.png)
+
+## Test file browser
+
+- Test files are grouped by folder across all configured test locations.
+- Create a new YAML file directly, or use the **Create Test Case** wizard, which walks you through file name, test name, and the prompt to send.
+- Files can be deleted from the tree (with confirmation).
+
+## Editor
+
+The Monaco-based editor supports:
+
+- **Edit mode** toggle with save, plus word wrap and minimap settings.
+- A status bar showing the cursor position.
+- A note when a suite declares `provider`/`model` at the top level — that override takes precedence over the selected LLM profile default.
+
+## Running tests
+
+- Pick MCP profile(s) and an LLM profile in the header, then run the open suite.
+- **Run all LLMs** executes the suite against every configured LLM provider in one go, so you can compare providers side by side.
+- A background-runs indicator tracks in-flight and **queued** runs, so you can navigate away while tests execute.
+
+## Bottom panel
+
+Four tabs:
+
+- **Logs** — live streaming output while the run executes.
+- **Results** — per-test pass/fail, evaluator outcomes, and metrics for the live run (or a pinned history run).
+- **Dashboard** — aggregate view of the run.
+- **History** — past runs for this suite, filterable by text, provider, and failed-only, sortable, with multi-select delete.
+
+## Crash-safe runs
+
+Runs stream over a WebSocket with incremental persistence and heartbeats. If the connection drops mid-run, the UI shows *"Connection lost — reconnecting to the run…"* and reattaches automatically — results are not lost if the browser tab or connection dies.
+
+<Callout type="info">
+Completed runs also appear on the [Reports](/web-ui/reports) page, alongside smoke-test reports, with cost and evaluation breakdowns.
+</Callout>
+
+## Typical workflow
+
+1. Open or create a YAML suite in the file tree (or start from the wizard).
+2. Select MCP and LLM profiles in the header.
+3. Run the suite and watch the **Logs** tab stream; results land in the **Results** tab.
+4. Use **Run all LLMs** to benchmark providers, then explore the run in **History** or on the [Performance](/web-ui/metrics-and-comparison) page.

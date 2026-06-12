@@ -14,13 +14,14 @@
   <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.10+-blue.svg" alt="Python 3.10+"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="License"></a>
   <a href="https://pypi.org/project/testmcpy/"><img src="https://img.shields.io/badge/pypi-testmcpy-blue" alt="PyPI"></a>
+  <a href="https://preset-io.github.io/testmcpy"><img src="https://img.shields.io/badge/docs-preset--io.github.io-7aa2f7" alt="Documentation"></a>
 </p>
 
 ![MCP Explorer — tools, resources, and prompts from a connected MCP service](https://raw.githubusercontent.com/preset-io/testmcpy/main/docs/screenshots/mcp-explorer.png)
 
 ---
 
-**[Documentation](context/)** | **[Examples](examples/)** | **[Contributing](CONTRIBUTING.md)** | **[Discussions](https://github.com/preset-io/testmcpy/discussions)**
+**[Documentation](https://preset-io.github.io/testmcpy)** | **[Getting Started](https://preset-io.github.io/testmcpy/getting-started)** | **[CLI Reference](https://preset-io.github.io/testmcpy/cli)** | **[Examples](examples/)** | **[Contributing](CONTRIBUTING.md)** | **[Discussions](https://github.com/preset-io/testmcpy/discussions)**
 
 ---
 
@@ -317,6 +318,8 @@ testmcpy run tests/ --model claude-haiku-4-5
 
 ## Commands Reference
 
+The highlights are below — the full reference for all 38 commands lives at **[preset-io.github.io/testmcpy/cli](https://preset-io.github.io/testmcpy/cli)**.
+
 | Command | Description |
 |---------|-------------|
 | **Setup** | |
@@ -332,6 +335,12 @@ testmcpy run tests/ --model claude-haiku-4-5
 | `testmcpy research` | Test LLM tool-calling capabilities |
 | `testmcpy chat` | Interactive chat with MCP tools |
 | `testmcpy compare` | Multi-model comparison |
+| **Quality & Benchmarking** | |
+| `testmcpy bench` | Run a suite across models × profiles × repeats |
+| `testmcpy conformance` | Run the official MCP spec conformance suite |
+| `testmcpy score` | Grade tool surface for LLM usability (0-100, A-F) |
+| `testmcpy scan` | Static security scan of tool metadata (SARIF output) |
+| `testmcpy matrix` / `leaderboard` / `flaky` | Per-test × per-config analytics |
 | **Advanced** | |
 | `testmcpy baseline-save` | Save current test results as a named baseline |
 | `testmcpy baseline-compare` | Compare a run against a saved baseline |
@@ -379,7 +388,7 @@ Environment variables are also supported: `MCP_AUTH_TOKEN`, `MCP_JWT_URL`, `MCP_
 
 ## Web Interface
 
-Optional React-based UI with 14 pages for visual testing and analytics:
+Optional React-based UI for visual testing and analytics — every page is documented at **[preset-io.github.io/testmcpy/web-ui](https://preset-io.github.io/testmcpy/web-ui)**:
 
 ![Test Manager — browse YAML suites, kick off runs, watch results stream in](https://raw.githubusercontent.com/preset-io/testmcpy/main/docs/screenshots/test-manager.png)
 
@@ -397,11 +406,9 @@ testmcpy serve
 | `/tests` | Test Manager | YAML test browser, execution, results |
 | `/reports` | Reports | All test results, evaluations, cost analysis |
 | `/chat` | Chat Interface | Multi-turn conversation with MCP tools |
-| `/metrics` | Metrics Dashboard | Performance and cost analytics |
-| `/compare` | Run Comparison | Side-by-side model comparison |
-| `/compatibility` | Compatibility Matrix | Tool/model compatibility view |
-| `/mcp-health` | MCP Health | Server health monitoring |
-| `/security` | Security Dashboard | Security analysis |
+| `/performance` | Performance | Per-test matrix and config leaderboard (also serves `/metrics`, `/compare`) |
+| `/servers` | Servers | Health monitoring + cross-server schema compatibility (also serves `/mcp-health`, `/compatibility`) |
+| `/security` | Security Dashboard | Security evaluator results and risk summary |
 | `/generation-history` | Generation History | AI test generation logs |
 | `/auth-debugger` | Auth Debugger | Auth flow debugging |
 | `/config` | Configuration | Settings and environment |
@@ -418,7 +425,19 @@ Access at `http://localhost:8000`.
     <td align="center"><img src="https://raw.githubusercontent.com/preset-io/testmcpy/main/docs/screenshots/auth-debugger.png" alt="Auth Debugger page"><br><sub>Auth Debugger — step through OAuth / JWT / Bearer flows</sub></td>
   </tr>
   <tr>
+    <td align="center"><img src="https://raw.githubusercontent.com/preset-io/testmcpy/main/docs/screenshots/metrics.png" alt="Performance matrix page"><br><sub>Performance — per-test results across model and MCP configurations</sub></td>
+    <td align="center"><img src="https://raw.githubusercontent.com/preset-io/testmcpy/main/docs/screenshots/compare.png" alt="Leaderboard page"><br><sub>Leaderboard — configs ranked by pass rate, cost-per-pass, latency</sub></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="https://raw.githubusercontent.com/preset-io/testmcpy/main/docs/screenshots/security.png" alt="Security Dashboard page"><br><sub>Security Dashboard — security evaluator results and risk summary</sub></td>
+    <td align="center"><img src="https://raw.githubusercontent.com/preset-io/testmcpy/main/docs/screenshots/compatibility.png" alt="Schema compatibility page"><br><sub>Schema Compat — cross-server tool schema compatibility matrix</sub></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="https://raw.githubusercontent.com/preset-io/testmcpy/main/docs/screenshots/mcp-health.png" alt="Server health page"><br><sub>Servers — MCP server health monitoring</sub></td>
     <td align="center"><img src="https://raw.githubusercontent.com/preset-io/testmcpy/main/docs/screenshots/mcp-profiles.png" alt="MCP Profiles page"><br><sub>MCP Profiles — manage MCP service connections</sub></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="https://raw.githubusercontent.com/preset-io/testmcpy/main/docs/screenshots/llm-profiles.png" alt="LLM Profiles page"><br><sub>LLM Profiles — provider configurations with model pricing</sub></td>
     <td align="center"><img src="https://raw.githubusercontent.com/preset-io/testmcpy/main/docs/screenshots/config.png" alt="Configuration page"><br><sub>Configuration — current settings and client snippets</sub></td>
   </tr>
 </table>
@@ -540,7 +559,7 @@ class MyEvaluator(BaseEvaluator):
         )
 ```
 
-See **[Evaluator Reference](context/concepts/evaluators.md)** for complete documentation.
+See the **[Evaluator Reference](https://preset-io.github.io/testmcpy/concepts/evaluators)** and the **[Custom Evaluators guide](https://preset-io.github.io/testmcpy/guides/custom-evaluators)** for complete documentation.
 
 ## Examples
 
@@ -561,7 +580,7 @@ We welcome contributions! Whether it's bug reports, feature requests, documentat
 
 - **Issues**: [Report bugs or request features](https://github.com/preset-io/testmcpy/issues)
 - **Discussions**: [Ask questions and share ideas](https://github.com/preset-io/testmcpy/discussions)
-- **Documentation**: Browse the [context/](context/) directory
+- **Documentation**: [preset-io.github.io/testmcpy](https://preset-io.github.io/testmcpy) (agent-facing source docs live in [context/](context/))
 - **Examples**: Explore [examples/](examples/) for sample code
 
 ## License

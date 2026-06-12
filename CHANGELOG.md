@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-06-12
+
+### Added
+- **Hosted documentation site** at https://preset-io.github.io/testmcpy —
+  Nextra 3 static site in `docs-site/` with a full CLI reference (all 38
+  commands from live `--help` output), per-page Web UI docs with
+  screenshots, concepts, guides, and a FAQ. Deployed to GitHub Pages via
+  `deploy-docs.yml`; PRs touching `docs-site/` are build-checked by
+  `docs-pr-check.yml`. Includes `llms.txt`, sitemap, and robots.txt
+- **5 new UI screenshots**: Performance matrix, Leaderboard, Server
+  health, Schema Compat matrix, and Security Dashboard
+
+### Fixed
+- **Schema Compat (Servers page) never worked**: `MCPProfileSelector`
+  read `profile_id` from `/api/mcp/profiles`, which returns `id` — server
+  selection produced `undefined:<name>` IDs, so the compatibility matrix
+  reported every tool as Missing and tool auto-discovery returned nothing
+
+### Changed
+- **README refresh**: docs badge + hosted-docs links, corrected Web UI
+  route table (`/performance` and `/servers` are canonical; `/metrics`,
+  `/compare`, `/mcp-health`, `/compatibility` are redirects), expanded
+  command highlights, and a larger screenshot gallery
+- **All 9 existing screenshots recaptured** at 1600x1000 in dark theme
+  against a live demo MCP server with populated data
+
 ## [0.9.2] - 2026-06-11
 
 ### Fixed

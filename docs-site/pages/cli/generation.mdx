@@ -1,0 +1,88 @@
+---
+title: Generation & Quality Commands
+description: testmcpy generate, scan, and score — generate test suites and grade an MCP server's tool surface.
+---
+
+{/* Source: live `testmcpy --help` output — regenerate when CLI changes */}
+
+import { Callout } from 'nextra/components'
+
+# Generation & Quality
+
+Commands that look at an MCP server's tool surface itself: generate a test suite from it, scan its metadata for security red flags, and grade its usability for LLMs.
+
+## testmcpy generate
+
+Generate a test suite for an MCP service. Connects to the service, discovers all available tools, and generates comprehensive test YAML files for each tool. The output follows the standard [test format](/concepts/test-format) and can be run immediately with [`testmcpy run`](/cli/running-tests#testmcpy-run).
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `--profile`, `-p` | TEXT | — | MCP service profile from `.mcp_services.yaml` |
+| `--mcp-url` | TEXT | — | MCP service URL (overrides profile) |
+| `--output`, `-o` | PATH | `tests/generated` | Output directory for generated tests |
+| `--prefix` | TEXT | `test_` | Prefix for generated test files |
+| `--examples` / `--no-examples` | flag | `examples` | Include example test cases for each tool |
+| `--verbose`, `-v` | flag | off | Show detailed progress |
+
+```bash
+# Generate tests from a profile
+testmcpy generate --profile my-profile
+
+# Generate from a URL into a custom directory, no example cases
+testmcpy generate --mcp-url http://localhost:5008/mcp \
+  --output tests/prod-tests --no-examples
+```
+
+<Callout type="info">
+AI-assisted generation runs are logged and browsable on the Generation History page of the [Web UI](/web-ui).
+</Callout>
+
+## testmcpy scan
+
+Scan an MCP server's tool metadata for poisoning and rug-pull patterns. With a saved baseline, it can also detect tools whose descriptions or schemas changed since the baseline (rug-pull checks).
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `--mcp-url` | TEXT | — | MCP service URL (overrides profile) |
+| `--profile` | TEXT | — | MCP service profile from `.mcp_services.yaml` |
+| `--format` | TEXT | `table` | Output format: `table`, `json`, or `sarif` |
+| `--output`, `-o` | PATH | — | Write the report (JSON, or SARIF with `--format sarif`) |
+| `--baseline` | PATH | — | Baseline JSON (from `--save-baseline`); enables rug-pull checks |
+| `--save-baseline` | PATH | — | Save the current tool list as a baseline and exit |
+| `--max-severity` | TEXT | — | Exit 1 if any finding exceeds this severity: `low`, `medium`, `high`, `critical` |
+| `--gate` | flag | off | Read `security.max_severity` from `.testmcpy-gate.yaml` (unified gate) |
+
+```bash
+# One-off scan
+testmcpy scan --profile prod
+
+# Save a baseline now, then check for rug-pulls later
+testmcpy scan --profile prod --save-baseline scan-baseline.json
+testmcpy scan --profile prod --baseline scan-baseline.json --max-severity medium
+
+# SARIF output for code-scanning integrations
+testmcpy scan --profile prod --format sarif -o scan.sarif
+```
+
+## testmcpy score
+
+Grade an MCP server's tool surface for LLM usability — a 0-100 score with an A-F letter grade.
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `--mcp-url` | TEXT | — | MCP service URL (overrides profile) |
+| `--profile` | TEXT | — | MCP service profile from `.mcp_services.yaml` |
+| `--format` | TEXT | `table` | Output format: `table` or `json` |
+| `--output`, `-o` | PATH | — | Write the full result JSON to this path |
+| `--min-score` | FLOAT | — | Exit 1 if the score is below this value (CI gate) |
+| `--gate` | flag | off | Read `usability.min_score` from `.testmcpy-gate.yaml` (unified gate) |
+
+```bash
+# Grade the default profile
+testmcpy score
+
+# CI: fail the build below 80, save the result for a badge
+testmcpy score --profile prod --min-score 80 -o score.json
+```
+
+The saved JSON feeds [`testmcpy badge score`](/cli/advanced#testmcpy-badge) for a shields.io quality badge. The `--gate` flag shares the unified `.testmcpy-gate.yaml` used by [`run --gate`](/cli/running-tests#testmcpy-run), [`scan --gate`](#testmcpy-scan), and [`conformance --gate`](/cli/benchmarking#testmcpy-conformance).

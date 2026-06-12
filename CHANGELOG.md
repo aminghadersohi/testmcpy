@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.2] - 2026-06-12
+
+### Fixed
+- **Reports deep link didn't scroll the run into view**: opening
+  `/reports?run=<run_id>` loaded the run's details in the right panel but
+  left the runs list at the top, so the highlighted run could be far
+  off-screen. The deep-linked run's list item (tests and smoke tabs) is now
+  scrolled into view once it renders
+
 ## [0.10.1] - 2026-06-12
 
 ### Fixed

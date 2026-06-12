@@ -1,5 +1,8 @@
 # Installation Guide
 
+> The full installation guide (PyPI, source, Homebrew, optional extras,
+> troubleshooting) lives at **https://preset-io.github.io/testmcpy/installation**.
+
 ## Install from Source (Development)
 
 ```bash

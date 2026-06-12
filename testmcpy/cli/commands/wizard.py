@@ -104,40 +104,32 @@ def add_mcp():
     # Step 5: Test Connection
     console.print("\n[bold yellow]Step 5: Test Connection[/bold yellow]")
     if Confirm.ask("Test connection now?", default=True):
-        from testmcpy.mcp_profiles import AuthConfig, MCPServer
-
-        test_url = mcp_url if transport == "sse" else f"stdio://{command}"
-        mcp_server = MCPServer(
-            name=name,
-            mcp_url=test_url,
-            auth=AuthConfig(auth_type=auth_config.get("type", "none")),
-            timeout=timeout,
-            rate_limit_rpm=rate_limit,
-            transport=transport,
-            command=command if transport == "stdio" else None,
-            args=args_str.split() if args_str else None,
-        )
-
         console.print("[dim]Connecting...[/dim]")
         try:
-            from testmcpy.src.mcp_client import MCPClient
+            from testmcpy.src.mcp_client import MCPClient, MCPError, StdioMCPClient
 
-            client = MCPClient(
-                mcp_url=mcp_server.mcp_url,
-                auth=mcp_server.auth.to_dict() if mcp_server.auth else None,
-                timeout=mcp_server.timeout,
-                transport=mcp_server.transport,
-                command=mcp_server.command,
-                args=mcp_server.args,
-            )
-            tools = asyncio.run(client.list_tools())
+            if transport == "stdio":
+                client: MCPClient | StdioMCPClient = StdioMCPClient(
+                    command=command, args=args_str.split() if args_str else None
+                )
+            else:
+                client = MCPClient(mcp_url, auth=auth_config)
+
+            async def _test_connection():
+                try:
+                    await client.initialize(timeout=float(timeout))
+                    return await client.list_tools(timeout=float(timeout))
+                finally:
+                    await client.close()
+
+            tools = asyncio.run(_test_connection())
             console.print(f"[green]Connected! Found {len(tools)} tools.[/green]")
             if tools:
                 tool_names = [t.name if hasattr(t, "name") else str(t) for t in tools[:5]]
                 console.print(
                     f"[dim]  Tools: {', '.join(tool_names)}{'...' if len(tools) > 5 else ''}[/dim]"
                 )
-        except (ConnectionError, TimeoutError, OSError, RuntimeError, ValueError) as e:
+        except (MCPError, ConnectionError, TimeoutError, OSError, RuntimeError, ValueError) as e:
             console.print(f"[red]Connection failed: {e}[/red]")
             if not Confirm.ask("Continue anyway?", default=True):
                 raise typer.Abort()

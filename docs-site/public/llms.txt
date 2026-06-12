@@ -1,0 +1,55 @@
+# testmcpy
+
+> testmcpy is "pytest for MCP servers" — a testing and evaluation framework for Model Context Protocol (MCP) services. It runs YAML-defined test suites against MCP servers using real LLMs (Anthropic, OpenAI, Ollama, and more), scores results with 40+ built-in evaluators, and ships both a CLI and a web UI.
+
+testmcpy is open-source software licensed under Apache 2.0, created by Preset, Inc.
+
+- Website: https://preset-io.github.io/testmcpy
+- GitHub: https://github.com/preset-io/testmcpy
+- PyPI: https://pypi.org/project/testmcpy/
+
+## Core Documentation
+
+- [Getting Started](https://preset-io.github.io/testmcpy/getting-started): Install testmcpy, configure an LLM provider and MCP service, and run your first test
+- [Installation](https://preset-io.github.io/testmcpy/installation): Install from PyPI, source, or Homebrew, with optional extras
+- [FAQ](https://preset-io.github.io/testmcpy/faq): Comparison with other MCP tools and common troubleshooting
+
+## CLI Reference
+
+- [CLI Overview](https://preset-io.github.io/testmcpy/cli): All commands, global options, and quick examples
+- [Setup & Diagnostics](https://preset-io.github.io/testmcpy/cli/setup): setup wizard, doctor, config commands
+- [Discovery](https://preset-io.github.io/testmcpy/cli/discovery): tools, profiles, status, smoke-test
+- [Running Tests](https://preset-io.github.io/testmcpy/cli/running-tests): run, research, compare, multi-env, CI gating
+- [Chat & Serve](https://preset-io.github.io/testmcpy/cli/chat-and-serve): interactive chat, web UI server, TUI
+- [Generation & Quality](https://preset-io.github.io/testmcpy/cli/generation): AI test generation, security scan, usability score
+- [Benchmarking](https://preset-io.github.io/testmcpy/cli/benchmarking): bench matrix runs, MCP conformance suite
+- [Baselines](https://preset-io.github.io/testmcpy/cli/baselines): baseline save/compare/list for regression detection
+- [Advanced](https://preset-io.github.io/testmcpy/cli/advanced): mutation testing, metamorphic testing, coverage, exports, badges
+
+## Web UI
+
+- [Web UI Overview](https://preset-io.github.io/testmcpy/web-ui): Launching the UI and page index
+- [MCP Explorer](https://preset-io.github.io/testmcpy/web-ui/mcp-explorer): Tool discovery and smoke tests
+- [Test Manager](https://preset-io.github.io/testmcpy/web-ui/test-manager): Run YAML test suites with live streaming results
+- [Reports](https://preset-io.github.io/testmcpy/web-ui/reports): Unified test results, evaluations, and cost analysis
+- [Chat](https://preset-io.github.io/testmcpy/web-ui/chat): Interactive chat with MCP tools
+- [Metrics & Comparison](https://preset-io.github.io/testmcpy/web-ui/metrics-and-comparison): Performance analytics and model comparison
+- [Health & Security](https://preset-io.github.io/testmcpy/web-ui/health-and-security): Server health monitoring and security scanning
+- [Profiles](https://preset-io.github.io/testmcpy/web-ui/profiles): MCP service and LLM provider profile management
+- [Auth Debugger](https://preset-io.github.io/testmcpy/web-ui/auth-debugger): JWT/OAuth/Bearer auth flow debugging
+- [Config & History](https://preset-io.github.io/testmcpy/web-ui/config-and-history): Settings and AI generation history
+
+## Concepts
+
+- [Architecture](https://preset-io.github.io/testmcpy/concepts/architecture): System design, components, and data flow
+- [Test Format](https://preset-io.github.io/testmcpy/concepts/test-format): YAML test definition format, multi-turn tests, load testing
+- [Evaluators](https://preset-io.github.io/testmcpy/concepts/evaluators): Complete reference for all built-in evaluators
+- [Configuration](https://preset-io.github.io/testmcpy/concepts/configuration): LLM provider and MCP service configuration
+- [Authentication](https://preset-io.github.io/testmcpy/concepts/authentication): JWT, OAuth, Bearer, and mTLS auth mechanisms
+- [MCP Profiles](https://preset-io.github.io/testmcpy/concepts/mcp-profiles): MCP service profile configuration
+
+## Guides
+
+- [Writing Tests](https://preset-io.github.io/testmcpy/guides/writing-tests): YAML test patterns and evaluator usage
+- [Custom Evaluators](https://preset-io.github.io/testmcpy/guides/custom-evaluators): Building domain-specific evaluators
+- [CI/CD Integration](https://preset-io.github.io/testmcpy/guides/ci-cd-integration): GitHub Actions, GitLab CI, and gating

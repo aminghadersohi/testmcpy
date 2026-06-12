@@ -1,0 +1,57 @@
+/* testmcpy Documentation Custom Styles — Tokyo Night palette */
+
+:root {
+  --tm-bg: #1a1b26;
+  --tm-blue: #7aa2f7;
+  --tm-blue-light: #9ab8ff;
+  --tm-blue-dark: #5a7ec7;
+  --tm-purple: #bb9af7;
+  --tm-green: #9ece6a;
+  --tm-gradient: linear-gradient(90deg, #7aa2f7 0%, #bb9af7 100%);
+}
+
+/* Gradient text utility class for brand consistency */
+.gradient-text {
+  background: var(--tm-gradient);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  font-weight: 700;
+}
+
+/* Code blocks with brand accent */
+.dark pre {
+  border-left: 3px solid var(--tm-blue);
+}
+
+/* Inline code styling */
+.dark :not(pre) > code {
+  background: rgba(122, 162, 247, 0.1);
+  border: 1px solid rgba(122, 162, 247, 0.2);
+}
+
+/* Table styling */
+.dark table thead {
+  background: rgba(122, 162, 247, 0.1);
+}
+
+/* Search highlight */
+.dark mark {
+  background: rgba(122, 162, 247, 0.3);
+  color: white;
+}
+
+/* Custom scrollbar */
+.dark ::-webkit-scrollbar-thumb {
+  background: var(--tm-blue-dark);
+}
+
+.dark ::-webkit-scrollbar-thumb:hover {
+  background: var(--tm-blue);
+}
+
+/* Screenshots: rounded corners + subtle border */
+article img[src*='/screenshots/'] {
+  border-radius: 8px;
+  border: 1px solid rgba(122, 162, 247, 0.25);
+}

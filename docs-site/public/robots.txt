@@ -1,0 +1,14 @@
+# robots.txt for preset-io.github.io/testmcpy
+User-agent: *
+Allow: /
+Crawl-delay: 1
+
+# Block internal/build paths
+Disallow: /_next/
+Disallow: /404
+
+# Sitemap
+Sitemap: https://preset-io.github.io/testmcpy/sitemap.xml
+
+# LLM metadata
+# See https://preset-io.github.io/testmcpy/llms.txt for LLM-optimized content

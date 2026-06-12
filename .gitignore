@@ -152,6 +152,15 @@ test_output.txt
 # Node modules (for web UI)
 node_modules/
 
+# Docs site (Nextra) build output + assets synced from docs/ at build time
+docs-site/.next/
+docs-site/out/
+docs-site/next-env.d.ts
+docs-site/tsconfig.tsbuildinfo
+docs-site/public/screenshots/
+docs-site/public/logo.svg
+docs-site/public/sitemap*.xml
+
 # Build artifacts
 dist/
 build/

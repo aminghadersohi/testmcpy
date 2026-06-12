@@ -708,6 +708,9 @@ function Reports() {
   const [copiedCmd, setCopiedCmd] = useState(false)
   const autoRefreshRef = useRef(null)
   const deepLinkProcessed = useRef(false)
+  // run_id/report_id of a deep-linked run whose list item still needs to be
+  // scrolled into view once it renders (cleared after the scroll happens)
+  const pendingScrollRunId = useRef(null)
 
   const loadFilterOptions = useCallback(async () => {
     try {
@@ -818,10 +821,21 @@ function Reports() {
     const typeParam = searchParams.get('type') || 'tests'
     if (runParam) {
       deepLinkProcessed.current = true
+      pendingScrollRunId.current = runParam
       setActiveTab(typeParam)
       loadRunDetails(runParam, typeParam)
     }
   }, [loading, searchParams])
+
+  // Scroll the deep-linked run's list item into view once it renders.
+  // Used as a callback ref on each list item; inline arrows re-fire on every
+  // render, so this also catches items that appear after the deep-link effect.
+  const scrollPendingRunIntoView = (el, id) => {
+    if (el && id && pendingScrollRunId.current === id) {
+      pendingScrollRunId.current = null
+      el.scrollIntoView?.({ block: 'center' })
+    }
+  }
 
   // Update URL when selecting a run
   const selectRun = useCallback((runId, type) => {
@@ -1006,6 +1020,7 @@ function Reports() {
     return (
       <div
         key={run.run_id}
+        ref={el => scrollPendingRunIntoView(el, run.run_id)}
         className={`p-4 cursor-pointer transition-colors group ${
           selectMode && isSelected
             ? 'bg-primary/10 border-l-2 border-l-primary'
@@ -1557,6 +1572,7 @@ function Reports() {
                   {filteredSmokeReports.map((report) => (
                     <div
                       key={report.report_id}
+                      ref={el => scrollPendingRunIntoView(el, report.report_id)}
                       className={`p-4 cursor-pointer transition-colors group ${
                         selectedRun?.id === report.report_id
                           ? 'bg-primary/10 border-l-2 border-l-primary'

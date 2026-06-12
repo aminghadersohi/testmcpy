@@ -16,6 +16,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so the SPA catch-all route answered with 405 Method Not Allowed. Added the
   standalone endpoint, which tests an inline MCP config (sse/http or stdio,
   with none/bearer/jwt/oauth auth) before it is saved to any profile
+- **CLI `add-mcp` wizard test step always crashed**: it constructed
+  `MCPClient` with keyword arguments that don't exist (`mcp_url=`,
+  `timeout=`, `transport=`, `command=`, `args=`) and called `list_tools()`
+  without `initialize()`. It now uses `StdioMCPClient` for stdio and
+  `MCPClient(url, auth=...)` for sse, initializes/closes the client, passes
+  the full collected auth config (bearer token / JWT / OAuth details were
+  previously dropped), and catches `MCPError` so connection failures show
+  the friendly message instead of crashing the wizard
+- **`POST /api/tools/compare` and `POST /api/tools/{tool}/debug` were
+  broken**: both called `MCPClient(mcp_url=...)` (the parameter is
+  `base_url`), `mcp_config.get_mcp_url()` (no such method on `MCPServer`),
+  passed an `AuthConfig` object where a dict is expected, and called
+  `call_tool` with `(name=, arguments=)` instead of an `MCPToolCall`;
+  compare also called nonexistent `client.cleanup()`. Every comparison
+  iteration / debug call failed as a result. Tool errors are now also
+  surfaced (`is_error` results previously counted as successes), and
+  results are serialized JSON-safe
 
 ## [0.10.0] - 2026-06-12
 

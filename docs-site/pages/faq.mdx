@@ -1,0 +1,122 @@
+---
+title: FAQ
+description: Frequently asked questions — how testmcpy compares to other tools, setup and connection troubleshooting, auth, CI, and cost.
+---
+
+{/* New page — seeded from README comparison + troubleshooting */}
+
+# FAQ
+
+## How does testmcpy compare to MCP Inspector, MCPJam, and promptfoo?
+
+| | testmcpy | [MCP Inspector](https://github.com/modelcontextprotocol/inspector) | [MCPJam](https://github.com/MCPJam/inspector) | [promptfoo](https://github.com/promptfoo/promptfoo) |
+|---|---|---|---|---|
+| Automated LLM-driven evals of MCP servers | ✅ YAML suites, 40+ evaluators | ❌ manual testing | ✅ | ⚠️ generic LLM eval with an MCP provider |
+| Multi-provider (Claude / GPT / Gemini / Ollama / Bedrock…) | ✅ 11 providers incl. agent SDKs | n/a | ✅ | ✅ |
+| CI gate with exit codes + JUnit | ✅ `--gate`, `--junit-xml` | ❌ | ✅ | ✅ |
+| Cost & token tracking per test/model | ✅ | ❌ | ⚠️ | ⚠️ |
+| Multi-turn, mutation & metamorphic testing | ✅ | ❌ | ❌ | ⚠️ |
+| Auth testing (JWT/OAuth/mTLS) + debugger | ✅ 7 auth types | ⚠️ OAuth only | ✅ OAuth debugger | ❌ |
+| Python-native (`pip`/`uvx`, pytest-friendly) | ✅ | ❌ npm | ❌ npm | ❌ npm |
+
+Use MCP Inspector for quick manual poking; reach for testmcpy when you want repeatable, scored, CI-gated evaluation of how real models use your server.
+
+## Which Python versions are supported?
+
+Python 3.10 through 3.12. Python 3.13+ is not yet supported due to dependency compatibility. If your system default is the wrong version, create the virtual environment with a specific interpreter (e.g., `python3.11 -m venv venv`). See [Installation](/installation).
+
+## Do I need a paid LLM API key?
+
+No. testmcpy supports [Ollama](https://ollama.com) for free local models — great for development and frequent CI runs:
+
+```bash
+brew install ollama        # or curl -fsSL https://ollama.com/install.sh | sh
+ollama serve
+ollama pull llama3.1:8b
+testmcpy run tests/ --model llama3.1:8b --provider ollama
+```
+
+For production-grade tool-calling accuracy, Anthropic models (`claude-haiku-4-5`, `claude-sonnet-4-5`) are recommended.
+
+## testmcpy can't connect to my MCP server. What should I check?
+
+Work through these in order:
+
+```bash
+testmcpy config-cmd   # Is MCP_URL what you expect, and which source set it?
+testmcpy tools        # Can testmcpy list tools from the server?
+testmcpy doctor       # Full diagnostics with suggested fixes
+```
+
+`testmcpy doctor` checks your Python version, configuration file validity, API keys, MCP service reachability, LLM provider access, and dependencies — and prints a fix-it hint for each failure (e.g., "Run 'testmcpy setup' to create configuration"). Common causes:
+
+- The MCP service isn't running, or the URL/port is wrong
+- Missing or expired auth credentials (`MCP_AUTH_TOKEN`, JWT token/secret)
+- A different config source is winning — remember the priority order: CLI options > profile files > `.env` > `~/.testmcpy` > environment variables > defaults
+
+## How does authentication work? My server needs JWT/OAuth/bearer tokens.
+
+MCP profiles in `.mcp_services.yaml` support an `auth` block with `auth_type: "jwt"`, `"bearer"`, `"oauth"`, or `"none"` (7 auth types in total, including mTLS). You can also pass credentials inline without any config file:
+
+```bash
+testmcpy run tests/ \
+  --mcp-url https://workspace.example.com/mcp \
+  --auth-type jwt \
+  --jwt-url https://auth.example.com/v1/auth/ \
+  --jwt-token $MCP_JWT_TOKEN \
+  --jwt-secret $MCP_JWT_SECRET
+```
+
+To step through an auth flow visually, the [Web UI](/web-ui) has an Auth Debugger page (`/auth-debugger`). See [Authentication](/concepts/authentication) for full details.
+
+## Chat hangs (or fails) on an OAuth profile in a headless environment. Why?
+
+When a chat message hits an OAuth (`oauth_auto_discover`) MCP profile with no cached token, the server opens an interactive browser OAuth flow and retries — controlled by `TESTMCPY_CHAT_OAUTH_LOGIN` (default `true`). That assumes a browser is available on the machine running the server. On headless deployments (CI, remote servers), set `TESTMCPY_CHAT_OAUTH_LOGIN=false` so the request fails fast with a clear error instead of blocking on a login that can never complete.
+
+## How do I make my CI build fail when tests fail?
+
+Use `--gate`, which exits non-zero when the run misses your thresholds, and `--junit-xml` for CI systems that ingest JUnit natively:
+
+```bash
+testmcpy run tests/ --gate --min-pass-rate 85 --junit-xml junit.xml
+```
+
+Thresholds (pass rate, failure budget, required tests, baseline regressions) live in `.testmcpy-gate.yaml`. On GitHub Actions you can also use the bundled reusable Action (`preset-io/testmcpy@v1`) for sticky PR comments and structured outputs. See [CI/CD Integration](/guides/ci-cd-integration).
+
+## My tests pass sometimes and fail other times. Is that a bug?
+
+Usually not — LLMs are nondeterministic, so some variance is expected. Strategies to manage it:
+
+- Gate on a **pass rate** (`--gate --min-pass-rate 85`) instead of requiring 100%
+- Reserve `required_tests` in `.testmcpy-gate.yaml` for flows that must always pass
+- Save a baseline (`testmcpy baseline-save`) and compare runs (`testmcpy baseline-compare`) to distinguish regressions from noise
+- Write less brittle evaluators: prefer `was_mcp_tool_called` and parameter checks over exact-text `final_answer_contains` assertions
+- Try a more capable model — flakiness on a small model often means the prompt or tool descriptions are ambiguous, which is itself a useful finding
+
+## How do I keep LLM costs down?
+
+- Use `claude-haiku-4-5` for development and bulk runs; reserve `claude-sonnet-4-5` for critical suites
+- Use Ollama locally for free iteration
+- Add the `token_usage_reasonable` evaluator (`max_tokens`, `max_cost`) to catch runaway tests
+- Every run reports tokens and cost per test, so regressions are visible in the output and in the [Web UI](/web-ui) Reports page
+
+## What if I hit API rate limits?
+
+Set `rate_limit_rpm` on the MCP profile in `.mcp_services.yaml`, switch to a local Ollama model for high-frequency runs, or use a cheaper/faster model to reduce request volume. Runs are already rate-limited according to your profile settings.
+
+## Where does configuration live, and which source wins?
+
+`testmcpy setup` creates two YAML files in your current directory: `.llm_providers.yaml` (LLM providers/models) and `.mcp_services.yaml` (MCP server profiles). You can also use a `.env` file or `~/.testmcpy`. Priority, highest first:
+
+1. CLI options (`--model`, `--provider`, `--mcp-url`, …)
+2. Profile files (`.llm_providers.yaml`, `.mcp_services.yaml`)
+3. `.env` in the current directory
+4. `~/.testmcpy` user config
+5. Environment variables
+6. Built-in defaults
+
+Run `testmcpy config-cmd` to see the effective configuration and where each value came from. See [Configuration](/concepts/configuration).
+
+## Can I write my own evaluators?
+
+Yes — extend `BaseEvaluator` and implement `evaluate(context) -> EvalResult`. The context gives you the prompt, the LLM's response, all tool calls and results, and execution metadata (duration, tokens, cost). See the [Custom Evaluators guide](/guides/custom-evaluators) for five worked examples, and [Evaluators](/concepts/evaluators) for the 40+ built-ins.

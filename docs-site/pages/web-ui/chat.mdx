@@ -1,0 +1,46 @@
+---
+title: Chat
+description: Multi-turn conversation with your MCP tools — inspect tool calls, run evaluators on responses, and turn chats into test cases.
+---
+
+{/* Source: testmcpy/ui/src/pages/ChatInterface.jsx + README.md — keep in sync */}
+
+import { Callout } from 'nextra/components'
+
+# Chat
+
+**Route:** `/chat`
+
+The Chat page is an interactive playground: have a multi-turn conversation with an LLM that has your MCP server's tools available, watch each tool call as it happens, and promote good interactions into test cases.
+
+![Chat](/screenshots/chat.png)
+
+## Profile selection
+
+Chat uses the profiles selected in the header:
+
+- The **first selected MCP profile** supplies the tools (a banner warns if multiple are selected — chat talks to one server at a time).
+- The **selected LLM profile** determines the provider and model (the profile's default provider is used).
+
+See [MCP & LLM Profiles](/web-ui/profiles) to set these up.
+
+## Conversation features
+
+- **System prompt** — set a custom system prompt to guide the LLM's behavior.
+- **History size** — control how many prior messages are sent with each turn.
+- **Streaming status** — responses stream in with a live status indicator.
+- **Tool calls and thinking** — expand or collapse each tool invocation and thinking block to inspect arguments and results.
+- **Cost tracking** — per-response cost is displayed.
+- **Edit a message** and resend, or **regenerate the last response**.
+- **Export as Markdown** or **clear chat history** from the header.
+
+## From chat to tests
+
+Two actions on each assistant response close the loop with the testing workflow:
+
+- **Run evaluators on this response** — pick evaluators and score the response in place.
+- **Create test case from this interaction** — generates a YAML test from the prompt/response pair, ready to refine in the [Test Manager](/web-ui/test-manager).
+
+<Callout type="info">
+For MCP servers behind OAuth, chat can trigger an interactive OAuth login. This is enabled by default and controlled by the `TESTMCPY_CHAT_OAUTH_LOGIN` environment variable — see the [Web UI overview](/web-ui).
+</Callout>

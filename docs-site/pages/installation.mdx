@@ -1,0 +1,323 @@
+---
+title: Installation
+description: Install testmcpy from PyPI, source, or Homebrew, plus optional extras, LLM provider setup, and troubleshooting.
+---
+
+{/* Source: context/guides/installation.md + root INSTALLATION.md — keep in sync */}
+
+import { Callout, Tabs } from 'nextra/components'
+
+# Installation
+
+## System Requirements
+
+- **Python**: 3.10 through 3.12 (`python --version` to check). Python 3.13+ is not yet supported due to dependency compatibility.
+- **macOS / Linux**: fully supported. **Windows**: supported, WSL recommended.
+- **Virtual environment**: always recommended to avoid dependency conflicts:
+
+```bash
+python3 -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+```
+
+## Installation Methods
+
+<Tabs items={['PyPI', 'Source', 'Homebrew']}>
+<Tabs.Tab>
+
+Install the latest stable release:
+
+```bash
+# Basic installation
+pip install testmcpy
+
+# With web UI support
+pip install 'testmcpy[server]'
+
+# With Claude SDK support
+pip install 'testmcpy[sdk]'
+
+# With development tools
+pip install 'testmcpy[dev]'
+
+# All features
+pip install 'testmcpy[all]'
+```
+
+Prefer an isolated CLI install? Use pipx (or `uvx testmcpy` to run without installing):
+
+```bash
+pipx install 'testmcpy[all]'
+```
+
+</Tabs.Tab>
+<Tabs.Tab>
+
+For development or the latest unreleased features:
+
+```bash
+# Clone repository
+git clone https://github.com/preset-io/testmcpy.git
+cd testmcpy
+
+# Create virtual environment
+python3 -m venv venv
+source venv/bin/activate
+
+# Install in development mode
+pip install -e .
+
+# Or with all features
+pip install -e '.[all]'
+```
+
+</Tabs.Tab>
+<Tabs.Tab>
+
+The repository doubles as a Homebrew tap (formula in `Formula/`):
+
+```bash
+brew tap preset-io/testmcpy
+brew install testmcpy
+
+# Verify installation
+testmcpy --help
+```
+
+The formula installs testmcpy and its dependencies from PyPI into a Homebrew-managed virtual environment.
+
+</Tabs.Tab>
+</Tabs>
+
+## Installation Extras
+
+| Extra | Installs | Enables |
+|---|---|---|
+| `[server]` | FastAPI, uvicorn, web dependencies | `testmcpy serve`, [Web UI](/web-ui) at http://localhost:8000, REST API |
+| `[sdk]` | Anthropic's Claude Agent SDK | The `claude-sdk` provider and agent-SDK features |
+| `[dev]` | pytest, mypy, ruff, formatters | Development and contribution workflow |
+| `[all]` | Everything above | All optional features |
+
+## LLM Provider Setup
+
+### Anthropic (Claude)
+
+Best tool-calling accuracy, recommended for production. Get an API key from https://console.anthropic.com/:
+
+```bash
+echo "ANTHROPIC_API_KEY=sk-ant-your-key" >> ~/.testmcpy
+echo "DEFAULT_PROVIDER=anthropic" >> ~/.testmcpy
+echo "DEFAULT_MODEL=claude-haiku-4-5" >> ~/.testmcpy
+```
+
+Models: `claude-haiku-4-5` (fast, cost-effective), `claude-sonnet-4-5` (balanced), `claude-opus-4-1` (highest capability).
+
+### OpenAI (GPT)
+
+Get an API key from https://platform.openai.com/api-keys:
+
+```bash
+echo "OPENAI_API_KEY=sk-your-key" >> ~/.testmcpy
+echo "DEFAULT_PROVIDER=openai" >> ~/.testmcpy
+echo "DEFAULT_MODEL=gpt-4-turbo" >> ~/.testmcpy
+```
+
+### Ollama (Local, Free)
+
+Run models locally without API costs:
+
+```bash
+# Install Ollama (macOS)
+brew install ollama
+# Linux
+curl -fsSL https://ollama.com/install.sh | sh
+
+# Start the service and pull a model
+ollama serve
+ollama pull llama3.1:8b
+
+# Configure testmcpy
+echo "DEFAULT_PROVIDER=ollama" >> ~/.testmcpy
+echo "DEFAULT_MODEL=llama3.1:8b" >> ~/.testmcpy
+```
+
+See the [Ollama library](https://ollama.com/library) for more models.
+
+<Callout type="info">
+testmcpy supports 11 providers in total, including Gemini, AWS Bedrock, xAI, OpenRouter, and agent-SDK providers (Claude SDK, Codex SDK, Gemini SDK). See [Configuration](/concepts/configuration) for the full list.
+</Callout>
+
+## Verification
+
+```bash
+testmcpy --version     # Verify installation
+testmcpy --help        # Check available commands
+testmcpy config-cmd    # View configuration
+testmcpy doctor        # Run diagnostics
+
+# With an MCP service configured:
+testmcpy tools         # List available tools
+testmcpy chat          # Interactive chat
+```
+
+## Configuration
+
+### Quick Setup (Recommended)
+
+```bash
+testmcpy setup
+```
+
+The wizard configures your LLM provider, MCP service URL, and authentication, auto-detecting keys from the environment (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`). It creates two YAML files in your current directory and is idempotent — use `testmcpy setup --force` to overwrite.
+
+### LLM Provider Profiles (.llm_providers.yaml)
+
+```yaml
+default: prod
+
+profiles:
+  prod:
+    name: "Production"
+    description: "High-quality models for production use"
+    providers:
+      - name: "Claude claude-sonnet-4-5"
+        provider: "anthropic"
+        model: "claude-sonnet-4-5"
+        api_key: "${ANTHROPIC_API_KEY}"  # or paste the key directly
+        timeout: 60
+        default: true
+```
+
+### MCP Server Profiles (.mcp_services.yaml)
+
+```yaml
+default: prod
+
+profiles:
+  prod:
+    name: "Production"
+    description: "Production MCP service"
+    mcps:
+      - name: "My MCP Server"
+        mcp_url: "https://your-server.example.com/mcp"
+        auth:
+          auth_type: "jwt"  # or "bearer", "oauth", "none"
+          api_url: "https://your-server.example.com/v1/auth/"
+          api_token: "your-api-token"
+          api_secret: "your-api-secret"
+        timeout: 30
+        rate_limit_rpm: 60
+        default: true
+```
+
+Select profiles per command:
+
+```bash
+testmcpy tools --profile staging
+testmcpy run tests/ --profile prod
+```
+
+### Configuration Priority
+
+Values are loaded in this order (highest priority first):
+
+1. CLI options (e.g., `--model`, `--provider`, `--mcp-url`)
+2. Profile files (`.llm_providers.yaml`, `.mcp_services.yaml`)
+3. `.env` in the current directory
+4. `~/.testmcpy` user config file
+5. Environment variables
+6. Built-in defaults
+
+See [Configuration](/concepts/configuration) and [MCP Profiles](/concepts/mcp-profiles) for complete details.
+
+## Upgrading
+
+```bash
+# From PyPI
+pip install --upgrade 'testmcpy[all]'
+
+# From source
+cd testmcpy && git pull && pip install -e '.[all]'
+```
+
+## Uninstalling
+
+```bash
+pip uninstall testmcpy
+
+# Remove configuration (optional)
+rm ~/.testmcpy
+rm -rf ~/.testmcpy_cache
+```
+
+## Troubleshooting
+
+### Python version issues
+
+```bash
+python --version  # Must be 3.10-3.12
+
+# If wrong version, create the venv with a specific interpreter
+python3.11 -m venv venv
+source venv/bin/activate
+pip install 'testmcpy[all]'
+```
+
+### Permission errors
+
+Don't use `sudo` with pip. Use a virtual environment (recommended) or `pip install --user 'testmcpy[all]'`.
+
+### Dependency conflicts
+
+```bash
+# Create a fresh virtual environment
+deactivate  # If in an existing venv
+rm -rf venv
+python3 -m venv venv
+source venv/bin/activate
+pip install --upgrade pip
+pip install 'testmcpy[all]'
+```
+
+### SSL certificate errors
+
+```bash
+# Update certificates (macOS)
+/Applications/Python\ 3.11/Install\ Certificates.command
+
+# Or upgrade pip and certifi
+pip install --upgrade pip certifi
+```
+
+### Network / proxy issues
+
+```bash
+export HTTPS_PROXY=http://proxy.example.com:8080
+pip install --proxy=http://proxy.example.com:8080 'testmcpy[all]'
+```
+
+## Docker (Optional)
+
+```dockerfile
+FROM python:3.11-slim
+
+WORKDIR /app
+
+RUN pip install 'testmcpy[all]'
+
+COPY tests/ /app/tests/
+COPY .env /app/.env
+
+CMD ["testmcpy", "run", "tests/"]
+```
+
+```bash
+docker build -t testmcpy .
+docker run --env-file .env testmcpy
+```
+
+## Next Steps
+
+- [Getting Started](/getting-started) — run your first test
+- [Configuration](/concepts/configuration) — advanced configuration
+- [CLI Reference](/cli) — all commands and options

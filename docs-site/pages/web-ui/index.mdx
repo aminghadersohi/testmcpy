@@ -1,0 +1,72 @@
+---
+title: Web UI Overview
+description: Launch and navigate the testmcpy web interface — a React UI for exploring MCP servers, running tests, and analyzing results.
+---
+
+{/* Source: testmcpy/ui/src/App.jsx + testmcpy/cli/commands/server.py + testmcpy/server/api.py + README.md — keep in sync */}
+
+import { Callout } from 'nextra/components'
+
+# Web UI Overview
+
+testmcpy ships with an optional React-based web interface served by a FastAPI backend. It covers the full workflow: exploring MCP servers, authoring and running YAML test suites, chatting with tools, and analyzing results across models.
+
+## Launching the UI
+
+The web server requires the `server` extra:
+
+```bash
+pip install "testmcpy[server]"
+```
+
+Then start it with the [`testmcpy serve`](/cli/chat-and-serve) command:
+
+```bash
+testmcpy serve
+```
+
+By default the server binds to `127.0.0.1:8000` and opens your browser automatically. Options:
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--port`, `-p` | `8000` | Port to run the server on |
+| `--host` | `127.0.0.1` | Host to bind to |
+| `--dev` | off | Development mode (skip the frontend build) |
+| `--no-browser` | off | Do not open the browser automatically |
+
+On startup, `serve` validates your configuration: it loads config, checks the MCP service URL, detects the authentication method (dynamic JWT or static token), and fetches a token if dynamic JWT is configured.
+
+## Environment variables
+
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `TESTMCPY_API_KEY` | unset | When set, activates API-key auth middleware — requests to the server must present the key |
+| `TESTMCPY_CORS_ORIGINS` | `*` | Comma-separated list of allowed CORS origins |
+| `TESTMCPY_CHAT_OAUTH_LOGIN` | `true` | Enables interactive OAuth login from the Chat page; set to `false`/`0`/`no` to disable |
+
+<Callout type="warning">
+The server binds to `127.0.0.1` by default. If you expose it on another host, set `TESTMCPY_API_KEY` so the API is not open to anyone who can reach the port.
+</Callout>
+
+## Pages
+
+The header contains global MCP profile and LLM profile selectors — most pages operate on whichever profiles you have selected there.
+
+| Route | Page | Description |
+|-------|------|-------------|
+| `/` | [MCP Explorer](/web-ui/mcp-explorer) | Browse tools, resources, and prompts; smoke tests; schema diff; cross-server tool comparison |
+| `/tests` | [Test Manager](/web-ui/test-manager) | YAML test browser and editor, live runs, run history |
+| `/reports` | [Reports](/web-ui/reports) | All test runs and smoke reports, evaluations, cost |
+| `/chat` | [Chat](/web-ui/chat) | Multi-turn conversation with MCP tools |
+| `/performance` | [Performance](/web-ui/metrics-and-comparison) | Per-test results matrix and model leaderboard |
+| `/servers` | [Servers](/web-ui/health-and-security) | MCP server health and cross-server schema compatibility |
+| `/security` | [Security Dashboard](/web-ui/health-and-security#security-dashboard) | Security evaluator findings by severity |
+| `/mcp-profiles` | [MCP Profiles](/web-ui/profiles) | Manage MCP server connections |
+| `/llm-profiles` | [LLM Profiles](/web-ui/profiles#llm-profiles) | Manage LLM provider configurations |
+| `/auth-debugger` | [Auth Debugger](/web-ui/auth-debugger) | Step through OAuth/JWT/Bearer flows, decode JWTs |
+| `/config` | [Configuration](/web-ui/config-and-history) | Current settings and client-connection snippets |
+| `/generation-history` | [Generation History](/web-ui/config-and-history#generation-history) | AI test-generation logs |
+
+Legacy routes redirect to their new homes: `/metrics` and `/compare` go to `/performance`; `/mcp-health` and `/compatibility` go to `/servers`.
+
+New here? Start with [Getting Started](/getting-started), then open the [MCP Explorer](/web-ui/mcp-explorer) to confirm your server connection.

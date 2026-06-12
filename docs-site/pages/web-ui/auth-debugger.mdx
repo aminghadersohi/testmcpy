@@ -1,0 +1,51 @@
+---
+title: Auth Debugger
+description: Step through OAuth, JWT, and Bearer authentication flows against your MCP server, with a visual OAuth sequence diagram and a JWT decoder.
+---
+
+{/* Source: testmcpy/ui/src/pages/AuthDebugger.jsx + README.md — keep in sync */}
+
+import { Callout } from 'nextra/components'
+
+# Auth Debugger
+
+**Route:** `/auth-debugger`
+
+When an MCP server rejects your credentials, the Auth Debugger shows exactly where the handshake fails. Configure an auth method, click **Debug Auth Flow**, and get a step-by-step trace of the entire authentication exchange.
+
+![Auth Debugger](/screenshots/auth-debugger.png)
+
+## Supported auth types
+
+- **OAuth 2.0** — runs the full discovery-and-token flow against the server.
+- **JWT** — dynamic token flows: fetch a token from your auth API, validate its structure and claims.
+- **Bearer** — static token validation.
+
+The form pre-fills from your current configuration, so you can debug the same credentials the rest of the UI uses.
+
+## Flow trace
+
+Each run produces an **Authentication Flow Steps** panel: every step with its outcome, timing, and details. Steps carry educational tooltips explaining what each stage does and what a healthy result looks like (for example, token extraction "should extract a valid JWT or opaque token string").
+
+For OAuth, there is also an **OAuth Flow Visualization** — an animated sequence diagram with swimlanes for the client, your browser, and the MCP server, walking through the `401 + OAuth metadata` response, discovery, authorization, and token exchange. A flow-status legend tracks which of the actions have completed.
+
+<Callout type="info">
+Tokens in traces are sanitized — anything matching a JWT pattern is displayed as `[REDACTED-JWT]`, so traces are safe to share when filing issues.
+</Callout>
+
+## JWT Token Decoder
+
+Below the debugger, a standalone **JWT Token Decoder** lets you paste any JWT and inspect:
+
+- Decoded **header** and **payload** as interactive JSON.
+- The signature segment.
+- An **expiry countdown** when the payload has an `exp` claim — handy for spotting expired tokens at a glance.
+
+Invalid input (for example, a token without three dot-separated parts) produces a clear structural error instead of failing silently.
+
+## Typical workflow
+
+1. Pick the auth type matching your server (the same settings you would use on the [MCP Profiles](/web-ui/profiles) page).
+2. Click **Debug Auth Flow** and find the first failing step in the trace.
+3. Paste any token from the flow into the decoder to verify claims and expiry.
+4. Fix the credentials in your MCP profile and re-run.

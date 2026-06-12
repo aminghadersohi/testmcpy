@@ -1,0 +1,169 @@
+---
+title: Advanced Commands
+description: testmcpy mutate, metamorphic, coverage, export-db, badge, and agent — robustness testing, coverage analysis, and integrations.
+---
+
+{/* Source: live `testmcpy --help` output — regenerate when CLI changes */}
+
+import { Callout } from 'nextra/components'
+
+# Advanced
+
+Robustness-testing techniques (mutation and metamorphic testing), coverage analysis, database export for dashboarding, quality badges, and the natural-language test agent.
+
+## testmcpy mutate
+
+Generate and test prompt mutations for robustness testing. Mutates prompts in a test YAML file using various strategies and optionally runs them to check that the same tools are called regardless of phrasing.
+
+| Argument / Option | Type | Default | Description |
+|---|---|---|---|
+| `TEST_PATH` | PATH | required | Path to test YAML file |
+| `--strategies`, `-s` | TEXT | all | Comma-separated mutation strategies: `typo`, `casual`, `verbose`, `minimal`, `rephrase`, `negation` |
+| `--model`, `-m` | TEXT | `claude-sonnet-4-20250514` | Model to use |
+| `--provider`, `-p` | choice | `claude-sdk` | Model provider: `ollama`, `openai`, `local`, `anthropic`, `claude-sdk`, `claude-cli`, `claude-code`, `assistant`, `chatbot` |
+| `--mcp-url` | TEXT | — | MCP service URL (overrides profile) |
+| `--profile` | TEXT | — | MCP service profile from `.mcp_services.yaml` |
+| `--output`, `-o` | PATH | — | Output report file |
+| `--format`, `-f` | `yaml`, `json`, `table` | `table` | Output format |
+| `--seed` | INTEGER | — | Random seed for reproducible mutations |
+| `--dry-run` | flag | off | Show mutations without running tests |
+| `--verbose`, `-v` | flag | off | Verbose output |
+
+```bash
+# Preview mutations without running anything
+testmcpy mutate tests/my_test.yaml --dry-run
+
+# Run typo/casual/verbose variants and check tool selection holds
+testmcpy mutate tests/my_test.yaml --strategies typo,casual,verbose
+
+# Reproducible mutations with JSON output
+testmcpy mutate tests/my_test.yaml --seed 42 --format json
+```
+
+## testmcpy metamorphic
+
+Run metamorphic relation tests on MCP test cases. Metamorphic testing checks invariant properties across related inputs — for example, rephrasing a prompt should still call the same tools.
+
+Available relations:
+
+- `idempotency` — same query twice → same tools
+- `tool_selection_stability` — rephrased prompt → same tools
+- `parameter_preservation` — minor variation → same tool parameters
+
+| Argument / Option | Type | Default | Description |
+|---|---|---|---|
+| `TEST_PATH` | PATH | required | Path to test YAML file |
+| `--relations`, `-r` | TEXT | all | Comma-separated relation names: `idempotency`, `tool_selection_stability`, `parameter_preservation` |
+| `--model`, `-m` | TEXT | `claude-sonnet-4-20250514` | Model to use |
+| `--provider`, `-p` | choice | `claude-sdk` | Model provider: `ollama`, `openai`, `local`, `anthropic`, `claude-sdk`, `claude-cli`, `claude-code`, `assistant`, `chatbot` |
+| `--mcp-url` | TEXT | — | MCP service URL (overrides profile) |
+| `--profile` | TEXT | — | MCP service profile from `.mcp_services.yaml` |
+| `--output`, `-o` | PATH | — | Output markdown report file |
+| `--verbose`, `-v` | flag | off | Verbose output |
+
+```bash
+# All relations
+testmcpy metamorphic tests/my_test.yaml
+
+# Just stability of tool selection, with a markdown report
+testmcpy metamorphic tests/my_test.yaml -r tool_selection_stability -o report.md
+```
+
+## testmcpy coverage
+
+Analyze test coverage of MCP tools. Scans YAML test files and reports which tools are covered, identifies gaps, and categorizes tests by type (happy path, error, edge case, security).
+
+| Argument / Option | Type | Default | Description |
+|---|---|---|---|
+| `TEST_DIR` | PATH | required | Path to test directory to scan |
+| `--mcp-url` | TEXT | — | MCP service URL to check the live tool list |
+| `--profile` | TEXT | — | MCP service profile from `.mcp_services.yaml` |
+| `--output`, `-o` | PATH | — | Output file for the coverage report |
+| `--format`, `-f` | `yaml`, `json`, `table` | `table` | Output format |
+
+```bash
+# Coverage against the live tool list
+testmcpy coverage tests/ --profile prod
+
+# JSON report for CI artifacts
+testmcpy coverage tests/ --format json -o coverage.json
+```
+
+Fill coverage gaps with [`testmcpy generate`](/cli/generation#testmcpy-generate).
+
+## testmcpy export-db
+
+Export test results to an external database for dashboarding (e.g. Superset). Reads from the local testmcpy database and pushes denormalized, dashboard-friendly tables to any SQLAlchemy-supported database. Set `TESTMCPY_TARGET_SQLALCHEMY_URL` as an env var or use `--target`.
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `--target`, `-t` | TEXT | `$TESTMCPY_TARGET_SQLALCHEMY_URL` | SQLAlchemy connection URL (e.g. `postgresql://user:pass@host/db`) |
+| `--tables` | TEXT | `all` | Comma-separated tables to export: `runs`, `questions`, `smoke`, `generation` (or `all`) |
+| `--since` | TEXT | — | Only export data after this ISO date (e.g. `2026-01-01`) |
+| `--replace` | flag | off | Replace existing tables instead of appending |
+| `--schema` | TEXT | — | Database schema to write tables into |
+| `--dry-run` | flag | off | Show what would be exported without writing |
+
+```bash
+# Export everything to Postgres
+testmcpy export-db --target postgresql://user:pass@localhost/testmcpy
+
+# Refresh only run data since the new year, replacing tables
+testmcpy export-db --tables runs,questions --since 2026-01-01 --replace
+```
+
+To send results to a remote testmcpy server instead, see [`testmcpy push`](/cli/chat-and-serve#testmcpy-push).
+
+## testmcpy badge
+
+Emit shields.io endpoint JSON for a quality badge. Badge types: `pass-rate` (computed from the local results DB), `score`, and `conformance` (both read a result JSON produced by the corresponding command's `--output`).
+
+| Argument / Option | Type | Default | Description |
+|---|---|---|---|
+| `BADGE_TYPE` | TEXT | required | Badge type: `pass-rate`, `score`, or `conformance` |
+| `--from` | PATH | — | Result JSON produced by `testmcpy score --output` or `testmcpy conformance --output` (required for score/conformance) |
+| `--suite` | TEXT | — | pass-rate only: filter to one test suite/file |
+| `--since` | TEXT | — | pass-rate only: window like `30d` or an ISO date |
+| `--db-path` | TEXT | — | pass-rate only: results DB path override |
+| `--label` | TEXT | — | Override the badge label |
+| `--output`, `-o` | PATH | stdout | Write badge JSON here |
+
+```bash
+# Pass-rate badge from the last 30 days of results
+testmcpy badge pass-rate --since 30d -o badges/pass-rate.json
+
+# Usability score badge from a saved score result
+testmcpy score -o score.json
+testmcpy badge score --from score.json -o badges/score.json
+```
+
+<Callout type="info">
+Serve the emitted JSON from a public URL and reference it from shields.io: `https://img.shields.io/endpoint?url=...`
+</Callout>
+
+## testmcpy agent
+
+Run the Test Execution Agent. The agent uses the Claude Agent SDK to intelligently orchestrate test execution, analysis, and reporting — it wraps testmcpy infrastructure with reasoning and natural-language interaction.
+
+| Argument / Option | Type | Default | Description |
+|---|---|---|---|
+| `PROMPT` | TEXT | — | Natural language instruction for the agent |
+| `--test-path`, `-t` | PATH | — | Path to test file or directory |
+| `--profile`, `-p` | TEXT | — | MCP service profile from `.mcp_services.yaml` |
+| `--mcp-url` | TEXT | — | MCP service URL (overrides profile) |
+| `--models`, `-m` | TEXT | — | Comma-separated list of models to test (e.g. `claude-sonnet-4-5,gpt-4o`) |
+| `--max-turns` | INTEGER | `50` | Maximum agent turns |
+| `--agent-model` | TEXT | SDK default | Model for the agent itself |
+| `--output`, `-o` | PATH | — | Save agent report to file (JSON) |
+| `--verbose`, `-v` | flag | off | Show detailed agent output |
+
+```bash
+# Ask the agent to run a suite and explain the failures
+testmcpy agent "Run all tests in tests/example.yaml"
+
+# Multi-model comparison driven by natural language
+testmcpy agent "Compare claude-sonnet-4-5 vs gpt-4o on tests/" --models claude-sonnet-4-5,gpt-4o
+
+# Explore a server conversationally
+testmcpy agent "What tools are available?" --profile my-profile
+```

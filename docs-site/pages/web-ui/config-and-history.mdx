@@ -1,0 +1,52 @@
+---
+title: Config & Generation History
+description: Inspect the resolved configuration with sources, connect external LLM clients, and audit AI test-generation runs.
+---
+
+{/* Source: testmcpy/ui/src/pages/Configuration.jsx + testmcpy/ui/src/pages/GenerationHistory.jsx + README.md — keep in sync */}
+
+# Config & Generation History
+
+Two read-mostly pages: **Configuration** (`/config`) shows what testmcpy resolved from your environment, and **Generation History** (`/generation-history`) records every AI test-generation run.
+
+## Configuration
+
+**Route:** `/config`
+
+![Configuration](/screenshots/config.png)
+
+A read-only view of the server's effective configuration:
+
+- **Configuration Sources** — settings grouped into cards, each key shown with its current value and *where it came from* (env var, config file, default). This is the fastest way to answer "which MCP URL is it actually using?".
+- **Other Settings** — everything that does not belong to a named group.
+- **Refresh** — re-reads the configuration without restarting the server.
+
+### Connect Your LLM Client
+
+The page also generates copy-paste commands to point external LLM clients at the same MCP server testmcpy is using:
+
+```bash
+testmcpy config-mcp claude-desktop
+testmcpy config-mcp claude-code
+testmcpy config-mcp chatgpt-desktop
+```
+
+When a bearer token is configured, the copied command includes the `--token` flag automatically, so your client authenticates the same way testmcpy does.
+
+## Generation History
+
+**Route:** `/generation-history`
+
+![Generation History](/screenshots/generation-history.png)
+
+Every AI test-generation run (from the **Generate Tests** actions in the [MCP Explorer](/web-ui/mcp-explorer)) is logged here with full prompts and responses.
+
+- **Filters** — by tool, model, and status (success/failed), with summary stats for the filtered set: run counts, success rate, and total LLM cost.
+- **Log details** — selecting a run opens four expandable sections:
+  - **Logs** — the raw generation log.
+  - **Prompts** — every LLM call's prompt, with one-click copy.
+  - **Analysis** — the model's analysis of the tool under test.
+  - **YAML** — the generated test file in a syntax-highlighted viewer, with copy.
+- **Delete** — remove a log (with confirmation).
+
+Use this page to audit why a generated test looks the way it does, reuse a good generation prompt, or copy the YAML into the [Test Manager](/web-ui/test-manager) for editing.

@@ -1,0 +1,212 @@
+---
+title: Getting Started
+description: Install testmcpy, configure an LLM provider and MCP server, and run your first test in minutes.
+---
+
+{/* Source: context/guides/getting-started.md — keep in sync */}
+
+import { Callout, Steps } from 'nextra/components'
+
+# Getting Started
+
+Get up and running with testmcpy in minutes: install the package, point it at your MCP server, and run your first YAML test suite.
+
+## Requirements
+
+- Python 3.10 – 3.12
+- A virtual environment (recommended)
+- An LLM API key (Anthropic, OpenAI, …) — or a free local model via Ollama
+
+<Steps>
+
+### Install
+
+```bash
+# Install base package
+pip install testmcpy
+
+# With web UI support
+pip install 'testmcpy[server]'
+
+# All optional features
+pip install 'testmcpy[all]'
+```
+
+See the [Installation guide](/installation) for source installs, Homebrew, pipx, and platform notes.
+
+### Configure
+
+Run the interactive setup wizard:
+
+```bash
+testmcpy setup
+```
+
+The wizard guides you through:
+
+- Selecting your LLM provider (Anthropic, OpenAI, or Ollama)
+- Configuring your MCP service URL and authentication
+- Testing your connection
+
+It creates two YAML files in your current directory: `.llm_providers.yaml` (LLM providers and models) and `.mcp_services.yaml` (MCP server profiles). The command is idempotent — safe to re-run; use `--force` to overwrite existing files.
+
+Prefer environment variables? Create a `~/.testmcpy` file instead:
+
+```bash
+# MCP Service
+MCP_URL=http://localhost:5008/mcp/
+MCP_AUTH_TOKEN=your_bearer_token
+
+# LLM Provider - Choose one:
+DEFAULT_PROVIDER=anthropic
+DEFAULT_MODEL=claude-haiku-4-5
+ANTHROPIC_API_KEY=sk-ant-...
+
+# Or use OpenAI:
+# DEFAULT_PROVIDER=openai
+# DEFAULT_MODEL=gpt-4-turbo
+# OPENAI_API_KEY=sk-...
+
+# Or use Ollama (free, local):
+# DEFAULT_PROVIDER=ollama
+# DEFAULT_MODEL=llama3.1:8b
+```
+
+Configuration priority: CLI options > profile files (`.llm_providers.yaml`, `.mcp_services.yaml`) > `.env` > `~/.testmcpy` > environment variables > built-in defaults. See [Configuration](/concepts/configuration) for details.
+
+### Verify
+
+```bash
+# Check configuration
+testmcpy config-cmd
+
+# Test MCP connection — lists tools from your server
+testmcpy tools
+
+# Diagnose issues
+testmcpy doctor
+```
+
+### Run your first test
+
+Explore first if you like — `testmcpy chat` opens an interactive chat so you can watch the LLM use your tools. Then create `tests/my_first_test.yaml`:
+
+```yaml
+version: "1.0"
+name: "My First Test"
+description: "Testing basic MCP tool calling"
+
+tests:
+  - name: "test_tool_discovery"
+    prompt: "What tools are available?"
+    timeout: 10
+    evaluators:
+      - name: "execution_successful"
+
+  - name: "test_basic_operation"
+    prompt: "List all items"
+    timeout: 15
+    evaluators:
+      - name: "was_mcp_tool_called"
+        args:
+          tool_name: "list_items"  # Replace with your tool name
+      - name: "execution_successful"
+```
+
+Run it:
+
+```bash
+testmcpy run tests/my_first_test.yaml
+```
+
+### Read the results
+
+Each test reports which tools were called, whether evaluators passed, execution time, token usage, and cost:
+
+```
+Running Test Suite: My First Test
+==================================================
+
+Test: test_tool_discovery
+Status: PASS
+Duration: 2.3s
+Tokens: 245 | Cost: $0.001
+
+Test: test_basic_operation
+Status: PASS
+Tool Called: list_items
+Duration: 3.1s
+Tokens: 312 | Cost: $0.002
+
+==================================================
+Results: 2/2 tests passed (100.0%)
+Total Time: 5.4s
+Total Cost: $0.003
+```
+
+</Steps>
+
+## Using the Web Interface
+
+Launch the optional web UI:
+
+```bash
+pip install 'testmcpy[server]'
+testmcpy serve
+```
+
+Open http://localhost:8000 for a visual MCP tool explorer, interactive chat, test management, and real-time results. See [Web UI](/web-ui).
+
+## Common Commands
+
+```bash
+testmcpy tools                              # List available MCP tools
+testmcpy run tests/                         # Run all tests in a directory
+testmcpy run tests/my_test.yaml             # Run a specific test file
+testmcpy run tests/ --model claude-sonnet-4-5   # Run with a different model
+testmcpy chat                               # Interactive chat
+testmcpy serve                              # Start web UI
+testmcpy config-cmd                         # View configuration
+testmcpy --help                             # Show help
+```
+
+## Quick Tips
+
+1. **Start with simple tests** — test basic tool selection before complex workflows
+2. **Use verbose mode** — add `--verbose` to see detailed execution logs
+3. **Try different models** — compare results with the `--model` flag
+4. **Check costs** — monitor token usage and costs in the output
+5. **Use local models** — try Ollama for free development testing
+
+## Troubleshooting
+
+```bash
+# Verify Python version (3.10-3.12)
+python --version
+
+# Check configuration and connectivity
+testmcpy config-cmd
+testmcpy tools
+testmcpy doctor
+
+# Debug failing tests
+testmcpy run tests/ --verbose
+```
+
+<Callout type="info">
+`testmcpy doctor` checks your Python version, configuration files, API keys, MCP reachability, and LLM provider access — and suggests fixes for anything it finds. See the [FAQ](/faq) for common issues.
+</Callout>
+
+## Next Steps
+
+- [Installation](/installation) — detailed installation options
+- [Writing Tests](/guides/writing-tests) — practical test examples
+- [Test Format](/concepts/test-format) — complete YAML reference
+- [Evaluators](/concepts/evaluators) — all available evaluators
+- [CLI Reference](/cli) — every command and option
+- [CI/CD Integration](/guides/ci-cd-integration) — gate builds on eval results
+
+## Getting Help
+
+- [GitHub Issues](https://github.com/preset-io/testmcpy/issues) — report bugs
+- [GitHub Discussions](https://github.com/preset-io/testmcpy/discussions) — ask questions

@@ -26,7 +26,8 @@ const MCPProfileSelector = ({ selectedProfiles = [], onChange, multiple = false 
           throw new Error(`HTTP ${res.status}: ${res.statusText}`)
         }
         const data = await res.json()
-        setProfiles(data.profiles || [])
+        // The API returns `id`; older payloads used `profile_id`
+        setProfiles((data.profiles || []).map(p => ({ ...p, profile_id: p.profile_id ?? p.id })))
         setLoading(false)
         return
       } catch (err) {

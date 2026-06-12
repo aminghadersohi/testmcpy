@@ -14,7 +14,7 @@ from testmcpy.server.helpers import (
     load_mcp_yaml,
     save_mcp_yaml,
 )
-from testmcpy.src.mcp_client import MCPClient
+from testmcpy.src.mcp_client import MCPClient, MCPError, StdioMCPClient
 
 router = APIRouter(prefix="/api/mcp", tags=["mcp-profiles"])
 
@@ -85,6 +85,15 @@ class MCPUpdateRequest(BaseModel):
 class MCPReorderRequest(BaseModel):
     from_index: int
     to_index: int
+
+
+class TestConnectionRequest(BaseModel):
+    mcp_url: str
+    transport: str = "sse"
+    command: str | None = None
+    args: list[str] | None = None
+    auth: AuthConfig | None = None
+    timeout: int | None = None
 
 
 # Helper to get the mcp_clients dict from api module
@@ -872,3 +881,68 @@ async def test_mcp_connection(profile_id: str, mcp_index: int):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+def _auth_to_dict(auth: AuthConfig | None) -> dict:
+    """Convert an AuthConfig request model to the dict format MCPClient expects."""
+    if auth is None or auth.type == AuthType.NONE:
+        return {"type": "none"}
+    if auth.type == AuthType.BEARER:
+        return {"type": "bearer", "token": auth.token}
+    if auth.type == AuthType.JWT:
+        return {
+            "type": "jwt",
+            "api_url": auth.api_url,
+            "api_token": auth.api_token,
+            "api_secret": auth.api_secret,
+        }
+    if auth.type == AuthType.OAUTH:
+        return {
+            "type": "oauth",
+            "client_id": auth.client_id,
+            "client_secret": auth.client_secret,
+            "token_url": auth.token_url,
+            "scopes": auth.scopes or [],
+            "oauth_auto_discover": auth.oauth_auto_discover,
+            "insecure": auth.insecure,
+        }
+    return {"type": "none"}
+
+
+@router.post("/test-connection")
+async def test_connection_standalone(request: TestConnectionRequest):
+    """Test connection to an MCP server from an inline config.
+
+    Used by the Add MCP wizard to test a server before it is saved to any
+    profile (unlike /profiles/{id}/test-connection/{idx}, which tests a
+    saved MCP).
+    """
+    timeout = float(request.timeout) if request.timeout else 30.0
+
+    if request.transport == "stdio":
+        command = request.command or request.mcp_url.removeprefix("stdio://")
+        if not command:
+            raise HTTPException(status_code=400, detail="command is required for stdio transport")
+        client: MCPClient | StdioMCPClient = StdioMCPClient(command=command, args=request.args)
+    else:
+        if not request.mcp_url:
+            raise HTTPException(status_code=400, detail="mcp_url is required")
+        client = MCPClient(request.mcp_url, auth=_auth_to_dict(request.auth))
+
+    try:
+        await client.initialize(timeout=timeout)
+        tools = await client.list_tools(timeout=timeout)
+        return {
+            "success": True,
+            "status": "connected",
+            "message": f"Successfully connected — found {len(tools)} tools",
+            "tool_count": len(tools),
+            "tools": [tool.name for tool in tools],
+        }
+    except (MCPError, ConnectionError, TimeoutError, OSError, RuntimeError, ValueError) as e:
+        return {"success": False, "status": "error", "message": f"Connection failed: {str(e)}"}
+    finally:
+        try:
+            await client.close()
+        except (MCPError, ConnectionError, OSError, RuntimeError) as e:
+            print(f"Warning: failed to close test client: {e}")

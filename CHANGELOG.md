@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-06-12
+
+### Fixed
+- **Add MCP wizard "Test Connection" 405**: the wizard posted to
+  `POST /api/mcp/test-connection`, which didn't exist on the backend (only
+  the per-profile `POST /api/mcp/profiles/{id}/test-connection/{idx}` did),
+  so the SPA catch-all route answered with 405 Method Not Allowed. Added the
+  standalone endpoint, which tests an inline MCP config (sse/http or stdio,
+  with none/bearer/jwt/oauth auth) before it is saved to any profile
+
 ## [0.10.0] - 2026-06-12
 
 ### Added

@@ -1,0 +1,86 @@
+---
+title: Chat & Serve Commands
+description: testmcpy chat, serve, and push — interactive chat, the web UI server, and result publishing.
+---
+
+{/* Source: live `testmcpy --help` output — regenerate when CLI changes */}
+
+import { Callout } from 'nextra/components'
+
+# Chat & Serve
+
+Commands for interacting with your MCP server live — a terminal chat session, the full [Web UI](/web-ui), and pushing local results to a remote testmcpy server.
+
+## testmcpy chat
+
+Interactive chat with an LLM that has access to MCP tools. Starts an interactive session where you chat with an LLM and it can use MCP tools from your service; tool calls are displayed in real time. Type `exit`, `quit`, or press Ctrl+C to end the session.
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `--profile`, `-p` | TEXT | — | MCP profile to use |
+| `--provider` | choice | `claude-sdk` | LLM provider: `ollama`, `openai`, `local`, `anthropic`, `claude-sdk`, `claude-cli`, `claude-code`, `assistant`, `chatbot` |
+| `--model`, `-m` | TEXT | `claude-sonnet-4-20250514` | Model name |
+| `--mcp-url` | TEXT | — | MCP service URL |
+| `--no-mcp` | flag | off | Chat without MCP tools |
+
+```bash
+# Chat with the default config
+testmcpy chat
+
+# Chat against a specific profile and model
+testmcpy chat --profile prod --model claude-sonnet-4-20250514
+
+# Plain LLM chat, no MCP tools
+testmcpy chat --no-mcp
+```
+
+<Callout type="info">
+Prefer a browser? The [Web UI](/web-ui) has a richer multi-turn chat page at `/chat` with the same MCP tool access.
+</Callout>
+
+## testmcpy serve
+
+Start the web server for the testmcpy UI. Runs a FastAPI server that serves the React-based [Web UI](/web-ui) for inspecting MCP tools, interactive chat, test management, and reports.
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `--port`, `-p` | INTEGER | `8000` | Port to run the server on |
+| `--host` | TEXT | `127.0.0.1` | Host to bind to |
+| `--dev` | flag | off | Run in development mode (don't build the frontend) |
+| `--no-browser` | flag | off | Don't open the browser automatically |
+
+```bash
+# Start on http://localhost:8000 and open the browser
+testmcpy serve
+
+# Bind to all interfaces on a custom port, no browser
+testmcpy serve --host 0.0.0.0 --port 3000 --no-browser
+```
+
+<Callout type="info">
+The web UI requires the server extra: `pip install 'testmcpy[server]'`. See [Installation](/installation).
+</Callout>
+
+## testmcpy push
+
+Push local test results to a remote testmcpy server. Reads from the local database and POSTs results to the remote server's `/api/results/save` endpoint. Set `TESTMCPY_SERVER_URL` and `TESTMCPY_API_KEY` as environment variables, or use `--server` and `--api-key`.
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `--server`, `-s` | TEXT | `$TESTMCPY_SERVER_URL` | Remote testmcpy server URL (e.g. `https://testmcpy.example.com`) |
+| `--api-key`, `-k` | TEXT | `$TESTMCPY_API_KEY` | API key for authentication |
+| `--run-id` | TEXT | — | Push a specific run by ID |
+| `--latest`, `-n` | INTEGER | `1` | Push the N most recent runs |
+| `--include-smoke` | flag | off | Also push smoke reports |
+| `--include-generation` | flag | off | Also push generation logs |
+| `--dry-run` | flag | off | Show what would be pushed without sending |
+
+```bash
+# Push the most recent run
+testmcpy push --server https://testmcpy.example.com --api-key "$TESTMCPY_API_KEY"
+
+# Push the last 5 runs plus smoke reports, preview first
+testmcpy push -n 5 --include-smoke --dry-run
+```
+
+For exporting results to a SQL database instead of a remote testmcpy server, see [`testmcpy export-db`](/cli/advanced#testmcpy-export-db).

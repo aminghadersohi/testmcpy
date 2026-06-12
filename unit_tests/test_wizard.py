@@ -332,3 +332,47 @@ class TestWizardHelpers:
         with patch("testmcpy.cli.commands.wizard.Prompt.ask", return_value="1"):
             result = _choose("Pick:", ["a", "b", "c"], default="a")
             assert result == "a"
+
+
+class TestAddMCPConnectionTest:
+    """Test the add-mcp wizard's test-connection step (Step 5)."""
+
+    def test_sse_connection_uses_mcp_client(self, tmp_path, monkeypatch):
+        """The sse path constructs MCPClient(url, auth=dict) and initializes it."""
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+
+        from typer.testing import CliRunner
+
+        import testmcpy.cli.commands.wizard  # noqa: F401  register add-mcp command
+        from testmcpy.cli.app import app
+
+        monkeypatch.chdir(tmp_path)
+        instance = AsyncMock()
+        instance.list_tools.return_value = [SimpleNamespace(name="list_charts")]
+
+        inputs = (
+            "\n".join(
+                [
+                    "my-server",  # server name
+                    "1",  # transport: sse
+                    "https://mcp.example.com/mcp/",  # MCP URL
+                    "30",  # timeout
+                    "60",  # rate limit
+                    "2",  # auth: bearer
+                    "secret-token",  # bearer token
+                    "y",  # test connection now?
+                    "local-dev",  # profile id to create
+                ]
+            )
+            + "\n"
+        )
+        with patch("testmcpy.src.mcp_client.MCPClient", return_value=instance) as mock_cls:
+            result = CliRunner().invoke(app, ["add-mcp"], input=inputs)
+
+        assert "Connected! Found 1 tools." in result.output
+        mock_cls.assert_called_once_with(
+            "https://mcp.example.com/mcp/", auth={"type": "bearer", "token": "secret-token"}
+        )
+        instance.initialize.assert_awaited()
+        instance.close.assert_awaited()

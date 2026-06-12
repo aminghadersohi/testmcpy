@@ -1,0 +1,404 @@
+---
+title: CI/CD Integration
+description: Run testmcpy in GitHub Actions or GitLab CI and gate builds on eval results with exit codes and JUnit XML.
+---
+
+{/* Source: context/guides/ci-cd-integration.md — keep in sync */}
+
+import { Callout } from 'nextra/components'
+
+# CI/CD Integration
+
+Run your MCP eval suite on every push and gate merges on the results — from a dedicated test repository or inside your MCP service repo.
+
+## Quick Start
+
+### 1. Install testmcpy
+
+```bash
+# Create virtual environment
+python3 -m venv venv
+source venv/bin/activate  # Windows: venv\Scripts\activate
+
+# Install testmcpy
+pip install testmcpy
+
+# Or install with all features
+pip install 'testmcpy[all]'
+```
+
+### 2. Configure
+
+Create a `.env` file in your project root:
+
+```bash
+# MCP Service Configuration
+MCP_URL=http://localhost:5008/mcp/
+MCP_AUTH_TOKEN=your_bearer_token_here
+
+# LLM Provider (choose one)
+DEFAULT_PROVIDER=anthropic
+DEFAULT_MODEL=claude-haiku-4-5
+ANTHROPIC_API_KEY=sk-ant-your-key-here
+
+# Or use OpenAI
+# DEFAULT_PROVIDER=openai
+# DEFAULT_MODEL=gpt-4-turbo
+# OPENAI_API_KEY=sk-your-key-here
+
+# Or use Ollama (free, local)
+# DEFAULT_PROVIDER=ollama
+# DEFAULT_MODEL=llama3.1:8b
+```
+
+<Callout type="warning">
+Never commit `.env` files to git: `echo ".env" >> .gitignore`
+</Callout>
+
+### 3. Create tests
+
+Create `tests/basic_functionality.yaml`:
+
+```yaml
+version: "1.0"
+name: "Basic MCP Service Tests"
+description: "Tests core functionality of your MCP service"
+
+tests:
+  - name: "test_tool_discovery"
+    prompt: "What tools are available?"
+    timeout: 10
+    evaluators:
+      - name: "execution_successful"
+
+  - name: "test_basic_query"
+    prompt: "List all available items"
+    timeout: 15
+    evaluators:
+      - name: "was_mcp_tool_called"
+        args:
+          tool_name: "list_items"  # Replace with your tool name
+      - name: "execution_successful"
+```
+
+### 4. Run locally first
+
+```bash
+# Run all tests
+testmcpy run tests/ --model claude-haiku-4-5
+
+# Run with verbose output to see tool calls and responses
+testmcpy run tests/ --verbose
+```
+
+See [Writing Tests](/guides/writing-tests) for more test patterns and [Running Tests](/cli/running-tests) for all CLI options.
+
+## Project Structure
+
+### Option A: Separate test repository
+
+Recommended for testing third-party MCP services or keeping tests isolated:
+
+```
+my-mcp-service-tests/
+├── .env                          # Configuration (not committed)
+├── .env.example                  # Example configuration
+├── .gitignore                    # Ignore .env, venv, etc.
+├── requirements.txt              # testmcpy[all]
+├── .github/
+│   └── workflows/
+│       └── mcp-tests.yml         # CI/CD workflow
+├── tests/
+│   ├── basic_functionality.yaml
+│   ├── parameter_validation.yaml
+│   └── edge_cases.yaml
+└── reports/                      # Test results (gitignored)
+```
+
+### Option B: Tests within the MCP service repository
+
+Recommended if you own the MCP service:
+
+```
+my-mcp-service/
+├── src/                          # Your MCP service code
+├── mcp_tests/                    # testmcpy tests
+│   ├── .env.example
+│   └── tests/
+│       ├── basic_functionality.yaml
+│       └── parameter_validation.yaml
+├── .github/
+│   └── workflows/
+│       ├── service-tests.yml          # Your service's unit tests
+│       └── mcp-integration-tests.yml  # testmcpy integration tests
+└── requirements-test.txt
+```
+
+## Gating Builds on Eval Results
+
+Two flags make testmcpy CI-native:
+
+- **`--gate`** exits non-zero when the run fails your thresholds, so the build fails. Tune thresholds in `.testmcpy-gate.yaml`:
+
+  ```yaml
+  min_pass_rate: 85.0       # % of tests that must pass
+  max_failures: 3           # absolute failure budget
+  required_tests:           # these must always pass
+    - critical_auth_flow
+  block_on_regression: true # fail on baseline regressions
+  ```
+
+- **`--junit-xml`** emits JUnit XML for CI systems that ingest it natively (Jenkins, GitLab, CircleCI, Buildkite). On GitHub Actions, the markdown eval report is automatically appended to the job summary.
+
+Minimal example — no wrapper required:
+
+```yaml
+# .github/workflows/mcp-tests.yml
+jobs:
+  mcp-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Run MCP eval suite
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          uvx testmcpy run tests/ \
+            --mcp-url "$MCP_URL" \
+            --gate --min-pass-rate 85 \
+            --junit-xml junit.xml
+```
+
+Or use the bundled reusable Action — adds a sticky PR comment, JUnit artifact upload, and structured outputs (`pass-rate`, `gate_passed`):
+
+```yaml
+- uses: preset-io/testmcpy@v1
+  with:
+    test_path: tests/
+    mcp_url: ${{ vars.MCP_URL }}
+    pass_threshold: '85'
+    pr_comment: 'true'
+    anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+```
+
+## GitHub Actions: Full Workflow
+
+A complete workflow that spins up your MCP service as a container:
+
+```yaml
+name: MCP Integration Tests
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Run daily at 2 AM UTC
+    - cron: '0 2 * * *'
+
+jobs:
+  test-mcp-service:
+    runs-on: ubuntu-latest
+
+    services:
+      # If your MCP service runs as a container
+      mcp-service:
+        image: your-org/mcp-service:latest
+        ports:
+          - 5008:5008
+        env:
+          DATABASE_URL: ${{ secrets.TEST_DATABASE_URL }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install 'testmcpy[all]'
+
+      - name: Wait for MCP service
+        run: |
+          timeout 60 bash -c 'until curl -f http://localhost:5008/health; do sleep 2; done'
+
+      - name: Run testmcpy tests
+        env:
+          MCP_URL: http://localhost:5008/mcp/
+          MCP_AUTH_TOKEN: ${{ secrets.MCP_AUTH_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          DEFAULT_PROVIDER: anthropic
+          DEFAULT_MODEL: claude-haiku-4-5
+        run: |
+          testmcpy run tests/ --verbose --gate --junit-xml junit.xml
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: |
+            junit.xml
+            reports/
+          retention-days: 30
+```
+
+### Required GitHub secrets
+
+Add these to your repository (Settings → Secrets → Actions):
+
+- `ANTHROPIC_API_KEY`: your Anthropic API key
+- `MCP_AUTH_TOKEN`: bearer token for your MCP service
+- `TEST_DATABASE_URL`: (if needed) database connection for tests
+
+## GitLab CI/CD
+
+Create `.gitlab-ci.yml`:
+
+```yaml
+mcp-integration-tests:
+  image: python:3.11
+
+  services:
+    - name: your-org/mcp-service:latest
+      alias: mcp-service
+
+  variables:
+    MCP_URL: "http://mcp-service:5008/mcp/"
+    DEFAULT_PROVIDER: "anthropic"
+    DEFAULT_MODEL: "claude-haiku-4-5"
+
+  before_script:
+    - pip install 'testmcpy[all]'
+
+  script:
+    - testmcpy run tests/ --verbose --gate --junit-xml junit.xml
+
+  artifacts:
+    when: always
+    reports:
+      junit: junit.xml
+    paths:
+      - reports/
+    expire_in: 30 days
+
+  only:
+    - main
+    - merge_requests
+```
+
+## Authenticating Against Remote Services
+
+Pass MCP auth credentials directly on the command line, bypassing `.mcp_services.yaml` — handy in CI:
+
+```bash
+# JWT auth
+testmcpy run tests/ \
+  --mcp-url https://workspace.example.com/mcp \
+  --auth-type jwt \
+  --jwt-url https://auth.example.com/v1/auth/ \
+  --jwt-token $MCP_JWT_TOKEN \
+  --jwt-secret $MCP_JWT_SECRET
+
+# Bearer token auth
+testmcpy run tests/ \
+  --mcp-url https://workspace.example.com/mcp \
+  --auth-type bearer \
+  --auth-token $MCP_BEARER_TOKEN
+
+# No auth (public MCP endpoint)
+testmcpy run tests/ \
+  --mcp-url https://workspace.example.com/mcp \
+  --auth-type none
+```
+
+Environment variables are also supported: `MCP_AUTH_TOKEN`, `MCP_JWT_URL`, `MCP_JWT_TOKEN`, `MCP_JWT_SECRET`. See [Authentication](/concepts/authentication).
+
+## Best Practices
+
+### Test coverage
+
+Make sure you cover:
+
+- Tool selection (does the LLM choose the right tool?)
+- Parameter mapping (are parameters correctly inferred?)
+- Required vs optional parameters
+- Error handling (invalid inputs, missing parameters)
+- Multi-step workflows (tool chaining)
+- Edge cases (empty results, large datasets, etc.)
+
+### Environment management
+
+```bash
+# Use environment-specific configs
+cp .env.example .env.dev
+cp .env.example .env.ci
+```
+
+### Cost management
+
+```bash
+# Use cheaper models for development
+DEFAULT_MODEL=claude-haiku-4-5     # Fast & cheap
+
+# Use better models for critical tests
+DEFAULT_MODEL=claude-sonnet-4-5    # More accurate
+
+# Use local models for frequent testing
+DEFAULT_PROVIDER=ollama
+DEFAULT_MODEL=llama3.1:8b          # Free
+```
+
+### Debugging failed tests
+
+```bash
+# Run with verbose output
+testmcpy run tests/failing_test.yaml --verbose
+
+# Verify MCP service is responding
+testmcpy tools
+
+# Test interactively
+testmcpy chat
+```
+
+## Troubleshooting
+
+### Tests not running
+
+```bash
+testmcpy --version     # Verify installation
+testmcpy config-cmd    # Check configuration
+testmcpy doctor        # Diagnose issues
+testmcpy tools         # Test MCP connection
+```
+
+### Rate limiting
+
+If you hit API rate limits: use local models (`DEFAULT_PROVIDER=ollama`), use cheaper models (`claude-haiku-4-5`), or set `rate_limit_rpm` in your MCP profile.
+
+### Environment issues
+
+```bash
+# Verify Python version (3.10-3.12 supported)
+python --version
+
+# Reinstall in clean environment
+deactivate
+rm -rf venv
+python3 -m venv venv
+source venv/bin/activate
+pip install 'testmcpy[all]'
+```
+
+## Next Steps
+
+- [Evaluators](/concepts/evaluators) — all available evaluators
+- [Writing Tests](/guides/writing-tests) — more test patterns
+- [GitHub Discussions](https://github.com/preset-io/testmcpy/discussions) — get help

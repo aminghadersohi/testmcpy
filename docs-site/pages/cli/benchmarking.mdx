@@ -1,0 +1,131 @@
+---
+title: Benchmarking & Analytics Commands
+description: testmcpy bench, conformance, matrix, leaderboard, and flaky — multi-run benchmarking and results analytics.
+---
+
+{/* Source: live `testmcpy --help` output — regenerate when CLI changes */}
+
+import { Callout } from 'nextra/components'
+
+# Benchmarking & Analytics
+
+Commands for running suites repeatedly across configurations and analyzing the accumulated results database: matrices, leaderboards, flakiness detection, and MCP spec conformance.
+
+## testmcpy bench
+
+Run a suite across models × profiles × repeats for matrix analytics. Each combination is executed via [`testmcpy run`](/cli/running-tests#testmcpy-run), and the accumulated results feed [`matrix`](#testmcpy-matrix), [`leaderboard`](#testmcpy-leaderboard), and [`flaky`](#testmcpy-flaky).
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `TEST_PATH` | PATH | required | Path to test file or directory |
+| `--models` | TEXT | required | Comma-separated models, e.g. `claude-sonnet-4-5,gpt-4o` |
+| `--providers` | TEXT | `run` default | Comma-separated providers aligned with `--models` (a single value applies to all) |
+| `--profiles` | TEXT | default profile | Comma-separated MCP profiles |
+| `--repeat` | INTEGER | `3` | Runs per model × profile combination |
+| `--run-args` | TEXT | — | Extra args passed through to each `testmcpy run`, e.g. `"--timeout 60"` |
+| `--dry-run` | flag | off | Print the planned runs and exit |
+
+```bash
+# 2 models x 2 profiles x 3 repeats = 12 runs
+testmcpy bench tests/ \
+  --models claude-sonnet-4-5,gpt-4o \
+  --providers anthropic,openai \
+  --profiles staging,prod
+
+# Preview the run plan first
+testmcpy bench tests/ --models claude-sonnet-4-5 --repeat 5 --dry-run
+```
+
+## testmcpy conformance
+
+Run the official MCP spec conformance suite (`@modelcontextprotocol/conformance`, executed via `npx`) against a server.
+
+| Argument / Option | Type | Default | Description |
+|---|---|---|---|
+| `MCP_URL` | TEXT | required | MCP server URL to test |
+| `--scenario` | TEXT | — | Run a single scenario (e.g. `server-initialize`) |
+| `--suite` | TEXT | `active` | Suite to run: `active`, `all`, `draft`, `pending` |
+| `--suite-version` | TEXT | `0.1.16` | `@modelcontextprotocol/conformance` version to run via npx |
+| `--format` | TEXT | `table` | Output format: `table` or `json` |
+| `--output`, `-o` | PATH | — | Write raw checks JSON to this path |
+| `--timeout` | INTEGER | `300` | Suite timeout in seconds |
+| `--fail-on-warning` | flag | off | Exit non-zero on WARNING checks too |
+| `--gate` | flag | off | Read conformance settings from `.testmcpy-gate.yaml` (unified gate) |
+
+```bash
+# Full active suite against a local server
+testmcpy conformance http://localhost:5008/mcp
+
+# Single scenario, JSON output saved for badges
+testmcpy conformance https://example.com/mcp --scenario server-initialize \
+  --format json -o conformance.json
+```
+
+<Callout type="info">
+Conformance requires Node.js (`npx`) to be available. The saved JSON feeds [`testmcpy badge conformance`](/cli/advanced#testmcpy-badge).
+</Callout>
+
+## testmcpy matrix
+
+Per-test × per-config performance matrix built from the local results database.
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `--suite` | TEXT | — | Filter to one test suite/file |
+| `--since` | TEXT | — | Window: `30d`, `12h`, or an ISO date |
+| `--min-runs` | INTEGER | `1` | Hide cells with fewer runs |
+| `--no-profile` | flag | off | Group by model+provider only (ignore MCP profile) |
+| `--format` | TEXT | `table` | Output format: `table`, `json`, or `csv` |
+| `--db-path` | TEXT | — | Results DB path override |
+| `--fail-below` | FLOAT | — | Exit 1 if any config's overall pass rate is below this (0-1) |
+
+```bash
+# Matrix over the last 30 days
+testmcpy matrix --since 30d
+
+# CI: fail if any config drops below a 90% pass rate
+testmcpy matrix --suite tests/charts.yaml --fail-below 0.9
+```
+
+## testmcpy leaderboard
+
+Configs ranked by pass rate, with cost-per-pass and latency.
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `--suite` | TEXT | — | Filter to one test suite/file |
+| `--since` | TEXT | — | Window: `30d`, `12h`, or an ISO date |
+| `--no-profile` | flag | off | Group by model+provider only (ignore MCP profile) |
+| `--format` | TEXT | `table` | Output format: `table`, `json`, or `csv` |
+| `--db-path` | TEXT | — | Results DB path override |
+
+```bash
+# Who wins on this suite over the past week?
+testmcpy leaderboard --suite tests/charts.yaml --since 7d
+
+# CSV export for spreadsheets
+testmcpy leaderboard --format csv > leaderboard.csv
+```
+
+## testmcpy flaky
+
+Flaky tests — tests that pass intermittently within a single config — flakiest first.
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `--suite` | TEXT | — | Filter to one test suite/file |
+| `--since` | TEXT | — | Window: `30d`, `12h`, or an ISO date |
+| `--min-runs` | INTEGER | `3` | Minimum runs to call a cell flaky |
+| `--format` | TEXT | `table` | Output format: `table`, `json`, or `csv` |
+| `--db-path` | TEXT | — | Results DB path override |
+| `--fail-on-flaky` | flag | off | Exit 1 if any flaky test is found (CI) |
+
+```bash
+# Show flaky tests from the last 30 days
+testmcpy flaky --since 30d
+
+# CI: block merges when flakiness is detected
+testmcpy flaky --suite tests/ --fail-on-flaky
+```
+
+To publish these analytics outside the CLI, see [`export-db`](/cli/advanced#testmcpy-export-db) (SQL dashboards) or the [Web UI](/web-ui) metrics pages.

@@ -1,0 +1,138 @@
+---
+title: Discovery & Tools Commands
+description: testmcpy tools, export, profiles, status, explore-cli, and smoke-test.
+---
+
+{/* Source: live `testmcpy --help` output — regenerate when CLI changes */}
+
+import { Callout } from 'nextra/components'
+
+# Discovery & Tools
+
+Commands for connecting to an MCP server, browsing the tools it exposes, exporting schemas, and quickly verifying it works. Most accept `--profile` (an entry in `.mcp_services.yaml` — see [MCP Profiles](/concepts/mcp-profiles)) or a direct `--mcp-url` override.
+
+## testmcpy tools
+
+List available MCP tools with formatted output. Connects to the MCP service and displays all available tools with their descriptions and parameter schemas in a readable format.
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `--mcp-url` | TEXT | — | MCP service URL (overrides profile) |
+| `--profile` | TEXT | — | MCP service profile from `.mcp_services.yaml` |
+| `--format`, `-f` | `yaml`, `json`, `table` | `table` | Output format |
+| `--detail`, `-d` | flag | off | Show detailed parameter schemas |
+| `--filter` | TEXT | — | Filter tools by name |
+
+```bash
+# List tools using the default profile
+testmcpy tools
+
+# Detailed schemas from a specific URL
+testmcpy tools --mcp-url http://localhost:5008/mcp --detail
+
+# JSON output, filtered by name
+testmcpy tools --profile staging --format json --filter chart
+```
+
+## testmcpy export
+
+Export MCP tool schemas in various formats: `typescript`, `python`, `protobuf`, `thrift`, `graphql`, `curl`, `json`, `yaml`.
+
+| Argument / Option | Type | Default | Description |
+|---|---|---|---|
+| `TOOL_NAME` | TEXT | — | Tool name to export (or use `--all`) |
+| `--format`, `-f` | TEXT | `typescript` | Export format |
+| `--output`, `-o` | PATH | stdout | Output file |
+| `--all` | flag | off | Export all tools |
+| `--profile` | TEXT | — | MCP profile |
+| `--mcp-url` | TEXT | — | MCP service URL |
+
+```bash
+# Export one tool as TypeScript
+testmcpy export get_chart_data --format typescript
+
+# Export all tools as Python type stubs to a file
+testmcpy export --all --format python -o schemas.py
+
+# Generate a ready-to-run cURL command for a tool
+testmcpy export list_datasets --format curl
+```
+
+## testmcpy profiles
+
+List and manage MCP profiles. View all configured MCP profiles, and get or set the default profile.
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `--details`, `-d` | flag | off | Show detailed profile information |
+| `--set-default` | TEXT | — | Set the default profile (writes to `.mcp_services.yaml`) |
+| `--get-default` | flag | off | Show the current default profile |
+
+```bash
+# List all profiles
+testmcpy profiles
+
+# Show detailed info and the current default
+testmcpy profiles --details
+testmcpy profiles --get-default
+
+# Make 'prod' the default profile
+testmcpy profiles --set-default prod
+```
+
+## testmcpy status
+
+Show MCP connection status. A quick connectivity check without launching a UI.
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `--profile`, `-p` | TEXT | — | MCP profile to check |
+
+```bash
+# Check the default profile
+testmcpy status
+
+# Check a specific profile
+testmcpy status --profile prod
+```
+
+## testmcpy explore-cli
+
+List available MCP tools (CLI parity command). A quick way to browse MCP tools without launching an interactive interface; for richer browsing use [`testmcpy tools`](#testmcpy-tools) or the [Web UI](/web-ui).
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `--profile`, `-p` | TEXT | — | MCP profile to use |
+| `--output`, `-o` | `yaml`, `json`, `table` | `table` | Output format |
+
+```bash
+testmcpy explore-cli --profile staging --output json
+```
+
+## testmcpy smoke-test
+
+Run smoke tests on an MCP server. Performs basic health checks and calls each available tool with reasonable default parameters to verify the server works end to end: connection check, list tools, then call each tool.
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `--profile`, `-p` | TEXT | — | MCP service profile from `.mcp_services.yaml` |
+| `--mcp-url` | TEXT | — | MCP service URL (overrides profile) |
+| `--test-all` / `--basic-only` | flag | `test-all` | Test all tools, or just basic operations |
+| `--max-tools` | INTEGER | `10` | Maximum number of tools to test |
+| `--format`, `-f` | TEXT | `table` | Output format: `table`, `json`, or `summary` |
+| `--save`, `-s` | TEXT | — | Save detailed report to file (JSON format) |
+
+```bash
+# Smoke-test the prod profile
+testmcpy smoke-test --profile prod
+
+# Connection + listing only, no tool calls
+testmcpy smoke-test --profile sandbox --basic-only
+
+# Save a JSON report
+testmcpy smoke-test --profile prod --save smoke-test-report.json
+```
+
+<Callout type="info">
+Smoke tests are also available interactively from the MCP Explorer page in the [Web UI](/web-ui).
+</Callout>

@@ -1,0 +1,50 @@
+---
+title: MCP Explorer
+description: Browse MCP tools, resources, and prompts; run smoke tests; diff schemas and compare tool output across servers.
+---
+
+{/* Source: testmcpy/ui/src/pages/MCPExplorer.jsx + README.md — keep in sync */}
+
+import { Callout } from 'nextra/components'
+
+# MCP Explorer
+
+**Route:** `/`
+
+The Explorer is the landing page. It connects to the MCP profile selected in the header and lets you browse everything the server exposes — tools, resources, and prompts — plus run smoke tests, diff schemas between servers, and compare a tool's behavior across two servers.
+
+![MCP Explorer](/screenshots/mcp-explorer.png)
+
+<Callout type="info">
+The Explorer shows a single server at a time. If multiple MCP profiles are selected in the header, a banner explains that only the first one is shown — use the [Test Manager](/web-ui/test-manager) to work with multiple servers simultaneously.
+</Callout>
+
+## Tabs
+
+- **Tools** — every tool with its description and input schema. Shows filtered/total counts, switchable between list and grid views.
+- **Resources** — resources exposed by the server.
+- **Prompts** — prompts exposed by the server.
+- **Schema Diff** — pick a baseline profile and a comparison profile, then **Compare Schemas** to see added, removed, and changed tools and parameters between the two servers.
+- **Compare** — invoke the *same tool* on two different servers with identical JSON parameters (optionally over multiple iterations) and diff the outputs.
+
+## Header actions
+
+- **Smoke Test** — runs smoke tests against the active MCP server (tool listing plus basic invocations).
+- **History** — opens past smoke-test reports.
+- **Batch Mode** — multi-select tools, then **Generate Tests** for all selected tools at once.
+- **Shortcuts** — keyboard shortcut reference (also available by pressing `?`). Press `/` to focus the search bar.
+
+## Per-tool actions
+
+Each tool card offers:
+
+- **Debug** — opens a modal where you fill in parameters, **Call Tool**, and inspect the result with trace visualization.
+- **Generate Tests** — AI-generates YAML test cases for the tool (runs are recorded in [Generation History](/web-ui/config-and-history#generation-history)).
+- **Optimize LLM Docs** — suggests an improved tool description for better LLM understanding.
+
+## Typical workflow
+
+1. Select an MCP profile in the header (or create one on the [MCP Profiles](/web-ui/profiles) page — the empty state links you there).
+2. Run a **Smoke Test** to verify connectivity and basic tool behavior.
+3. Search for a tool, open **Debug** to try it with real parameters.
+4. Use **Generate Tests** to bootstrap a YAML suite, then refine it in the [Test Manager](/web-ui/test-manager).

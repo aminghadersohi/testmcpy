@@ -1,0 +1,45 @@
+---
+title: Reports
+description: Unified view of all test runs and smoke reports with evaluations, scores, cost analysis, filtering, and export.
+---
+
+{/* Source: testmcpy/ui/src/pages/Reports.jsx + README.md — keep in sync */}
+
+# Reports
+
+**Route:** `/reports`
+
+Reports is the unified results page: every test run and every smoke-test report in one place, with filters, per-test evaluation breakdowns, cost figures, and export.
+
+![Reports](/screenshots/reports.png)
+
+## Tabs
+
+- **Tests** — runs executed from the [Test Manager](/web-ui/test-manager) or CLI.
+- **Smoke** — smoke-test reports produced from the [MCP Explorer](/web-ui/mcp-explorer) (most recent 50).
+
+## Filtering
+
+Test runs can be narrowed by:
+
+- Status (all / pass / fail)
+- Free-text search
+- Model
+- Provider
+- Test file
+
+## Run details
+
+Selecting a run opens its detail view with per-test results:
+
+- **Evaluations** — each evaluator's pass/fail and reason, with a badge summarizing how many passed. Failed evaluators are surfaced prominently with their failure reasons.
+- **Score** — the aggregate evaluator score for the test (0.00–1.00, where 1.00 means all evaluators passed at 100%).
+- **Cost** — estimated LLM cost per test and per run. For chatbot/assistant providers whose endpoints do not report usage, cost is shown as not tracked rather than zero.
+- Duration and token counts.
+
+## Managing reports
+
+- **Export** a run as JSON or as CSV (columns: test name, passed, score, duration, cost, error).
+- **Delete** a single report, or enter select mode to delete several runs at once (both with confirmation).
+
+Security-focused evaluator results from these runs also feed the [Security Dashboard](/web-ui/health-and-security#security-dashboard), and aggregate pass rates feed the [Performance](/web-ui/metrics-and-comparison) matrix.

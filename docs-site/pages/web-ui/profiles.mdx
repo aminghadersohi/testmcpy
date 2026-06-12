@@ -1,0 +1,64 @@
+---
+title: MCP & LLM Profiles
+description: Configure the MCP servers you test against and the LLM providers that drive your tests.
+---
+
+{/* Source: testmcpy/ui/src/pages/MCPProfiles.jsx + testmcpy/ui/src/pages/LLMProfiles.jsx + README.md — keep in sync */}
+
+import { Callout } from 'nextra/components'
+
+# MCP & LLM Profiles
+
+Profiles are the connection layer of the UI: **MCP profiles** describe the servers you test, **LLM profiles** describe the models that drive tests and chat. Both are selectable globally from the header, and every page operates on the selected profiles.
+
+## MCP Profiles
+
+**Route:** `/mcp-profiles`
+
+![MCP Profiles](/screenshots/mcp-profiles.png)
+
+An MCP profile is a named group of one or more MCP servers. The page lets you:
+
+- **Add Profile** — create a named profile (and edit or delete existing ones).
+- **Add MCP (Wizard)** — a guided multi-step flow for adding a server, ending with a **Test Connection** step that verifies the server responds before saving.
+- Add, edit, reorder, and delete servers within a profile.
+- **Set default** profile.
+
+### Server settings
+
+Each server is configured with:
+
+- **Transport** — HTTP/SSE (remote URL) or **Stdio** (a local subprocess speaking JSON-RPC over stdin/stdout, configured with a command instead of a URL).
+- **Authentication**:
+  - **None**
+  - **Bearer** — a static token.
+  - **JWT** — dynamic tokens fetched from an auth API (API URL + API token).
+  - **OAuth 2.0** — either auto-discovery from the server's OAuth metadata or manual client/token-endpoint configuration.
+
+<Callout type="info">
+If an OAuth or JWT flow misbehaves, the [Auth Debugger](/web-ui/auth-debugger) traces every step of the handshake.
+</Callout>
+
+## LLM Profiles
+
+**Route:** `/llm-profiles`
+
+![LLM Profiles](/screenshots/llm-profiles.png)
+
+An LLM profile is a named group of providers. The page lets you create profiles, add providers to them (directly or via a guided wizard with a connection test), edit or delete providers, and mark one provider as the profile **default** — that default is what the [Chat](/web-ui/chat) page and test runs use unless overridden.
+
+### Provider settings
+
+- **Provider** — Anthropic (Claude), OpenAI (GPT), Google (Gemini), Claude Code CLI, Claude Agent SDK, or Ollama (local).
+- **Model** — picked from a model registry that shows per-million-token input/output pricing, or entered manually.
+- **Credentials** — a direct API key or the name of an environment variable holding it.
+- **Base URL** — for Ollama and other self-hosted endpoints.
+
+## How profiles are used
+
+| Page | Uses |
+|------|------|
+| [MCP Explorer](/web-ui/mcp-explorer) | First selected MCP profile |
+| [Test Manager](/web-ui/test-manager) | Selected MCP profile(s) + LLM profile (or all providers via Run all LLMs) |
+| [Chat](/web-ui/chat) | First selected MCP profile + LLM profile default provider |
+| [Servers](/web-ui/health-and-security) | All configured servers (health), 2+ selected profiles (schema compat) |

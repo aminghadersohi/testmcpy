@@ -1,0 +1,68 @@
+---
+title: Servers & Security
+description: Monitor MCP server health, check cross-server schema compatibility, and review security evaluator findings.
+---
+
+{/* Source: testmcpy/ui/src/pages/Servers.jsx + testmcpy/ui/src/pages/SecurityDashboard.jsx + README.md — keep in sync */}
+
+import { Callout } from 'nextra/components'
+
+# Servers & Security
+
+Two pages cover operational health: **Servers** (`/servers`) for MCP availability and schema compatibility, and the **Security Dashboard** (`/security`) for security evaluator findings.
+
+## Servers
+
+**Route:** `/servers` (the legacy `/mcp-health` and `/compatibility` routes redirect here)
+
+The Servers page has two tabs: **Health** and **Schema Compat**.
+
+### Health tab
+
+![MCP server health](/screenshots/mcp-health.png)
+
+Pings every configured MCP server and shows a card per server with:
+
+- Status — healthy, timeout, unreachable, or error (an error shortly after a recent success is shown as a warning rather than hard failure).
+- Response time and the number of tools available.
+- The error message and error class when a check fails, plus when the server was last healthy.
+
+A summary bar counts healthy vs unhealthy servers. Checks auto-refresh every 30 seconds (toggleable), and **Check Now** forces an immediate re-check.
+
+<Callout type="info">
+First connections can take a moment while auth is set up — if servers look failed right after you configure them, hit refresh once before investigating.
+</Callout>
+
+### Schema Compat tab
+
+![Compatibility matrix](/screenshots/compatibility.png)
+
+Checks whether the same tools exist with matching schemas across multiple MCP servers:
+
+1. Select **two or more MCP profiles**.
+2. Provide tool names (one per line) — or let **auto-discover** pull the tool list from the first profile.
+3. **Run Compatibility Matrix**.
+
+The result is a tool-by-profile grid where each cell is one of:
+
+- **Pass** — tool exists and its schema matches the reference profile.
+- **Fail** — schema mismatch.
+- **Missing** — tool not found on that server.
+- **Error** — connection issue.
+
+The first profile acts as the reference that all schemas are compared against. For a parameter-level diff between two servers, use the Schema Diff tab in the [MCP Explorer](/web-ui/mcp-explorer).
+
+## Security Dashboard
+
+**Route:** `/security`
+
+![Security Dashboard](/screenshots/security.png)
+
+Aggregates results from security-focused evaluators (such as `no_leaked_data` and `response_not_includes`) across your test runs:
+
+- **Risk Summary** — a donut chart of findings by severity (critical / high / medium / low) alongside total checks, pass rate, and failure count.
+- **Severity filter** — narrow the results table to one severity level.
+- **Results table** — each check's status, evaluator, severity, test, model, and failure reason.
+- **Export CSV** — download the findings.
+
+Results are capped at the most recent 2,000 rows (a banner notes when older findings are truncated). If the page is empty, add security evaluators to your test suites and re-run them.

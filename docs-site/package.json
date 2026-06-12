@@ -1,0 +1,25 @@
+{
+  "name": "testmcpy-docs",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "npm run sync-assets && next dev -p 3001",
+    "build": "npm run sync-assets && next build && next-sitemap --config next-sitemap.config.cjs",
+    "sync-assets": "node scripts/sync-assets.mjs",
+    "start": "next start"
+  },
+  "dependencies": {
+    "next": "^14.2.35",
+    "nextra": "^3.2.0",
+    "nextra-theme-docs": "^3.2.0",
+    "react": "^18.3.0",
+    "react-dom": "^18.3.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/react": "^18.3.0",
+    "next-sitemap": "^4.2.3",
+    "typescript": "^5.9.3"
+  }
+}

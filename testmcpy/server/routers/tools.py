@@ -13,7 +13,7 @@ from testmcpy.config import get_config
 from testmcpy.mcp_profiles import load_profile
 from testmcpy.server.state import get_default_mcp_client, get_mcp_clients
 from testmcpy.src.llm_integration import create_llm_provider
-from testmcpy.src.mcp_client import MCPClient, MCPError
+from testmcpy.src.mcp_client import MCPClient, MCPError, MCPToolCall
 
 logger = logging.getLogger(__name__)
 
@@ -1010,16 +1010,25 @@ async def compare_tools(request: ToolCompareRequest):
             start_time = time.time()
 
             # Initialize client
-            client = MCPClient(mcp_url=mcp_config.get_mcp_url(), auth=mcp_config.auth)
+            client = MCPClient(
+                base_url=mcp_config.mcp_url,
+                auth=mcp_config.auth.to_dict() if mcp_config.auth else None,
+            )
             await client.initialize()
 
             # Call the tool
             tool_result = await client.call_tool(
-                name=request.tool_name, arguments=request.parameters
+                MCPToolCall(name=request.tool_name, arguments=request.parameters)
             )
 
-            result["success"] = True
-            result["result"] = tool_result
+            if tool_result.is_error:
+                result["success"] = False
+                result["error"] = tool_result.error_message or "Tool call failed"
+            else:
+                from testmcpy.server.api import _serialize_tool_content
+
+                result["success"] = True
+                result["result"] = _serialize_tool_content(tool_result.content)
             result["duration_ms"] = (time.time() - start_time) * 1000
 
         except Exception as e:
@@ -1029,9 +1038,9 @@ async def compare_tools(request: ToolCompareRequest):
         finally:
             if client:
                 try:
-                    await client.cleanup()
-                except Exception:
-                    pass
+                    await client.close()
+                except (MCPError, ConnectionError, OSError, RuntimeError) as e:
+                    logger.warning("Failed to close comparison client: %s", e)
 
         return result
 
@@ -1116,7 +1125,10 @@ async def debug_tool(tool_name: str, request: ToolDebugRequest):
                     profile_data = load_profile(request.profile)
                     if profile_data and profile_data.mcps:
                         mcp_config = profile_data.mcps[0]
-                        client = MCPClient(mcp_url=mcp_config.get_mcp_url(), auth=mcp_config.auth)
+                        client = MCPClient(
+                            base_url=mcp_config.mcp_url,
+                            auth=mcp_config.auth.to_dict() if mcp_config.auth else None,
+                        )
                         await client.initialize()
                         mcp_clients[client_key] = client
                 except Exception as e:
@@ -1137,7 +1149,15 @@ async def debug_tool(tool_name: str, request: ToolDebugRequest):
 
         # Step 2: Call tool
         try:
-            response = await client.call_tool(tool_name, request.parameters)
+            tool_result = await client.call_tool(
+                MCPToolCall(name=tool_name, arguments=request.parameters)
+            )
+            if tool_result.is_error:
+                raise MCPError(tool_result.error_message or "Tool call failed")
+
+            from testmcpy.server.api import _serialize_tool_content
+
+            response = _serialize_tool_content(tool_result.content)
 
             steps.append(
                 {

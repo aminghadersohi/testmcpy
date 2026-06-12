@@ -1,0 +1,43 @@
+---
+title: Performance & Comparison
+description: Per-test results matrix and model leaderboard — compare pass rates across models and MCP configurations.
+---
+
+{/* Source: testmcpy/ui/src/pages/Performance.jsx + README.md — keep in sync */}
+
+import { Callout } from 'nextra/components'
+
+# Performance & Comparison
+
+**Route:** `/performance` (the legacy `/metrics` and `/compare` routes redirect here)
+
+The Performance page aggregates every recorded test result into a per-test grid across model and MCP configurations, plus a ranked leaderboard. It is where you answer "which model handles my tools best?".
+
+![Performance metrics](/screenshots/metrics.png)
+
+## Filters
+
+All views share a filter bar:
+
+- **Suite** — limit to one test file, or all suites.
+- **Date range** — last 7 / 30 / 90 days, or all time.
+- **Min runs** — hide configurations with fewer than N runs (1, 2, 3, or 5).
+- **Grouping toggle** — aggregate **By model** or **By model + MCP profile**, depending on whether you want to compare models in isolation or full configurations.
+
+## Matrix tab
+
+A grid of tests (rows) against configurations (columns), each cell showing the pass rate for that test/config pair. Click a cell to open a drill-down panel with the underlying runs. Data-quality warnings (for example, mixed configurations) appear in a dismissible banner.
+
+## Leaderboard tab
+
+Configurations ranked against each other — a quick model comparison across whatever suite and date range you have filtered to.
+
+![Model comparison leaderboard](/screenshots/compare.png)
+
+## Getting data in
+
+The page is empty until you have runs from more than one configuration. The empty state suggests the fastest path: run the same suite with different `--model`/`--profile` flags from the CLI (see [Running Tests](/cli/running-tests)), or use **Run all LLMs** in the [Test Manager](/web-ui/test-manager).
+
+<Callout type="info">
+Looking for the cross-server tool compatibility matrix? That lives on the [Servers page](/web-ui/health-and-security#schema-compat-tab), since it compares MCP servers rather than models.
+</Callout>

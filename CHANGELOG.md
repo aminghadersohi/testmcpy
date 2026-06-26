@@ -21,6 +21,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the Test Execution Agent (`/api/agent/run` + `testmcpy agent --llm-profile`
   / `--cli-token`). Leaving the field blank preserves the previous behavior
   (host `claude` login).
+- **UI token honored on every Claude SDK code path (no gaps)**: added
+  `resolve_claude_cli_token()` so any path that builds a `ClaudeSDKProvider`
+  picks up a UI-entered token from the LLM profile — including the AI
+  test-generation and doc-optimizer/eval endpoints (now accept an
+  `llm_profile`), and the programmatic paths (CLI chat, docs optimizer,
+  runner tools, websocket chat) via a default-profile fallback. The three
+  generation modals now send the globally selected LLM profile.
+- **Model field is now a combobox**: the Edit/Add Provider modal and the
+  provider wizard list the registry models for the chosen provider as
+  suggestions AND accept any custom model name typed in (previously a closed
+  dropdown limited to a couple of entries).
+
+### Fixed
+- **Editing an MCP server no longer wipes its token/secret**: the profiles
+  list endpoint masks secrets (`***` / `<first8>...`), and saving an edit
+  used to write that mask back, destroying the real value. The update handler
+  now preserves the stored secret when the incoming value is the masked form,
+  while still allowing a new value or an explicit clear.
 
 ## [0.10.3] - 2026-06-12
 

@@ -18,7 +18,9 @@ from testmcpy.src.llm_integration import (
     OpenRouterProvider,
     XAIProvider,
     claude_cli_auth_env,
+    claude_provider_api_key_kwargs,
     create_llm_provider,
+    resolve_claude_cli_token,
 )
 
 
@@ -148,6 +150,90 @@ class TestClaudeSDKProviderTokenInjection:
         env = ClaudeSDKProvider._build_clean_env(source_env={"PATH": "/bin"}, cli_token=None)
         assert env["ANTHROPIC_API_KEY"] == ""  # blanked -> host subscription login
         assert env["IS_SANDBOX"] == "1"
+
+
+class TestResolveClaudeCliToken:
+    """Best-effort token lookup from the LLM profiles config."""
+
+    def _cfg(self, providers):
+        from testmcpy.llm_profiles import LLMProfile
+
+        profile = LLMProfile(profile_id="p", name="p", description="", providers=providers)
+
+        class _Cfg:
+            def get_profile(self, _pid=None):
+                return profile
+
+        return _Cfg()
+
+    def _prov(self, **kw):
+        from testmcpy.llm_profiles import LLMProviderConfig
+
+        return LLMProviderConfig(**kw)
+
+    def test_direct_api_key_for_matching_model(self):
+        cfg = self._cfg(
+            [self._prov(name="x", provider="claude-sdk", model="claude-x", api_key="sk-ant-oat-1")]
+        )
+        with patch("testmcpy.llm_profiles.get_llm_profile_config", return_value=cfg):
+            assert resolve_claude_cli_token("claude-x") == "sk-ant-oat-1"
+
+    def test_prefers_model_match_over_default(self):
+        cfg = self._cfg(
+            [
+                self._prov(
+                    name="d",
+                    provider="claude-sdk",
+                    model="other",
+                    api_key="tok-default",
+                    default=True,
+                ),
+                self._prov(name="m", provider="claude-code", model="wanted", api_key="tok-wanted"),
+            ]
+        )
+        with patch("testmcpy.llm_profiles.get_llm_profile_config", return_value=cfg):
+            assert resolve_claude_cli_token("wanted") == "tok-wanted"
+
+    def test_falls_back_to_default_when_no_model_match(self):
+        cfg = self._cfg(
+            [
+                self._prov(name="a", provider="claude-sdk", model="m1", api_key="tok-a"),
+                self._prov(
+                    name="b", provider="claude-sdk", model="m2", api_key="tok-b", default=True
+                ),
+            ]
+        )
+        with patch("testmcpy.llm_profiles.get_llm_profile_config", return_value=cfg):
+            assert resolve_claude_cli_token("nope") == "tok-b"
+
+    def test_resolves_api_key_env(self):
+        cfg = self._cfg(
+            [self._prov(name="x", provider="claude-sdk", model="m", api_key_env="MY_TOK")]
+        )
+        with patch("testmcpy.llm_profiles.get_llm_profile_config", return_value=cfg):
+            with patch.dict("os.environ", {"MY_TOK": "sk-ant-oat-env"}):
+                assert resolve_claude_cli_token("m") == "sk-ant-oat-env"
+
+    def test_none_when_no_claude_provider(self):
+        cfg = self._cfg([self._prov(name="x", provider="anthropic", model="m", api_key="k")])
+        with patch("testmcpy.llm_profiles.get_llm_profile_config", return_value=cfg):
+            assert resolve_claude_cli_token("m") is None
+
+
+class TestClaudeProviderApiKeyKwargs:
+    def test_empty_for_non_claude_providers(self):
+        assert claude_provider_api_key_kwargs("anthropic", "m") == {}
+        assert claude_provider_api_key_kwargs("openai", "m") == {}
+
+    def test_returns_api_key_for_claude_when_token_found(self):
+        with patch(
+            "testmcpy.src.llm_integration.resolve_claude_cli_token", return_value="sk-ant-oat-9"
+        ):
+            assert claude_provider_api_key_kwargs("claude-sdk", "m") == {"api_key": "sk-ant-oat-9"}
+
+    def test_empty_for_claude_when_no_token(self):
+        with patch("testmcpy.src.llm_integration.resolve_claude_cli_token", return_value=None):
+            assert claude_provider_api_key_kwargs("claude-code", "m") == {}
 
 
 def _is_cli_not_found(exc: Exception) -> bool:

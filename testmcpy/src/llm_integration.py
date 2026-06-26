@@ -1880,6 +1880,64 @@ def claude_cli_auth_env(token: str | None) -> dict[str, str]:
     return {"ANTHROPIC_API_KEY": token}
 
 
+# Provider type strings that map to the Claude Agent SDK (see create_llm_provider).
+CLAUDE_SDK_PROVIDERS = ("claude-sdk", "claude-cli", "claude-code")
+
+
+def resolve_claude_cli_token(
+    model: str | None = None,
+    llm_profile_id: str | None = None,
+) -> str | None:
+    """Look up a Claude Agent SDK auth token in the LLM profiles config.
+
+    This lets every code path that builds a :class:`ClaudeSDKProvider` honor a
+    token entered through the UI, even paths that have no request body to
+    thread it through (CLI chat, docs optimizer, runner tools, websocket chat).
+
+    Searches the named profile — or the default profile when
+    ``llm_profile_id`` is None — for a provider config in the Claude family
+    (:data:`CLAUDE_SDK_PROVIDERS`). Prefers one whose ``model`` matches, else
+    the profile's default/first such provider. Returns the direct ``api_key``
+    or the value of the named ``api_key_env``; ``None`` when nothing is
+    configured (the caller then falls back to the host ``claude`` login).
+    """
+    from testmcpy.llm_profiles import get_llm_profile_config
+
+    profile = get_llm_profile_config().get_profile(llm_profile_id)
+    if not profile:
+        return None
+    candidates = [p for p in profile.providers if p.provider in CLAUDE_SDK_PROVIDERS]
+    if not candidates:
+        return None
+    chosen = None
+    if model:
+        chosen = next((p for p in candidates if p.model == model), None)
+    if chosen is None:
+        chosen = next((p for p in candidates if p.default), None) or candidates[0]
+    if chosen.api_key:
+        return chosen.api_key
+    if chosen.api_key_env:
+        return os.environ.get(chosen.api_key_env)
+    return None
+
+
+def claude_provider_api_key_kwargs(
+    provider: str,
+    model: str | None = None,
+    llm_profile_id: str | None = None,
+) -> dict[str, str]:
+    """``{"api_key": <token>}`` for create_llm_provider when ``provider`` is in
+    the Claude family and a token is configured; otherwise ``{}``.
+
+    Safe to splat into ``create_llm_provider(...)`` for any provider — returns
+    empty for non-Claude providers so it never clobbers their credentials.
+    """
+    if provider not in CLAUDE_SDK_PROVIDERS:
+        return {}
+    token = resolve_claude_cli_token(model, llm_profile_id)
+    return {"api_key": token} if token else {}
+
+
 class ClaudeSDKProvider(BaseSDKProvider):
     """Claude Agent SDK provider with native MCP integration.
 
@@ -1910,9 +1968,16 @@ class ClaudeSDKProvider(BaseSDKProvider):
     ):
         super().__init__(model=model, mcp_url=mcp_url, auth=auth)
         self.log_callback = log_callback
-        # Optional model-auth token entered via the UI/profile. A direct
-        # api_key wins; otherwise resolve an env-var name if one was given.
-        self._cli_token = api_key or (os.environ.get(api_key_env) if api_key_env else None)
+        # Optional model-auth token entered via the UI/profile. Precedence:
+        # explicit api_key, then a named api_key_env, then a best-effort lookup
+        # in the default LLM profile so code paths that can't thread a token
+        # (CLI chat, docs optimizer, runner tools, websocket chat) still honor
+        # a UI-entered token. None -> host ``claude`` login.
+        self._cli_token = (
+            api_key
+            or (os.environ.get(api_key_env) if api_key_env else None)
+            or resolve_claude_cli_token(model)
+        )
         # The Claude SDK consumes an MCP server config dict shaped like
         # {"type": "http", "url": ..., "headers": {...}} — built in initialize().
         self._mcp_server_config: dict[str, Any] | None = None

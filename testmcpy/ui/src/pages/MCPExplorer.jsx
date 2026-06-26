@@ -491,6 +491,7 @@ function MCPExplorer({ selectedProfiles = [] }) {
             tool_description: tool.description,
             tool_schema: tool.input_schema,
             profile_id: profileId,
+            llm_profile: localStorage.getItem('selectedLLMProfile') || null,
           }),
         })
         if (res.ok) {

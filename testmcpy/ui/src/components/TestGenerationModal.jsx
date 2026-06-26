@@ -140,6 +140,7 @@ function TestGenerationModal({ tool, onClose, onSuccess }) {
           custom_instructions: customInstructions || null,
           model: model,
           provider: provider,
+          llm_profile: selectedProfile || null,
         }),
       })
 

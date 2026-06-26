@@ -118,18 +118,25 @@ class TestExecutionAgent:
         if self.agent_model:
             options.model = self.agent_model
 
-        # Inject the optional UI/profile auth token into the SDK subprocess
-        # env. When no token is set, leave options.env unset so the SDK
-        # inherits the server process env and the host's ``claude`` login.
+        # Build the SDK subprocess env. Always strip CLAUDE_CODE* vars (they
+        # block nested CLI spawning) and set IS_SANDBOX=1 so the CLI honors
+        # --dangerously-skip-permissions (driven by
+        # permission_mode="bypassPermissions") when running as root in a
+        # container — without it the CLI refuses the flag and the run dies.
+        # Inject the optional UI/profile auth token when set; otherwise the
+        # inherited env / host ``claude`` login is used.
+        env = {
+            k: v
+            for k, v in os.environ.items()
+            if not k.startswith("CLAUDE_CODE") and k != "CLAUDECODE"
+        }
+        env["IS_SANDBOX"] = "1"
         auth_env = claude_cli_auth_env(self.cli_token)
         if auth_env:
-            env = {
-                k: v
-                for k, v in os.environ.items()
-                if k not in ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN")
-            }
+            env.pop("ANTHROPIC_API_KEY", None)
+            env.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
             env.update(auth_env)
-            options.env = env
+        options.env = env
 
         return options
 

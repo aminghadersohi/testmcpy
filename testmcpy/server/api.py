@@ -1359,12 +1359,13 @@ async def chat_stream(request: ChatRequest):
                 if mcp_config:
                     mcp_servers["mcp-service"] = mcp_config
 
-                clean_env = {
-                    k: v
-                    for k, v in os.environ.items()
-                    if not k.startswith("CLAUDE_CODE") and k != "CLAUDECODE"
-                }
-                clean_env["ANTHROPIC_API_KEY"] = ""
+                # Reuse the provider's env builder (single source of truth):
+                # strips CLAUDE_CODE* vars, injects the UI/profile auth token
+                # when set, and sets IS_SANDBOX=1 so the CLI honors
+                # --dangerously-skip-permissions when running as root in a
+                # container. Hand-rolling this here previously omitted
+                # IS_SANDBOX, which made the SDK fail under root.
+                clean_env = llm_provider._build_clean_env(cli_token=llm_provider._cli_token)
 
                 options = ClaudeAgentOptions(
                     model=model,

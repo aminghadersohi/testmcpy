@@ -34,6 +34,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dropdown limited to a couple of entries).
 
 ### Fixed
+- **Claude SDK chat/agent no longer dies as root with
+  `--dangerously-skip-permissions cannot be used with root/sudo`**: the
+  streaming chat ("interact") path and the Test Execution Agent built their
+  SDK subprocess env without `IS_SANDBOX=1`, which the Claude CLI requires to
+  honor `--dangerously-skip-permissions` (from
+  `permission_mode="bypassPermissions"`) when running as root in a container.
+  The chat path now reuses `ClaudeSDKProvider._build_clean_env` (single source
+  of truth) and the orchestrator always sets `IS_SANDBOX=1` and strips
+  `CLAUDE_CODE*`. The chat fix also injects the UI/profile token consistently.
 - **Editing an MCP server no longer wipes its token/secret**: the profiles
   list endpoint masks secrets (`***` / `<first8>...`), and saving an edit
   used to write that mask back, destroying the real value. The update handler

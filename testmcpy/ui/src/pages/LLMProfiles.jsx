@@ -144,10 +144,13 @@ function ProviderEditorModal({ provider, availableModels, onSave, onCancel }) {
       )
       setFilteredModels(filtered)
 
-      // Auto-select first model if current model is not in filtered list
-      if (filtered.length > 0 && !filtered.find(m => m.id === formData.model)) {
+      // Suggest a default model only when none is set yet (new provider /
+      // after a provider switch clears it). Never overwrite an existing value
+      // — it may be a custom model name the user typed that isn't in the
+      // registry.
+      if (filtered.length > 0 && !formData.model) {
         const defaultModel = filtered.find(m => m.is_default) || filtered[0]
-        setFormData(prev => ({ ...prev, model: defaultModel.id, name: defaultModel.name }))
+        setFormData(prev => ({ ...prev, model: defaultModel.id, name: prev.name || defaultModel.name }))
       }
     }
   }, [formData.provider, availableModels])
@@ -175,12 +178,11 @@ function ProviderEditorModal({ provider, availableModels, onSave, onCancel }) {
   }
 
   const handleModelSelect = (modelId) => {
-    const model = availableModels.find(m => m.id === modelId)
-    if (model) {
-      updateField('model', modelId)
-      if (!formData.name || formData.name === provider?.name) {
-        updateField('name', model.name)
-      }
+    // Accept any value (registry model id OR a custom model name typed in).
+    updateField('model', modelId)
+    const model = availableModels?.find(m => m.id === modelId)
+    if (model && (!formData.name || formData.name === provider?.name)) {
+      updateField('name', model.name)
     }
   }
 
@@ -199,7 +201,7 @@ function ProviderEditorModal({ provider, availableModels, onSave, onCancel }) {
               <label className="block text-sm font-medium mb-1 text-text-secondary">Provider</label>
               <select
                 value={formData.provider}
-                onChange={(e) => updateField('provider', e.target.value)}
+                onChange={(e) => setFormData(prev => ({ ...prev, provider: e.target.value, model: '' }))}
                 className="input w-full"
               >
                 <option value="anthropic">Anthropic (Claude)</option>
@@ -211,30 +213,30 @@ function ProviderEditorModal({ provider, availableModels, onSave, onCancel }) {
               </select>
             </div>
 
-            {/* Model Selection */}
+            {/* Model Selection — combobox: pick a known model or type any name */}
             <div>
               <label className="block text-sm font-medium mb-1 text-text-secondary">Model</label>
-              {filteredModels.length > 0 ? (
-                <select
-                  value={formData.model}
-                  onChange={(e) => handleModelSelect(e.target.value)}
-                  className="input w-full"
-                >
-                  {filteredModels.map(model => (
-                    <option key={model.id} value={model.id}>
-                      {model.name} - ${model.input_price_per_1m}/1M in, ${model.output_price_per_1m}/1M out
-                    </option>
-                  ))}
-                </select>
-              ) : (
-                <input
-                  type="text"
-                  value={formData.model}
-                  onChange={(e) => updateField('model', e.target.value)}
-                  className={`input w-full font-mono text-sm${errors.model ? ' border-error/50' : ''}`}
-                  placeholder="e.g., claude-sonnet-4-5-20250514"
-                />
-              )}
+              <input
+                type="text"
+                list="provider-model-options"
+                value={formData.model}
+                onChange={(e) => handleModelSelect(e.target.value)}
+                className={`input w-full font-mono text-sm${errors.model ? ' border-error/50' : ''}`}
+                placeholder="Select a model or type any model name"
+                autoComplete="off"
+              />
+              <datalist id="provider-model-options">
+                {filteredModels.map(model => (
+                  <option key={model.id} value={model.id}>
+                    {model.name} — ${model.input_price_per_1m}/1M in, ${model.output_price_per_1m}/1M out
+                  </option>
+                ))}
+              </datalist>
+              <p className="text-text-tertiary text-xs mt-1">
+                {filteredModels.length > 0
+                  ? 'Choose from the list or type a custom model name.'
+                  : 'Type the exact model name for this provider.'}
+              </p>
               {errors.model && <p className="text-error text-xs mt-1">{errors.model}</p>}
             </div>
 
@@ -553,74 +555,67 @@ function LLMWizard({ profiles, availableModels, onComplete, onCancel }) {
 
         return (
           <div className="space-y-4">
-            {filtered.length > 0 ? (
-              <>
-                <div>
-                  <label className="block text-sm font-medium mb-1 text-text-secondary">Select Model</label>
-                  <select
-                    value={data.model}
-                    onChange={(e) => {
-                      const model = availableModels.find(m => m.id === e.target.value)
-                      setData(prev => ({
-                        ...prev,
-                        model: e.target.value,
-                        name: model?.name || prev.name,
-                      }))
-                    }}
-                    className="input w-full"
-                    autoFocus
-                  >
-                    <option value="">Choose a model...</option>
-                    {filtered.map(model => (
-                      <option key={model.id} value={model.id}>
-                        {model.name} - ${model.input_price_per_1m}/1M in, ${model.output_price_per_1m}/1M out
-                      </option>
-                    ))}
-                  </select>
-                </div>
+            <div>
+              <label className="block text-sm font-medium mb-1 text-text-secondary">Model</label>
+              <input
+                type="text"
+                list="wizard-model-options"
+                value={data.model}
+                onChange={(e) => {
+                  const model = availableModels?.find(m => m.id === e.target.value)
+                  setData(prev => ({
+                    ...prev,
+                    model: e.target.value,
+                    name: model && !prev.name?.trim() ? model.name : prev.name,
+                  }))
+                }}
+                className="input w-full font-mono text-sm"
+                placeholder="Select a model or type any model name"
+                autoComplete="off"
+                autoFocus
+              />
+              <datalist id="wizard-model-options">
+                {filtered.map(model => (
+                  <option key={model.id} value={model.id}>
+                    {model.name} — ${model.input_price_per_1m}/1M in, ${model.output_price_per_1m}/1M out
+                  </option>
+                ))}
+              </datalist>
+              <p className="text-text-tertiary text-xs mt-1">
+                {filtered.length > 0
+                  ? 'Choose from the list or type a custom model name.'
+                  : 'Type the exact model name for this provider.'}
+              </p>
+            </div>
 
-                {selectedModel && (
-                  <div className="bg-surface rounded-lg p-3 border border-border">
-                    <div className="flex items-start justify-between">
-                      <div>
-                        <div className="font-medium">{selectedModel.name}</div>
-                        <div className="text-xs text-text-secondary mt-1">{selectedModel.description}</div>
-                      </div>
-                      <div className="text-right text-xs">
-                        <div className="flex items-center gap-1 text-text-secondary">
-                          <DollarSign size={12} /> ${selectedModel.input_price_per_1m}/1M in
-                        </div>
-                        <div className="flex items-center gap-1 text-text-secondary">
-                          <DollarSign size={12} /> ${selectedModel.output_price_per_1m}/1M out
-                        </div>
-                      </div>
+            {selectedModel && (
+              <div className="bg-surface rounded-lg p-3 border border-border">
+                <div className="flex items-start justify-between">
+                  <div>
+                    <div className="font-medium">{selectedModel.name}</div>
+                    <div className="text-xs text-text-secondary mt-1">{selectedModel.description}</div>
+                  </div>
+                  <div className="text-right text-xs">
+                    <div className="flex items-center gap-1 text-text-secondary">
+                      <DollarSign size={12} /> ${selectedModel.input_price_per_1m}/1M in
                     </div>
-                    {selectedModel.capabilities?.length > 0 && (
-                      <div className="flex flex-wrap gap-1 mt-2">
-                        {selectedModel.capabilities.map(cap => (
-                          <span key={cap} className="px-1.5 py-0.5 bg-primary/10 text-primary text-xs rounded">
-                            {cap}
-                          </span>
-                        ))}
-                      </div>
-                    )}
-                    <div className="text-xs text-text-tertiary mt-2">
-                      Context: {selectedModel.context_window?.toLocaleString()} tokens
+                    <div className="flex items-center gap-1 text-text-secondary">
+                      <DollarSign size={12} /> ${selectedModel.output_price_per_1m}/1M out
                     </div>
                   </div>
+                </div>
+                {selectedModel.capabilities?.length > 0 && (
+                  <div className="flex flex-wrap gap-1 mt-2">
+                    {selectedModel.capabilities.map(cap => (
+                      <span key={cap} className="px-1.5 py-0.5 bg-primary/10 text-primary text-xs rounded">
+                        {cap}
+                      </span>
+                    ))}
+                  </div>
                 )}
-              </>
-            ) : (
-              <div>
-                <label className="block text-sm font-medium mb-1 text-text-secondary">Model ID</label>
-                <input
-                  type="text"
-                  value={data.model}
-                  onChange={(e) => setData(prev => ({ ...prev, model: e.target.value }))}
-                  className="input w-full font-mono text-sm"
-                  placeholder="e.g., llama3.2:latest"
-                  autoFocus
-                />
+                <div className="text-xs text-text-tertiary mt-2">
+                  Context: {selectedModel.context_window?.toLocaleString()} tokens
+                </div>
               </div>
             )}
 

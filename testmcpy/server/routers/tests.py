@@ -345,6 +345,13 @@ async def run_single_test(request: SingleTestRunRequest):
                         val = getattr(default_prov, fname, None)
                         if val and not provider_config.get(fname):
                             provider_config[fname] = val
+                # For Claude Agent SDK providers, fold the profile's auth token
+                # so ClaudeSDKProvider injects it into the CLI subprocess env.
+                elif provider in ("claude-sdk", "claude-cli", "claude-code"):
+                    for fname in ("api_key", "api_key_env"):
+                        val = getattr(default_prov, fname, None)
+                        if val and not provider_config.get(fname):
+                            provider_config[fname] = val
 
     # Fall back to global config defaults only if still unset after profile resolution
     model = model or config.default_model
@@ -413,7 +420,9 @@ async def generate_tests(request: GenerateTestsRequest):
     provider = request.provider or config.default_provider
 
     try:
-        # Initialize LLM provider
+        # Initialize LLM provider. This endpoint carries no LLM profile, so a
+        # claude-sdk provider here uses the host's `claude` login (no UI token
+        # to inject). Token-from-UI is wired on the chat and test-run paths.
         llm_provider = create_llm_provider(provider, model)
         await llm_provider.initialize()
 

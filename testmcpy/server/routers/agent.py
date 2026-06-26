@@ -27,6 +27,9 @@ class AgentRunRequest(BaseModel):
     models: list[str] = Field(default_factory=list, description="Models to test")
     max_turns: int = Field(50, ge=1, le=200, description="Maximum agent turns")
     agent_model: str | None = Field(None, description="Model for the agent itself")
+    llm_profile: str | None = Field(
+        None, description="LLM profile ID to source the Claude auth token from"
+    )
 
 
 class AgentRunResponse(BaseModel):
@@ -41,6 +44,32 @@ class AgentRunResponse(BaseModel):
 # ---------------------------------------------------------------------------
 # Storage for agent reports
 # ---------------------------------------------------------------------------
+
+
+def _resolve_cli_token(llm_profile_id: str | None) -> str | None:
+    """Resolve the Claude auth token from an LLM profile's default provider.
+
+    Returns the direct ``api_key`` when set, else the value of the named
+    ``api_key_env`` environment variable. None when no profile/token is found,
+    leaving the agent on the host's ``claude`` login.
+    """
+    if not llm_profile_id:
+        return None
+    import os
+
+    from testmcpy.llm_profiles import load_llm_profile
+
+    profile = load_llm_profile(llm_profile_id)
+    if not profile:
+        return None
+    provider = profile.get_default_provider()
+    if not provider:
+        return None
+    if provider.api_key:
+        return provider.api_key
+    if provider.api_key_env:
+        return os.environ.get(provider.api_key_env)
+    return None
 
 
 def _get_reports_dir() -> Path:
@@ -103,6 +132,7 @@ async def run_agent(request: AgentRunRequest):
             models=request.models,
             max_turns=request.max_turns,
             agent_model=request.agent_model,
+            cli_token=_resolve_cli_token(request.llm_profile),
         )
 
         report = await agent.run(effective_prompt)

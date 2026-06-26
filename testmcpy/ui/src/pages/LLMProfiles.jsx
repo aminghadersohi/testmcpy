@@ -331,15 +331,51 @@ function ProviderEditorModal({ provider, availableModels, onSave, onCancel }) {
               </div>
             )}
 
-            {/* Info for Claude Code/SDK */}
+            {/* Optional auth token for Claude Code/SDK */}
             {['claude-code', 'claude-sdk'].includes(formData.provider) && (
-              <div className="p-3 bg-primary/10 rounded-lg border border-primary/30 text-sm">
-                <div className="flex items-center gap-2 font-medium text-primary">
-                  <CheckCircle size={14} />
-                  No API key needed
+              <div className="space-y-3 p-3 bg-surface rounded-lg border border-border">
+                <div className="flex items-center gap-2 text-sm font-medium">
+                  <Key size={14} />
+                  Auth token (optional)
                 </div>
-                <p className="text-text-secondary mt-1 text-xs">
-                  Uses Claude Code authentication. Make sure you're logged in via <code className="bg-surface px-1 rounded">claude auth</code>
+
+                {/* Direct token */}
+                <div>
+                  <label className="block text-xs font-medium mb-1 text-text-secondary">Token (direct)</label>
+                  <div className="relative">
+                    <input
+                      type={showApiKey ? 'text' : 'password'}
+                      value={formData.api_key}
+                      onChange={(e) => updateField('api_key', e.target.value)}
+                      className="input w-full font-mono text-sm pr-10"
+                      placeholder="sk-ant-oat... (subscription) or sk-ant-api... (API key)"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowApiKey(!showApiKey)}
+                      className="absolute right-2 top-1/2 -translate-y-1/2 p-1 hover:bg-surface-hover rounded"
+                    >
+                      {showApiKey ? <EyeOff size={14} /> : <Eye size={14} />}
+                    </button>
+                  </div>
+                </div>
+
+                <div className="text-center text-xs text-text-tertiary">— or —</div>
+
+                {/* Environment Variable */}
+                <div>
+                  <label className="block text-xs font-medium mb-1 text-text-secondary">Environment Variable</label>
+                  <input
+                    type="text"
+                    value={formData.api_key_env}
+                    onChange={(e) => updateField('api_key_env', e.target.value)}
+                    className="input w-full font-mono text-sm"
+                    placeholder="e.g., CLAUDE_CODE_OAUTH_TOKEN"
+                  />
+                </div>
+
+                <p className="text-text-secondary text-xs mt-1">
+                  Paste a Claude subscription token (<code className="bg-surface px-1 rounded">claude setup-token</code>, starts with <code className="bg-surface px-1 rounded">sk-ant-oat</code>) or an Anthropic API key. Leave blank to use the host's <code className="bg-surface px-1 rounded">claude</code> login.
                 </p>
               </div>
             )}
@@ -610,17 +646,47 @@ function LLMWizard({ profiles, availableModels, onComplete, onCancel }) {
         return true
       },
       component: ({ data, setData }) => {
-        const noKeyNeeded = ['claude-code', 'claude-sdk'].includes(data.provider)
+        const claudeCli = ['claude-code', 'claude-sdk'].includes(data.provider)
 
         return (
           <div className="space-y-4">
-            {noKeyNeeded ? (
-              <div className="p-3 bg-primary/10 rounded-lg border border-primary/30 text-sm">
-                <div className="flex items-center gap-2 font-medium text-primary">
-                  <CheckCircle size={14} /> No API key needed
+            {claudeCli ? (
+              <div className="space-y-3 p-3 bg-surface rounded-lg border border-border">
+                <div className="flex items-center gap-2 text-sm font-medium">
+                  <Key size={14} /> Auth token (optional)
                 </div>
-                <p className="text-text-secondary mt-1 text-xs">
-                  Uses Claude Code authentication. Make sure you are logged in via <code className="bg-surface px-1 rounded">claude auth</code>
+                <div>
+                  <label className="block text-xs font-medium mb-1 text-text-secondary">Token (direct)</label>
+                  <div className="relative">
+                    <input
+                      type={data.showApiKey ? 'text' : 'password'}
+                      value={data.api_key}
+                      onChange={(e) => setData(prev => ({ ...prev, api_key: e.target.value }))}
+                      className="input w-full font-mono text-sm pr-10"
+                      placeholder="sk-ant-oat... (subscription) or sk-ant-api... (API key)"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setData(prev => ({ ...prev, showApiKey: !prev.showApiKey }))}
+                      className="absolute right-2 top-1/2 -translate-y-1/2 p-1 hover:bg-surface-hover rounded"
+                    >
+                      {data.showApiKey ? <EyeOff size={14} /> : <Eye size={14} />}
+                    </button>
+                  </div>
+                </div>
+                <div className="text-center text-xs text-text-tertiary">-- or --</div>
+                <div>
+                  <label className="block text-xs font-medium mb-1 text-text-secondary">Environment Variable</label>
+                  <input
+                    type="text"
+                    value={data.api_key_env}
+                    onChange={(e) => setData(prev => ({ ...prev, api_key_env: e.target.value }))}
+                    className="input w-full font-mono text-sm"
+                    placeholder="e.g., CLAUDE_CODE_OAUTH_TOKEN"
+                  />
+                </div>
+                <p className="text-text-secondary text-xs mt-1">
+                  Paste a Claude subscription token (<code className="bg-surface px-1 rounded">claude setup-token</code>, starts with <code className="bg-surface px-1 rounded">sk-ant-oat</code>) or an Anthropic API key. Leave blank to use the host's <code className="bg-surface px-1 rounded">claude</code> login.
                 </p>
               </div>
             ) : (

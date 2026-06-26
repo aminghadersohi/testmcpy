@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-06-26
+
+### Added
+- **Enter the Claude Agent SDK auth token through the UI**: the LLM Profiles
+  editor (and wizard) now exposes an optional "Auth token" field for the
+  `claude-sdk` / `claude-code` providers. Paste a Claude subscription token
+  (`claude setup-token`, starts with `sk-ant-oat`) or an Anthropic API key
+  instead of relying on env vars / a host `claude` login. The token is
+  auto-routed by prefix to `CLAUDE_CODE_OAUTH_TOKEN` (subscription) or
+  `ANTHROPIC_API_KEY` (API key) in the Agent SDK subprocess env via the new
+  `claude_cli_auth_env()` helper. Wired through chat, Test Manager runs, and
+  the Test Execution Agent (`/api/agent/run` + `testmcpy agent --llm-profile`
+  / `--cli-token`). Leaving the field blank preserves the previous behavior
+  (host `claude` login).
+
 ## [0.10.3] - 2026-06-12
 
 ### Changed

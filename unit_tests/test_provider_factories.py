@@ -17,6 +17,7 @@ from testmcpy.src.llm_integration import (
     OllamaProvider,
     OpenRouterProvider,
     XAIProvider,
+    claude_cli_auth_env,
     create_llm_provider,
 )
 
@@ -84,6 +85,69 @@ class TestClaudeSDKProviderFactory:
     def test_claude_code_alias(self):
         p = create_llm_provider("claude-code", "claude-sonnet-4-6")
         assert isinstance(p, ClaudeSDKProvider)
+
+
+class TestClaudeCliAuthEnv:
+    """The UI-entered token is routed to the right CLI env var by prefix."""
+
+    def test_subscription_token_maps_to_oauth_var(self):
+        assert claude_cli_auth_env("sk-ant-oat-abc") == {
+            "CLAUDE_CODE_OAUTH_TOKEN": "sk-ant-oat-abc"
+        }
+
+    def test_api_key_maps_to_anthropic_api_key(self):
+        assert claude_cli_auth_env("sk-ant-api03-xyz") == {"ANTHROPIC_API_KEY": "sk-ant-api03-xyz"}
+
+    def test_blank_token_yields_no_override(self):
+        assert claude_cli_auth_env("") == {}
+        assert claude_cli_auth_env(None) == {}
+
+    def test_token_is_stripped(self):
+        assert claude_cli_auth_env("  sk-ant-oat-z  ") == {
+            "CLAUDE_CODE_OAUTH_TOKEN": "sk-ant-oat-z"
+        }
+
+
+class TestClaudeSDKProviderTokenInjection:
+    """ClaudeSDKProvider builds the CLI subprocess env from the token."""
+
+    def test_factory_passes_api_key_through(self):
+        # create_llm_provider filters kwargs by signature; api_key must survive.
+        p = create_llm_provider("claude-sdk", "claude-sonnet-4-6", api_key="sk-ant-oat-1")
+        assert p._cli_token == "sk-ant-oat-1"
+
+    def test_api_key_env_resolves_from_environment(self):
+        with patch.dict("os.environ", {"MY_CLAUDE_TOK": "sk-ant-oat-fromenv"}):
+            p = ClaudeSDKProvider(model="m", api_key_env="MY_CLAUDE_TOK")
+            assert p._cli_token == "sk-ant-oat-fromenv"
+
+    def test_direct_api_key_wins_over_env(self):
+        with patch.dict("os.environ", {"MY_CLAUDE_TOK": "sk-ant-oat-env"}):
+            p = ClaudeSDKProvider(model="m", api_key="sk-direct", api_key_env="MY_CLAUDE_TOK")
+            assert p._cli_token == "sk-direct"
+
+    def test_clean_env_with_oauth_token_drops_api_key(self):
+        env = ClaudeSDKProvider._build_clean_env(
+            source_env={"ANTHROPIC_API_KEY": "old", "CLAUDE_CODE_FOO": "x", "PATH": "/bin"},
+            cli_token="sk-ant-oat-1",
+        )
+        assert env["CLAUDE_CODE_OAUTH_TOKEN"] == "sk-ant-oat-1"
+        assert "ANTHROPIC_API_KEY" not in env
+        assert "CLAUDE_CODE_FOO" not in env  # CLAUDE_CODE* still stripped
+        assert env["IS_SANDBOX"] == "1"
+
+    def test_clean_env_with_api_key_drops_oauth(self):
+        env = ClaudeSDKProvider._build_clean_env(
+            source_env={"CLAUDE_CODE_OAUTH_TOKEN": "old", "PATH": "/bin"},
+            cli_token="sk-ant-api-2",
+        )
+        assert env["ANTHROPIC_API_KEY"] == "sk-ant-api-2"
+        assert "CLAUDE_CODE_OAUTH_TOKEN" not in env
+
+    def test_clean_env_without_token_keeps_historical_behavior(self):
+        env = ClaudeSDKProvider._build_clean_env(source_env={"PATH": "/bin"}, cli_token=None)
+        assert env["ANTHROPIC_API_KEY"] == ""  # blanked -> host subscription login
+        assert env["IS_SANDBOX"] == "1"
 
 
 def _is_cli_not_found(exc: Exception) -> bool:

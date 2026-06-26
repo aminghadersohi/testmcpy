@@ -1858,6 +1858,28 @@ def _looks_like_error_payload(content: Any) -> bool:
     return any(marker in text for marker in _ERROR_PAYLOAD_MARKERS)
 
 
+def claude_cli_auth_env(token: str | None) -> dict[str, str]:
+    """Map a UI-entered token to the env var the Claude CLI/Agent SDK expects.
+
+    The Claude CLI (which the Agent SDK wraps) authenticates from its
+    subprocess environment in two ways:
+
+    - ``CLAUDE_CODE_OAUTH_TOKEN`` — a Pro/Max **subscription** token produced
+      by ``claude setup-token`` (prefix ``sk-ant-oat``).
+    - ``ANTHROPIC_API_KEY`` — a standard **API-credits** key.
+
+    Auto-detect by prefix so users only paste one value. Returns ``{}`` for an
+    empty/None token so callers can leave the environment untouched (preserving
+    reliance on the host's ``claude`` login).
+    """
+    token = (token or "").strip()
+    if not token:
+        return {}
+    if token.startswith("sk-ant-oat"):
+        return {"CLAUDE_CODE_OAUTH_TOKEN": token}
+    return {"ANTHROPIC_API_KEY": token}
+
+
 class ClaudeSDKProvider(BaseSDKProvider):
     """Claude Agent SDK provider with native MCP integration.
 
@@ -1866,8 +1888,13 @@ class ClaudeSDKProvider(BaseSDKProvider):
     no need for our own ToolDiscoveryService.
 
     Supports JWT, OAuth, and Bearer auth for MCP servers via
-    :class:`BaseSDKProvider`. Uses Claude Code subscription (no API credits)
-    by clearing ANTHROPIC_API_KEY from env.
+    :class:`BaseSDKProvider`.
+
+    Authentication for the model itself is optional: when ``api_key`` (or
+    ``api_key_env``) supplies a token it is injected into the CLI subprocess
+    env (see :func:`claude_cli_auth_env`). When none is supplied,
+    ANTHROPIC_API_KEY is cleared so the CLI falls back to the host's Claude
+    Code subscription login (the historical behavior).
     """
 
     LOGGER_NAME = "ClaudeSDKProvider"
@@ -1878,9 +1905,14 @@ class ClaudeSDKProvider(BaseSDKProvider):
         mcp_url: str | None = None,
         auth: dict[str, Any] | None = None,
         log_callback=None,
+        api_key: str | None = None,
+        api_key_env: str | None = None,
     ):
         super().__init__(model=model, mcp_url=mcp_url, auth=auth)
         self.log_callback = log_callback
+        # Optional model-auth token entered via the UI/profile. A direct
+        # api_key wins; otherwise resolve an env-var name if one was given.
+        self._cli_token = api_key or (os.environ.get(api_key_env) if api_key_env else None)
         # The Claude SDK consumes an MCP server config dict shaped like
         # {"type": "http", "url": ..., "headers": {...}} — built in initialize().
         self._mcp_server_config: dict[str, Any] | None = None
@@ -1948,13 +1980,19 @@ class ClaudeSDKProvider(BaseSDKProvider):
         self._mcp_server_config = server_config
 
     @staticmethod
-    def _build_clean_env(source_env: dict[str, str] | None = None) -> dict[str, str]:
+    def _build_clean_env(
+        source_env: dict[str, str] | None = None,
+        cli_token: str | None = None,
+    ) -> dict[str, str]:
         """Build the subprocess env handed to the Claude CLI.
 
         Inherits the current process env but:
         - Strips Claude Code session vars that would prevent nested CLI spawning.
-        - Clears ``ANTHROPIC_API_KEY`` so the CLI uses the Claude Code
-          subscription instead of API credits.
+        - When ``cli_token`` is supplied, injects it as the appropriate auth
+          var (see :func:`claude_cli_auth_env`) and drops the conflicting one
+          so only the chosen credential is present. When it is not supplied,
+          clears ``ANTHROPIC_API_KEY`` so the CLI uses the host's Claude Code
+          subscription login instead of API credits (historical behavior).
         - Sets ``IS_SANDBOX=1`` so ``--dangerously-skip-permissions`` (driven
           by ``permission_mode="bypassPermissions"``) is honored when
           testmcpy runs as root in a container. Recent Claude CLI versions
@@ -1968,7 +2006,14 @@ class ClaudeSDKProvider(BaseSDKProvider):
             for k, v in source_env.items()
             if not k.startswith("CLAUDE_CODE") and k != "CLAUDECODE"
         }
-        clean_env["ANTHROPIC_API_KEY"] = ""  # Force subscription usage, not API credits
+        auth_env = claude_cli_auth_env(cli_token)
+        if auth_env:
+            # Keep only the chosen credential so the two never conflict.
+            clean_env.pop("ANTHROPIC_API_KEY", None)
+            clean_env.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
+            clean_env.update(auth_env)
+        else:
+            clean_env["ANTHROPIC_API_KEY"] = ""  # Force subscription usage, not API credits
         clean_env["IS_SANDBOX"] = "1"
         return clean_env
 
@@ -2027,7 +2072,7 @@ class ClaudeSDKProvider(BaseSDKProvider):
 
             # Build a clean env (see _build_clean_env for what gets stripped/added,
             # including the IS_SANDBOX=1 opt-in required when running as root).
-            clean_env = self._build_clean_env()
+            clean_env = self._build_clean_env(cli_token=self._cli_token)
 
             # Capture the CLI's stderr so failures (e.g. the root +
             # --dangerously-skip-permissions refusal) surface in the error

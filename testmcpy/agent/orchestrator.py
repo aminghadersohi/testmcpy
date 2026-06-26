@@ -5,6 +5,7 @@ Main entry point for creating and running the agent. Wires together
 tools, hooks, prompts, and the Claude Agent SDK.
 """
 
+import os
 import uuid
 from collections.abc import AsyncIterator
 from datetime import datetime, timezone
@@ -14,6 +15,7 @@ from testmcpy.agent.hooks import create_hooks
 from testmcpy.agent.models import AgentRunReport, AgentSession
 from testmcpy.agent.prompts import build_context_prompt
 from testmcpy.agent.tools import ALL_TOOLS, set_tool_context
+from testmcpy.src.llm_integration import claude_cli_auth_env
 
 try:
     from claude_agent_sdk import (
@@ -47,6 +49,7 @@ class TestExecutionAgent:
         storage_path: str | None = None,
         max_turns: int = 50,
         agent_model: str | None = None,
+        cli_token: str | None = None,
     ):
         """Initialize the agent.
 
@@ -58,6 +61,10 @@ class TestExecutionAgent:
             storage_path: Path to SQLite storage database
             max_turns: Maximum agent turns (default 50)
             agent_model: Model for the agent itself (default: SDK default)
+            cli_token: Optional Claude auth token (subscription
+                ``sk-ant-oat...`` or API key) injected into the Agent SDK
+                subprocess env. When None, the SDK uses the host's ``claude``
+                login.
         """
         if not _HAS_SDK:
             raise ImportError(
@@ -72,6 +79,7 @@ class TestExecutionAgent:
         self.storage_path = storage_path
         self.max_turns = max_turns
         self.agent_model = agent_model
+        self.cli_token = cli_token
 
         # Configure shared tool context
         set_tool_context(
@@ -109,6 +117,19 @@ class TestExecutionAgent:
 
         if self.agent_model:
             options.model = self.agent_model
+
+        # Inject the optional UI/profile auth token into the SDK subprocess
+        # env. When no token is set, leave options.env unset so the SDK
+        # inherits the server process env and the host's ``claude`` login.
+        auth_env = claude_cli_auth_env(self.cli_token)
+        if auth_env:
+            env = {
+                k: v
+                for k, v in os.environ.items()
+                if k not in ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN")
+            }
+            env.update(auth_env)
+            options.env = env
 
         return options
 

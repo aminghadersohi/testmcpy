@@ -22,6 +22,23 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/mcp", tags=["mcp-profiles"])
 
 
+def _resolve_secret(incoming: str | None, existing: str | None) -> str | None:
+    """Decide what secret value to persist on an MCP update.
+
+    The GET list endpoint masks secrets (``token``/``api_token`` ->
+    ``"<first8>..."`` or ``"***"``; ``api_secret``/``client_secret`` ->
+    ``"***"``). The editor loads those masked strings, so a plain save would
+    write the mask back and destroy the real secret. When ``incoming`` is the
+    masked form of ``existing``, keep ``existing``. A genuinely new value (or
+    ``None`` to clear) passes through unchanged.
+    """
+    if incoming == "***":
+        return existing
+    if existing and len(existing) > 12 and incoming == f"{existing[:8]}...":
+        return existing
+    return incoming
+
+
 # Pydantic models for MCP profile requests
 class AuthType:
     NONE = "none"
@@ -662,20 +679,29 @@ async def update_mcp_in_profile(profile_id: str, mcp_index: int, request: MCPUpd
 
         # Update auth
         if request.auth is not None:
+            # Preserve stored secrets when the client sends back the masked
+            # form (otherwise editing an MCP would wipe its token/secret).
+            existing_auth = mcp.get("auth", {}) or {}
             auth_config = {"type": request.auth.type}
 
-            if request.auth.token:
-                auth_config["token"] = request.auth.token
+            token = _resolve_secret(request.auth.token, existing_auth.get("token"))
+            if token:
+                auth_config["token"] = token
             if request.auth.api_url:
                 auth_config["api_url"] = request.auth.api_url
-            if request.auth.api_token:
-                auth_config["api_token"] = request.auth.api_token
-            if request.auth.api_secret:
-                auth_config["api_secret"] = request.auth.api_secret
+            api_token = _resolve_secret(request.auth.api_token, existing_auth.get("api_token"))
+            if api_token:
+                auth_config["api_token"] = api_token
+            api_secret = _resolve_secret(request.auth.api_secret, existing_auth.get("api_secret"))
+            if api_secret:
+                auth_config["api_secret"] = api_secret
             if request.auth.client_id:
                 auth_config["client_id"] = request.auth.client_id
-            if request.auth.client_secret:
-                auth_config["client_secret"] = request.auth.client_secret
+            client_secret = _resolve_secret(
+                request.auth.client_secret, existing_auth.get("client_secret")
+            )
+            if client_secret:
+                auth_config["client_secret"] = client_secret
             if request.auth.token_url:
                 auth_config["token_url"] = request.auth.token_url
             if request.auth.scopes:

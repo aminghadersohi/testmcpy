@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-06-26
+
+### Added
+- **Enter the Claude Agent SDK auth token through the UI**: the LLM Profiles
+  editor (and wizard) now exposes an optional "Auth token" field for the
+  `claude-sdk` / `claude-code` providers. Paste a Claude subscription token
+  (`claude setup-token`, starts with `sk-ant-oat`) or an Anthropic API key
+  instead of relying on env vars / a host `claude` login. The token is
+  auto-routed by prefix to `CLAUDE_CODE_OAUTH_TOKEN` (subscription) or
+  `ANTHROPIC_API_KEY` (API key) in the Agent SDK subprocess env via the new
+  `claude_cli_auth_env()` helper. Wired through chat, Test Manager runs, and
+  the Test Execution Agent (`/api/agent/run` + `testmcpy agent --llm-profile`
+  / `--cli-token`). Leaving the field blank preserves the previous behavior
+  (host `claude` login).
+- **UI token honored on every Claude SDK code path (no gaps)**: added
+  `resolve_claude_cli_token()` so any path that builds a `ClaudeSDKProvider`
+  picks up a UI-entered token from the LLM profile — including the AI
+  test-generation and doc-optimizer/eval endpoints (now accept an
+  `llm_profile`), and the programmatic paths (CLI chat, docs optimizer,
+  runner tools, websocket chat) via a default-profile fallback. The three
+  generation modals now send the globally selected LLM profile.
+- **Model field is now a combobox**: the Edit/Add Provider modal and the
+  provider wizard list the registry models for the chosen provider as
+  suggestions AND accept any custom model name typed in (previously a closed
+  dropdown limited to a couple of entries).
+
+### Fixed
+- **Claude SDK chat/agent no longer dies as root with
+  `--dangerously-skip-permissions cannot be used with root/sudo`**: the
+  streaming chat ("interact") path and the Test Execution Agent built their
+  SDK subprocess env without `IS_SANDBOX=1`, which the Claude CLI requires to
+  honor `--dangerously-skip-permissions` (from
+  `permission_mode="bypassPermissions"`) when running as root in a container.
+  The chat path and the orchestrator now both reuse
+  `ClaudeSDKProvider._build_clean_env` (single source of truth) — which also
+  blanks `ANTHROPIC_API_KEY` in the no-token case so the agent uses the host
+  subscription login like chat does, instead of silently billing API credits.
+  The chat fix also injects the UI/profile token consistently.
+- **Editing an MCP server no longer wipes its token/secret**: the profiles
+  list endpoint masks secrets (`***` / `<first8>...`), and saving an edit
+  used to write that mask back, destroying the real value. The update handler
+  now preserves the stored secret when the incoming value is the masked form,
+  while still allowing a new value or an explicit clear.
+
 ## [0.10.3] - 2026-06-12
 
 ### Changed

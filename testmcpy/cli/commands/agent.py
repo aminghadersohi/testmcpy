@@ -51,6 +51,17 @@ def agent_run(
         "--agent-model",
         help="Model for the agent itself (default: SDK default)",
     ),
+    llm_profile: Optional[str] = typer.Option(
+        None,
+        "--llm-profile",
+        help="LLM profile to source the Claude auth token from",
+    ),
+    cli_token: Optional[str] = typer.Option(
+        None,
+        "--cli-token",
+        help="Claude auth token (subscription sk-ant-oat... or API key); "
+        "overrides --llm-profile. Defaults to the host 'claude' login.",
+    ),
     output: Optional[Path] = typer.Option(
         None,
         "--output",
@@ -107,6 +118,21 @@ def agent_run(
     # Parse models list
     model_list = [m.strip() for m in models.split(",")] if models else []
 
+    # Resolve the Claude auth token: direct --cli-token wins, else from the
+    # named LLM profile's default provider (api_key / api_key_env).
+    effective_cli_token = cli_token
+    if not effective_cli_token and llm_profile:
+        import os
+
+        from testmcpy.llm_profiles import load_llm_profile
+
+        prof = load_llm_profile(llm_profile)
+        provider = prof.get_default_provider() if prof else None
+        if provider:
+            effective_cli_token = provider.api_key or (
+                os.environ.get(provider.api_key_env) if provider.api_key_env else None
+            )
+
     console.print(
         Panel.fit(
             "[bold cyan]Test Execution Agent[/bold cyan]\n"
@@ -130,6 +156,7 @@ def agent_run(
                 models=model_list,
                 max_turns=max_turns,
                 agent_model=agent_model,
+                cli_token=effective_cli_token,
             )
         except ImportError as exc:
             console.print(f"[red]Error:[/red] {exc}")

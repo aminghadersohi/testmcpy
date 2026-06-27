@@ -16,7 +16,10 @@ from testmcpy.config import get_config
 from testmcpy.evals.base_evaluators import create_evaluator
 from testmcpy.server.routers.generation_logs import save_generation_log
 from testmcpy.server.state import get_or_create_mcp_client
-from testmcpy.src.llm_integration import create_llm_provider
+from testmcpy.src.llm_integration import (
+    claude_provider_api_key_kwargs,
+    create_llm_provider,
+)
 from testmcpy.src.test_runner import TestCase, TestRunner
 
 router = APIRouter(prefix="/api", tags=["tests"])
@@ -82,6 +85,7 @@ class GenerateTestsRequest(BaseModel):
     custom_instructions: str | None = None
     model: str | None = None
     provider: str | None = None
+    llm_profile: str | None = None
 
 
 def _discover_yaml_tests(
@@ -345,6 +349,13 @@ async def run_single_test(request: SingleTestRunRequest):
                         val = getattr(default_prov, fname, None)
                         if val and not provider_config.get(fname):
                             provider_config[fname] = val
+                # For Claude Agent SDK providers, fold the profile's auth token
+                # so ClaudeSDKProvider injects it into the CLI subprocess env.
+                elif provider in ("claude-sdk", "claude-cli", "claude-code"):
+                    for fname in ("api_key", "api_key_env"):
+                        val = getattr(default_prov, fname, None)
+                        if val and not provider_config.get(fname):
+                            provider_config[fname] = val
 
     # Fall back to global config defaults only if still unset after profile resolution
     model = model or config.default_model
@@ -413,8 +424,11 @@ async def generate_tests(request: GenerateTestsRequest):
     provider = request.provider or config.default_provider
 
     try:
-        # Initialize LLM provider
-        llm_provider = create_llm_provider(provider, model)
+        # Inject a UI-entered Claude token for claude-sdk/code providers,
+        # resolved from the request's LLM profile (falls back to the default
+        # profile, then the host `claude` login).
+        kwargs = claude_provider_api_key_kwargs(provider, model, request.llm_profile)
+        llm_provider = create_llm_provider(provider, model, **kwargs)
         await llm_provider.initialize()
 
         # Step 1: Analyze tool and suggest strategies
@@ -639,9 +653,10 @@ async def generate_tests_stream(request: GenerateTestsRequest):
             yield send_log(f"📋 Coverage level: {request.coverage_level}")
             yield send_log(f"🤖 Using {provider}/{model}")
 
-            # Initialize LLM provider
+            # Initialize LLM provider (inject UI Claude token when applicable)
             yield send_log("🔧 Initializing LLM provider...")
-            llm_provider = create_llm_provider(provider, model)
+            kwargs = claude_provider_api_key_kwargs(provider, model, request.llm_profile)
+            llm_provider = create_llm_provider(provider, model, **kwargs)
             await llm_provider.initialize()
             yield send_log("✓ LLM provider ready")
 

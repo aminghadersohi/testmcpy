@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import re
+import tempfile
 import subprocess
 import time
 import uuid
@@ -2188,11 +2189,9 @@ class ClaudeSDKProvider(BaseSDKProvider):
                 "You are a test executor. Your ONLY job is to call the MCP tools provided "
                 "to fulfill the user's request, then report the results.\n\n"
                 "IMPORTANT RULES:\n"
-                "1. Use ONLY tools from the 'mcp-service' MCP server "
-                "(tools prefixed with mcp__mcp-service__). "
-                "NEVER call tools from any other MCP server even if they appear available "
-                "(e.g. mcp__2cad__, mcp__preset__, or any other prefix). "
-                "Do NOT use any Claude Code built-in tools.\n"
+                "1. Use ONLY the MCP server tools (call_tool, health_check, "
+                "get_instance_info). Do NOT use any Claude Code built-in tools "
+                "and do NOT call tools from any other MCP server.\n"
                 "2. The MCP server uses a gateway pattern: real tools like list_dashboards, "
                 "get_chart_info, etc. are accessed via call_tool(name='tool_name', arguments={...}).\n"
                 "3. For simple tools like health_check and get_instance_info, call them directly.\n"
@@ -2204,22 +2203,27 @@ class ClaudeSDKProvider(BaseSDKProvider):
                 "7. Be concise and factual — include key data points from the tool output."
             )
 
+            # Run the subprocess from a temp directory so it doesn't inherit
+            # any project-level MCP config files from the working directory.
+            # The only MCP server available to the subprocess is the one we
+            # pass explicitly via mcp_servers above.
+            _sdk_tmpdir = tempfile.mkdtemp(prefix="testmcpy_sdk_")
+
             options = ClaudeAgentOptions(
                 model=self.model,
                 permission_mode="bypassPermissions",
                 mcp_servers=mcp_servers,
                 max_turns=25,
                 env=clean_env,
+                cwd=_sdk_tmpdir,
                 disallowed_tools=_builtin_tools_to_block,
                 system_prompt=system_prompt,
                 debug_stderr=None,  # Don't dump CLI debug to host stderr
                 stderr=_capture_stderr,  # Capture lines for failure diagnostics
                 # Isolate from the host machine's Claude Code config: don't read
-                # ~/.claude/settings.json (or project/local equivalents) and don't
-                # load any installed plugins. Without this, the SDK merges in the
-                # user's personal MCP servers (playwright, notion, sdx, …) and
-                # the test LLM sees tools that have nothing to do with the MCP
-                # under test.
+                # settings.json (user / project / local) and don't load plugins.
+                # Combined with cwd=_sdk_tmpdir this ensures the subprocess only
+                # sees the single MCP server we configure above.
                 setting_sources=[],
                 plugins=[],
             )

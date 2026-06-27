@@ -406,6 +406,84 @@ class NoToolCallErrors(BaseEvaluator):
         )
 
 
+class ToolCallQuality(BaseEvaluator):
+    """Score tool-calling quality based on error rate. Never hard-fails.
+
+    score = 1.0 − (error_calls / total_calls)
+
+    Use instead of ``no_tool_call_errors`` when first-try validation failures
+    (e.g. the model guessing flat args before discovering the ``request``
+    wrapper) should reduce the quality score but not fail the test outright.
+    A test that ultimately succeeded but needed two retries still passes;
+    it just earns a lower score than one that got it right on the first try.
+    """
+
+    # Reuse the same error-detection patterns as NoToolCallErrors.
+    _ERROR_PATTERNS = NoToolCallErrors._ERROR_PATTERNS
+
+    @property
+    def name(self) -> str:
+        return "tool_call_quality"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Scores tool-calling quality as 1 − (error_calls / total_calls). "
+            "Always passes — use execution_successful for hard failure detection."
+        )
+
+    def evaluate(self, context: dict[str, Any]) -> EvalResult:
+        tool_results = context.get("tool_results", [])
+        if not tool_results:
+            return EvalResult(
+                passed=True,
+                score=1.0,
+                reason="No tool calls made — nothing to score",
+            )
+
+        errors: list[dict[str, Any]] = []
+        for result in tool_results:
+            content_str = NoToolCallErrors._to_str(getattr(result, "content", None))
+            is_error = bool(getattr(result, "is_error", False))
+            matched_pattern: str | None = None
+            for pattern in self._ERROR_PATTERNS:
+                if pattern in content_str:
+                    matched_pattern = pattern
+                    break
+            if is_error or matched_pattern is not None:
+                tool_name = getattr(result, "tool_name", None) or ""
+                tool_id = getattr(result, "tool_call_id", None) or ""
+                errors.append(
+                    {
+                        "tool": tool_name or tool_id or "?",
+                        "is_error_flag": is_error,
+                        "matched_pattern": matched_pattern,
+                        "snippet": content_str[:200],
+                    }
+                )
+
+        total = len(tool_results)
+        error_count = len(errors)
+        score = round(1.0 - error_count / total, 4)
+
+        if error_count == 0:
+            reason = f"All {total} tool call(s) succeeded"
+        else:
+            reason = f"{error_count}/{total} tool call(s) had errors (score penalised)"
+
+        return EvalResult(
+            passed=True,
+            score=score,
+            reason=reason,
+            details={
+                "error_count": error_count,
+                "total_count": total,
+                "error_rate": round(error_count / total, 4),
+                "errors": errors,
+            },
+        )
+
+
 class FinalAnswerContains(BaseEvaluator):
     """Check if the final answer contains expected content."""
 
@@ -2804,6 +2882,7 @@ def create_evaluator(name: str, **kwargs) -> BaseEvaluator:
         "was_mcp_tool_called": WasMCPToolCalled,
         "execution_successful": ExecutionSuccessful,
         "no_tool_call_errors": NoToolCallErrors,
+        "tool_call_quality": ToolCallQuality,
         "final_answer_contains": FinalAnswerContains,
         "response_includes": ResponseIncludes,  # More intuitive name
         "no_hallucination": NoHallucination,

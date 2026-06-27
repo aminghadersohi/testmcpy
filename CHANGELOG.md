@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.1] - 2026-06-27
+
+### Added
+- **`tool_call_quality` evaluator**: soft alternative to `no_tool_call_errors`.
+  Scores tool-calling quality as `1 − (error_calls / total_calls)` — always
+  passes so the test result is driven by other evaluators, but pulls the
+  aggregate score down proportionally to how many tool calls errored before the
+  model found the right argument format. Use this instead of `no_tool_call_errors`
+  for tests where first-try validation failures (e.g. the model discovering the
+  `request` wrapper via retry) are expected and should reduce quality score
+  rather than hard-failing the test.
+
 ## [0.11.0] - 2026-06-26
 
 ### Added

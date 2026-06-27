@@ -28,6 +28,7 @@ from testmcpy.evals.base_evaluators import (
     ToolCallCount,
     ToolCalledWithParameter,
     ToolCalledWithParameters,
+    ToolCallQuality,
     ToolCallSequence,
     WasChartCreated,
     WasMCPToolCalled,
@@ -465,6 +466,74 @@ class TestNoToolCallErrors:
         every YAML referencing it — catch that."""
         ev = create_evaluator("no_tool_call_errors")
         assert isinstance(ev, NoToolCallErrors)
+
+
+class TestToolCallQuality:
+    """Pin ToolCallQuality contract: always passed=True, score = 1 - error_rate."""
+
+    def test_all_successful_is_perfect_score(self):
+        ev = ToolCallQuality()
+        context = {
+            "tool_results": [
+                MockToolResult(tool_call_id="1", content="rows: 42", is_error=False),
+                MockToolResult(tool_call_id="2", content='{"ok": true}', is_error=False),
+            ]
+        }
+        result = ev.evaluate(context)
+        assert result.passed is True
+        assert result.score == 1.0
+        assert result.details["error_count"] == 0
+        assert result.details["total_count"] == 2
+
+    def test_partial_errors_fractional_score(self):
+        """1 error out of 3 calls → score 0.6667, still passed."""
+        ev = ToolCallQuality()
+        context = {
+            "tool_results": [
+                MockToolResult(tool_call_id="1", content="rows: 42", is_error=False),
+                MockToolResult(
+                    tool_call_id="2",
+                    content="Error: validation error for call[my_tool]",
+                    is_error=False,
+                ),
+                MockToolResult(tool_call_id="3", content="done", is_error=False),
+            ]
+        }
+        result = ev.evaluate(context)
+        assert result.passed is True
+        assert result.score == round(2 / 3, 4)
+        assert result.details["error_count"] == 1
+        assert result.details["total_count"] == 3
+
+    def test_all_errors_zero_score_still_passes(self):
+        """All calls error → score 0.0 but passed=True (hard-fail is not our job)."""
+        ev = ToolCallQuality()
+        context = {
+            "tool_results": [
+                MockToolResult(tool_call_id="1", content=None, is_error=True),
+                MockToolResult(tool_call_id="2", content=None, is_error=True),
+            ]
+        }
+        result = ev.evaluate(context)
+        assert result.passed is True
+        assert result.score == 0.0
+        assert result.details["error_count"] == 2
+
+    def test_empty_tool_results_perfect_score(self):
+        ev = ToolCallQuality()
+        result = ev.evaluate({"tool_results": []})
+        assert result.passed is True
+        assert result.score == 1.0
+
+    def test_no_tool_results_key(self):
+        ev = ToolCallQuality()
+        result = ev.evaluate({})
+        assert result.passed is True
+        assert result.score == 1.0
+
+    def test_registered_in_factory(self):
+        ev = create_evaluator("tool_call_quality")
+        assert isinstance(ev, ToolCallQuality)
 
 
 class TestFinalAnswerContains:

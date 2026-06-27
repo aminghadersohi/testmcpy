@@ -353,25 +353,19 @@ class NoToolCallErrors(BaseEvaluator):
             return " ".join(parts)
         return str(content)
 
-    def evaluate(self, context: dict[str, Any]) -> EvalResult:
-        tool_results = context.get("tool_results", [])
-        if not tool_results:
-            # "No tool calls" is not an error condition for this evaluator
-            # — pair it with `was_mcp_tool_called` if you also want to
-            # assert a tool fired. Returning passed=True keeps it
-            # composable with response-only tests.
-            return EvalResult(
-                passed=True,
-                score=1.0,
-                reason="No tool calls made — nothing to check for errors",
-            )
+    @classmethod
+    def _collect_errors(cls, tool_results: list[Any]) -> list[dict[str, Any]]:
+        """Return one entry per errored tool result (is_error or matching pattern).
 
+        Shared by NoToolCallErrors and ToolCallQuality so both classes detect
+        errors in exactly the same way and cannot drift independently.
+        """
         errors: list[dict[str, Any]] = []
         for result in tool_results:
-            content_str = self._to_str(getattr(result, "content", None))
+            content_str = cls._to_str(getattr(result, "content", None))
             is_error = bool(getattr(result, "is_error", False))
             matched_pattern: str | None = None
-            for pattern in self._ERROR_PATTERNS:
+            for pattern in cls._ERROR_PATTERNS:
                 if pattern in content_str:
                     matched_pattern = pattern
                     break
@@ -389,6 +383,22 @@ class NoToolCallErrors(BaseEvaluator):
                         "snippet": content_str[:200],
                     }
                 )
+        return errors
+
+    def evaluate(self, context: dict[str, Any]) -> EvalResult:
+        tool_results = context.get("tool_results", [])
+        if not tool_results:
+            # "No tool calls" is not an error condition for this evaluator
+            # — pair it with `was_mcp_tool_called` if you also want to
+            # assert a tool fired. Returning passed=True keeps it
+            # composable with response-only tests.
+            return EvalResult(
+                passed=True,
+                score=1.0,
+                reason="No tool calls made — nothing to check for errors",
+            )
+
+        errors = self._collect_errors(tool_results)
 
         if errors:
             return EvalResult(
@@ -441,27 +451,7 @@ class ToolCallQuality(BaseEvaluator):
                 reason="No tool calls made — nothing to score",
             )
 
-        errors: list[dict[str, Any]] = []
-        for result in tool_results:
-            content_str = NoToolCallErrors._to_str(getattr(result, "content", None))
-            is_error = bool(getattr(result, "is_error", False))
-            matched_pattern: str | None = None
-            for pattern in self._ERROR_PATTERNS:
-                if pattern in content_str:
-                    matched_pattern = pattern
-                    break
-            if is_error or matched_pattern is not None:
-                tool_name = getattr(result, "tool_name", None) or ""
-                tool_id = getattr(result, "tool_call_id", None) or ""
-                errors.append(
-                    {
-                        "tool": tool_name or tool_id or "?",
-                        "is_error_flag": is_error,
-                        "matched_pattern": matched_pattern,
-                        "snippet": content_str[:200],
-                    }
-                )
-
+        errors = NoToolCallErrors._collect_errors(tool_results)
         total = len(tool_results)
         error_count = len(errors)
         score = round(1.0 - error_count / total, 4)

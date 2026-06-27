@@ -8,8 +8,9 @@ import json
 import logging
 import os
 import re
-import tempfile
+import shutil
 import subprocess
+import tempfile
 import time
 import uuid
 from abc import ABC, abstractmethod
@@ -2454,6 +2455,8 @@ class ClaudeSDKProvider(BaseSDKProvider):
                     response_text=f"Error: SDK query timed out after {timeout}s",
                     logs=logs,
                 )
+            finally:
+                shutil.rmtree(_sdk_tmpdir, ignore_errors=True)
 
             # Attach tool results to tool calls and build MCPToolResult objects
             mcp_tool_results = []

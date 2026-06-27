@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.3] - 2026-06-27
+
+### Fixed
+- **Temp-dir leak in ClaudeSDKProvider**: `tempfile.mkdtemp()` was never removed after
+  each `_run_agent` call, leaking hundreds of `/tmp/testmcpy_sdk_*` directories in
+  long-running servers. Added `shutil.rmtree(_sdk_tmpdir, ignore_errors=True)` in a
+  `finally` block so cleanup happens on all paths (normal, timeout, exception).
+- **DRY evaluator error-detection**: `ToolCallQuality.evaluate` duplicated the
+  error-collection loop from `NoToolCallErrors.evaluate`. Factored it into a shared
+  `NoToolCallErrors._collect_errors(tool_results)` classmethod so both classes use the
+  same logic and cannot drift independently.
+
+### Tests
+- Added `TestToolCallQuality` unit tests: all-success → 1.0, partial errors → fractional
+  score, all errors → 0.0/passed, empty results → 1.0, factory registration.
+
 ## [0.11.2] - 2026-06-27
 
 ### Changed

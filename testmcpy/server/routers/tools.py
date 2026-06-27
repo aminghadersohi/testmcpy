@@ -12,7 +12,10 @@ from pydantic import BaseModel, Field
 from testmcpy.config import get_config
 from testmcpy.mcp_profiles import load_profile
 from testmcpy.server.state import get_default_mcp_client, get_mcp_clients
-from testmcpy.src.llm_integration import create_llm_provider
+from testmcpy.src.llm_integration import (
+    claude_provider_api_key_kwargs,
+    create_llm_provider,
+)
 from testmcpy.src.mcp_client import MCPClient, MCPError, MCPToolCall
 
 logger = logging.getLogger(__name__)
@@ -41,6 +44,7 @@ class OptimizeDocsRequest(BaseModel):
     input_schema: dict[str, Any]
     model: str | None = None
     provider: str | None = None
+    llm_profile: str | None = None
 
 
 class OptimizeDocsResponse(BaseModel):
@@ -60,6 +64,7 @@ class DocEvalRequest(BaseModel):
     output_schema: dict[str, Any] | None = None
     model: str | None = None
     provider: str | None = None
+    llm_profile: str | None = None
     num_prompts: int = Field(default=10, ge=3, le=20)
 
 
@@ -302,7 +307,9 @@ async def optimize_tool_docs(request: OptimizeDocsRequest) -> OptimizeDocsRespon
             # Use Haiku for analysis to save costs
             llm_model = "claude-haiku-4-5"
 
-        llm_provider = create_llm_provider(provider, llm_model)
+        # Inject a UI-entered Claude token for claude-sdk/code providers.
+        kwargs = claude_provider_api_key_kwargs(provider, llm_model, request.llm_profile)
+        llm_provider = create_llm_provider(provider, llm_model, **kwargs)
         await llm_provider.initialize()
 
         # Format the input schema for better readability
@@ -675,7 +682,9 @@ async def eval_tool_docs(request: DocEvalRequest) -> DocEvalResponse:
         if provider == "anthropic" and "haiku" not in model.lower():
             llm_model = "claude-haiku-4-5"
 
-        llm_provider = create_llm_provider(provider, llm_model)
+        # Inject a UI-entered Claude token for claude-sdk/code providers.
+        kwargs = claude_provider_api_key_kwargs(provider, llm_model, request.llm_profile)
+        llm_provider = create_llm_provider(provider, llm_model, **kwargs)
         await llm_provider.initialize()
 
         schema_str = json.dumps(request.input_schema, indent=2)

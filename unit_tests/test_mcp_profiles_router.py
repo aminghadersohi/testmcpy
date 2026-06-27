@@ -101,3 +101,32 @@ def test_test_connection_stdio_missing_command(client):
         json={"mcp_url": "stdio://", "transport": "stdio"},
     )
     assert res.status_code == 400
+
+
+class TestResolveSecret:
+    """Editing an MCP must not wipe its stored secret when the client sends
+    back the masked value (regression: token/secret cleared on edit)."""
+
+    def _resolve(self, incoming, existing):
+        from testmcpy.server.routers.mcp_profiles import _resolve_secret
+
+        return _resolve_secret(incoming, existing)
+
+    def test_star_mask_preserves_existing(self):
+        assert self._resolve("***", "realsecretvalue") == "realsecretvalue"
+
+    def test_truncated_mask_preserves_existing(self):
+        existing = "abcdefgh1234567890"  # len > 12
+        assert self._resolve(f"{existing[:8]}...", existing) == existing
+
+    def test_none_clears_the_secret(self):
+        assert self._resolve(None, "realsecretvalue") is None
+
+    def test_new_value_overwrites(self):
+        assert self._resolve("brand-new-token", "old-token") == "brand-new-token"
+
+    def test_star_with_no_existing_is_none(self):
+        assert self._resolve("***", None) is None
+
+    def test_env_var_reference_passthrough(self):
+        assert self._resolve("${MY_TOKEN}", "${MY_TOKEN}") == "${MY_TOKEN}"

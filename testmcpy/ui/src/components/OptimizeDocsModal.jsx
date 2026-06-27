@@ -57,6 +57,7 @@ function OptimizeDocsModal({ tool, onClose }) {
           input_schema: tool.input_schema,
           provider: provider,
           model: model,
+          llm_profile: localStorage.getItem('selectedLLMProfile') || null,
         }),
       })
 
@@ -99,6 +100,7 @@ function OptimizeDocsModal({ tool, onClose }) {
           provider,
           model,
           num_prompts: 10,
+          llm_profile: localStorage.getItem('selectedLLMProfile') || null,
         }),
       })
 

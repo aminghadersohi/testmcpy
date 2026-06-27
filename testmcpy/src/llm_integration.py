@@ -2163,7 +2163,7 @@ class ClaudeSDKProvider(BaseSDKProvider):
                     stderr_capture.append(line)
 
             # Disable Claude Code's built-in tools (Bash, Read, Edit, Grep, etc.)
-            # so the LLM only uses the MCP server's tools (call_tool, search_tools, etc.).
+            # so the LLM only uses the MCP server's tools.
             # This prevents the LLM from calling ToolSearch or other internal tools
             # instead of the MCP gateway tools.
             _builtin_tools_to_block = [
@@ -2189,18 +2189,16 @@ class ClaudeSDKProvider(BaseSDKProvider):
                 "You are a test executor. Your ONLY job is to call the MCP tools provided "
                 "to fulfill the user's request, then report the results.\n\n"
                 "IMPORTANT RULES:\n"
-                "1. Use ONLY the MCP server tools (call_tool, health_check, "
-                "get_instance_info). Do NOT use any Claude Code built-in tools "
-                "and do NOT call tools from any other MCP server.\n"
-                "2. The MCP server uses a gateway pattern: real tools like list_dashboards, "
-                "get_chart_info, etc. are accessed via call_tool(name='tool_name', arguments={...}).\n"
-                "3. For simple tools like health_check and get_instance_info, call them directly.\n"
-                "4. Do NOT call search_tools — the tool name is always specified in the request. "
-                "Use call_tool(name='tool_name', arguments={...}) directly without any prior discovery.\n"
-                "5. Do NOT call any authentication, login, or credential tool (e.g. 'authenticate'). "
+                "1. Use ONLY the MCP server tools provided to you. Do NOT use any Claude Code "
+                "built-in tools and do NOT call tools from any other MCP server.\n"
+                "2. Some MCP servers use a gateway pattern where tools are invoked via a meta-tool "
+                "(e.g., call_tool(name='tool_name', arguments={...})). Use whatever interface the server provides.\n"
+                "3. Do NOT call any tool discovery or search tools — the tool name is always specified "
+                "in the request. Proceed directly to the requested tool without prior discovery.\n"
+                "4. Do NOT call any authentication, login, or credential tool (e.g. 'authenticate'). "
                 "Skip it and proceed directly to the requested tool.\n"
-                "6. Always include the actual data from tool results in your response.\n"
-                "7. Be concise and factual — include key data points from the tool output."
+                "5. Always include the actual data from tool results in your response.\n"
+                "6. Be concise and factual — include key data points from the tool output."
             )
 
             # Run the subprocess from a temp directory so it doesn't inherit
@@ -2657,12 +2655,10 @@ class AssistantProvider(LLMProvider):
     # a SECOND POST against the same conversation_id. Cap protects against
     # a backend that keeps reporting tool calls without ever returning text.
     #
-    # Raised from 3 → 8 in v0.7.20 (SC-108183): multi-step chatbot prompts
-    # (e.g. C02_1 "give me an explore URL") legitimately walk through
-    # info-gathering tool calls across several turns
-    # (get_instance_info → search_tools → list_datasets → list_datasets →
-    # generate_explore_link → synthesise) before the chatbot is ready to
-    # produce a final answer. The cap was clipping the synthesis turn off.
+    # Raised from 3 → 8: multi-step chatbot prompts legitimately walk through
+    # several info-gathering tool calls across multiple turns before the
+    # chatbot is ready to produce a final answer. The cap was clipping the
+    # synthesis turn off.
     # Idle (SSE_IDLE_ABORT_SECONDS, default 90s) and per-call wall-clock
     # (PER_CALL_WALL_CLOCK_SECONDS, default 180s) still bound runaway
     # streams independently of this cap.
@@ -3059,15 +3055,13 @@ class AssistantProvider(LLMProvider):
                 # Decide whether to do a follow-up POST. Several subtle
                 # interactions to keep straight:
                 #
-                # - The chatbot backend interleaves transitional text
-                #   ("Let me work through this step by step.") with tool
-                #   calls in the same SSE turn — a naïve "any text →
-                #   stop" surfaced the fragment as the answer (SC-108177).
-                # - The backend ALSO sends `final` in the SAME turn as
-                #   the tool calls in some flows (C02_1 generate_explore_link:
-                #   tool ran, `final` arrived, but the actual synthesized
-                #   answer was on a follow-up POST). Treating `final` as
-                #   unconditional "we're done" then dropped that synthesis.
+                # - The backend may interleave transitional text with tool
+                #   calls in the same SSE turn — a naïve "any text → stop"
+                #   would surface the fragment as the answer prematurely.
+                # - The backend may also send `final` in the SAME turn as
+                #   tool calls (tool ran, `final` arrived, but the actual
+                #   synthesized answer came on a follow-up POST). Treating
+                #   `final` as unconditional "we're done" drops that synthesis.
                 #
                 # Stop on ANY of:
                 #   1. backend signaled an error — terminal regardless.
@@ -3793,16 +3787,15 @@ _CODEX_SYSTEM_PROMPT = (
     "You are a test executor. Your ONLY job is to call the MCP tools provided "
     "to fulfil the user's request, then report the results.\n\n"
     "IMPORTANT RULES:\n"
-    "1. Use ONLY the MCP server tools. Do NOT use any other tools or built-ins.\n"
-    "2. The MCP server uses a gateway pattern: real tools like list_dashboards, "
-    "get_chart_info, etc. are accessed via call_tool(name='tool_name', arguments={...}).\n"
-    "3. For simple tools like health_check and get_instance_info, call them directly.\n"
-    "4. Do NOT call search_tools — the tool name is always specified in the request. "
-    "Use call_tool(name='tool_name', arguments={...}) directly without any prior discovery.\n"
-    "5. Do NOT call any authentication, login, or credential tool. "
+    "1. Use ONLY the MCP server tools provided. Do NOT use any other tools or built-ins.\n"
+    "2. Some MCP servers use a gateway pattern where tools are invoked via a meta-tool "
+    "(e.g., call_tool(name='tool_name', arguments={...})). Use whatever interface the server provides.\n"
+    "3. Do NOT call any tool discovery or search tools — the tool name is always specified "
+    "in the request. Proceed directly to the requested tool without prior discovery.\n"
+    "4. Do NOT call any authentication, login, or credential tool. "
     "Skip it and proceed directly to the requested tool.\n"
-    "6. Always include the actual data from tool results in your response.\n"
-    "7. Be concise and factual — include key data points from the tool output."
+    "5. Always include the actual data from tool results in your response.\n"
+    "6. Be concise and factual — include key data points from the tool output."
 )
 
 
@@ -4225,14 +4218,13 @@ _GEMINI_SDK_SYSTEM_PROMPT = (
     "You are a test executor. Your ONLY job is to call the MCP tools provided "
     "to fulfil the user's request, then report the results.\n\n"
     "IMPORTANT RULES:\n"
-    "1. Use ONLY the MCP server tools. Do NOT use any other tools or built-ins.\n"
-    "2. The MCP server uses a gateway pattern: real tools like list_dashboards, "
-    "get_chart_info, etc. are accessed via call_tool(name='tool_name', arguments={...}).\n"
-    "3. For simple tools like health_check and get_instance_info, call them directly.\n"
-    "4. Do NOT call search_tools — the tool name is always specified in the request.\n"
-    "5. Do NOT call any authentication, login, or credential tool.\n"
-    "6. Always include the actual data from tool results in your response.\n"
-    "7. Be concise and factual — include key data points from the tool output."
+    "1. Use ONLY the MCP server tools provided. Do NOT use any other tools or built-ins.\n"
+    "2. Some MCP servers use a gateway pattern where tools are invoked via a meta-tool "
+    "(e.g., call_tool(name='tool_name', arguments={...})). Use whatever interface the server provides.\n"
+    "3. Do NOT call any tool discovery or search tools — the tool name is always specified in the request.\n"
+    "4. Do NOT call any authentication, login, or credential tool.\n"
+    "5. Always include the actual data from tool results in your response.\n"
+    "6. Be concise and factual — include key data points from the tool output."
 )
 
 

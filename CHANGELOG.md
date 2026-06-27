@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.2] - 2026-06-27
+
+### Changed
+- Removed all references to MCP service-specific tool names (`health_check`,
+  `get_instance_info`, `list_dashboards`, `get_chart_info`, `list_datasets`,
+  `generate_explore_link`, etc.) from source code, system prompts, comments,
+  and unit test fixtures. testmcpy is MCP-server-agnostic — no tool names
+  specific to any particular server should appear in the framework itself.
+- Generalized the ClaudeSDK, Codex, and Gemini provider system prompts so they
+  describe the gateway pattern (`call_tool`) without naming Preset-specific tools.
+- Updated unit test fixtures in `test_unnecessary_tool_calls` and
+  `test_assistant_sse_multi_turn` to use generic tool names (`fetch_status`,
+  `list_items`, `get_details`, `build_url`).
+
 ## [0.11.1] - 2026-06-27
 
 ### Added

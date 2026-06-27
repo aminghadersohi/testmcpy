@@ -81,9 +81,9 @@ def _real_tool_name(tool_use: dict) -> str:
     """Extract the canonical tool name from a tool_use dict.
 
     Handles three patterns:
-    - Gateway: mcp__ns__call_tool + arguments.name="list_dashboards" → "list_dashboards"
-    - Direct prefixed: mcp__ns__health_check → "health_check"
-    - Plain: "health_check" → "health_check"
+    - Gateway: mcp__ns__call_tool + arguments.name="my_tool" → "my_tool"
+    - Direct prefixed: mcp__ns__my_tool → "my_tool"
+    - Plain: "my_tool" → "my_tool"
 
     Recurses so a gateway inner name that is itself prefixed is also normalized.
     Falls back to tool_use["tool_name"] for alternate payload shapes.

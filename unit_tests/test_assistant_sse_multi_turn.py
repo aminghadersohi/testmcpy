@@ -115,16 +115,16 @@ def _provider(client: _ScriptedAsyncClient) -> AssistantProvider:
 # consumes via httpx.aiter_lines().
 _FIRST_TURN_TOOLS_THEN_CLOSE = [
     "event: tool_call",
-    'data: {"tool_call_id": "tc-1", "tool_name": "get_instance_info", "input": {}}',
+    'data: {"tool_call_id": "tc-1", "tool_name": "fetch_status", "input": {}}',
     "",
     "event: tool_result",
-    'data: {"tool_call_id": "tc-1", "tool_name": "get_instance_info", "result": {"ok": true}}',
+    'data: {"tool_call_id": "tc-1", "tool_name": "fetch_status", "result": {"ok": true}}',
     "",
     "event: tool_call",
-    'data: {"tool_call_id": "tc-2", "tool_name": "search_tools", "input": {"q": "chart"}}',
+    'data: {"tool_call_id": "tc-2", "tool_name": "list_items", "input": {"q": "chart"}}',
     "",
     "event: tool_result",
-    'data: {"tool_call_id": "tc-2", "tool_name": "search_tools", "result": {"hits": 3}}',
+    'data: {"tool_call_id": "tc-2", "tool_name": "list_items", "result": {"hits": 3}}',
     "",
 ]
 
@@ -158,26 +158,25 @@ _THIRD_TURN_ANSWER = [
     "",
 ]
 
-# Real-world Preset chatbot pattern from C01_2_dashboard_drill_down:
-# the backend streams a transitional "thinking aloud" sentence ALONGSIDE
-# tool calls in the same SSE turn — there is no `final` event yet.
-# Earlier code that broke on any text growth would surface this fragment
-# as the final answer; the loop must keep going.
+# Pattern where the backend streams transitional text ALONGSIDE tool calls
+# in the same SSE turn — there is no `final` event yet. Earlier code that
+# broke on any text growth would surface this fragment as the final answer;
+# the loop must keep going.
 _FIRST_TURN_TRANSITIONAL_TEXT_PLUS_TOOLS = [
     "event: token",
     'data: {"chunk": "Let me work through this step by step."}',
     "",
     "event: tool_call",
-    'data: {"tool_call_id": "tc-1", "tool_name": "search_tools", "input": {"q": "dashboard"}}',
+    'data: {"tool_call_id": "tc-1", "tool_name": "search_tools", "input": {"q": "items"}}',
     "",
     "event: tool_result",
     'data: {"tool_call_id": "tc-1", "tool_name": "search_tools", "result": {"hits": 5}}',
     "",
     "event: tool_call",
-    'data: {"tool_call_id": "tc-2", "tool_name": "list_dashboards", "input": {}}',
+    'data: {"tool_call_id": "tc-2", "tool_name": "list_items", "input": {}}',
     "",
     "event: tool_result",
-    'data: {"tool_call_id": "tc-2", "tool_name": "list_dashboards", "result": {"items": []}}',
+    'data: {"tool_call_id": "tc-2", "tool_name": "list_items", "result": {"items": []}}',
     "",
 ]
 
@@ -214,7 +213,7 @@ async def test_followup_post_when_first_turn_only_returns_tool_results():
     assert conv_ids[0].startswith("conv-test-"), conv_ids[0]
     assert result.response == "I found 3 chart-related tools."
     # Accumulated tool state across both turns.
-    assert [tc["name"] for tc in result.tool_calls] == ["get_instance_info", "search_tools"]
+    assert [tc["name"] for tc in result.tool_calls] == ["fetch_status", "list_items"]
     assert len(result.tool_results) == 2
     # Logs contain the follow-up marker so a human reading the eval can
     # tell why a second POST happened.
@@ -358,7 +357,7 @@ async def test_followup_post_when_first_turn_has_transitional_text_with_tools():
     # Tool state accumulated from turn 1.
     assert [tc["name"] for tc in result.tool_calls] == [
         "search_tools",
-        "list_dashboards",
+        "list_items",
     ]
     assert len(result.tool_results) == 2
 
@@ -453,18 +452,16 @@ async def test_fresh_conversation_per_generate_with_tools_call():
 
 @pytest.mark.asyncio
 async def test_followup_post_when_final_arrives_alongside_new_tool_results():
-    """Regression for the C02_1_explore_not_generate failure (SC-108182):
-    the Preset chatbot backend emits a `final` event in the SAME SSE turn
-    as the tool_call + tool_result events. The earlier "got_final → break"
-    check terminated immediately and dropped the follow-up POST that
-    carries the actual synthesized answer (the explore URL after
-    generate_explore_link ran). With the fix, `got_final` only stops the
-    loop when no new tool_results arrived this turn — otherwise we keep
-    going so the backend can synthesize the answer in a follow-up POST.
+    """Regression: backend emits a `final` event in the SAME SSE turn as
+    tool_call + tool_result events. The earlier "got_final → break" check
+    terminated immediately and dropped the follow-up POST that carries the
+    actual synthesized answer. With the fix, `got_final` only stops the loop
+    when no new tool_results arrived this turn — otherwise we keep going so
+    the backend can synthesize the answer in a follow-up POST.
     """
     first_turn_tools_plus_final = [
         "event: token",
-        'data: {"chunk": "Sure! I\'ll use Vehicle Sales."}',
+        'data: {"chunk": "Sure! Let me build that link."}',
         "",
         "event: tool_call",
         'data: {"tool_call_id": "tc-1", "tool_name": "search_tools", "input": {}}',
@@ -473,46 +470,46 @@ async def test_followup_post_when_final_arrives_alongside_new_tool_results():
         'data: {"tool_call_id": "tc-1", "tool_name": "search_tools", "result": {}}',
         "",
         "event: tool_call",
-        'data: {"tool_call_id": "tc-2", "tool_name": "generate_explore_link", "input": {}}',
+        'data: {"tool_call_id": "tc-2", "tool_name": "build_url", "input": {}}',
         "",
         "event: tool_result",
-        'data: {"tool_call_id": "tc-2", "tool_name": "generate_explore_link",'
-        ' "result": {"url": "https://example/explore?slice_id=1"}}',
+        'data: {"tool_call_id": "tc-2", "tool_name": "build_url",'
+        ' "result": {"url": "https://example/view?id=1"}}',
         "",
         # Backend signals `final` AT THE SAME TIME as the tool calls — the
         # synthesized answer comes on the follow-up POST, not in this turn.
         "event: final",
-        'data: {"answer": "Sure! I\'ll use Vehicle Sales."}',
+        'data: {"answer": "Sure! Let me build that link."}',
         "",
     ]
     second_turn_synthesis = [
         "event: token",
-        'data: {"chunk": "Here\'s your explore URL: "}',
+        'data: {"chunk": "Here\'s your link: "}',
         "",
         "event: token",
-        'data: {"chunk": "https://example/explore?slice_id=1"}',
+        'data: {"chunk": "https://example/view?id=1"}',
         "",
         # NB: this data: line was previously two adjacent string literals
         # which Python concatenated without a separator, producing invalid
         # JSON (`."Here's…`) that SSE parsing silently dropped. Now a single
         # well-formed JSON object.
         "event: final",
-        'data: {"answer": "Sure! Here\'s your explore URL: https://example/explore?slice_id=1"}',
+        'data: {"answer": "Sure! Here\'s your link: https://example/view?id=1"}',
         "",
     ]
     client = _ScriptedAsyncClient([first_turn_tools_plus_final, second_turn_synthesis])
     p = _provider(client)
 
     result = await p.generate_with_tools(
-        prompt="Give me an explore URL I can tweak in the browser.", timeout=30.0
+        prompt="Give me a shareable URL I can tweak in the browser.", timeout=30.0
     )
 
     assert len(client.posts) == 2, (
         "expected a follow-up POST — `final` alongside new tool_results must "
         "NOT short-circuit the loop"
     )
-    assert "explore?slice_id=1" in result.response, result.response
-    assert any(tc["name"] == "generate_explore_link" for tc in result.tool_calls)
+    assert "view?id=1" in result.response, result.response
+    assert any(tc["name"] == "build_url" for tc in result.tool_calls)
     # Directly assert BOTH `final` events were successfully parsed. Without
     # these, a silent JSONDecodeError on the scripted `final` payload would
     # let this test pass purely on the token-chunk assertions while leaving

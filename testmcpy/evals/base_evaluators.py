@@ -1151,10 +1151,10 @@ class ToolCallSequence(BaseEvaluator):
 
         Examples:
             # Strict sequence - must be exactly these tools in this order
-            ToolCallSequence(["list_datasets", "generate_chart"], strict=True)
+            ToolCallSequence(["fetch_data", "render_result"], strict=True)
 
             # Loose sequence - these tools must appear in order, but other tools allowed
-            ToolCallSequence(["list_datasets", "generate_chart"], strict=False, allow_intermediate=True)
+            ToolCallSequence(["fetch_data", "render_result"], strict=False, allow_intermediate=True)
         """
         self.sequence = sequence
         self.strict = strict

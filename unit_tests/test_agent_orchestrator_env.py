@@ -35,6 +35,9 @@ def test_env_sets_is_sandbox_without_token():
     assert options.env["IS_SANDBOX"] == "1"
     # CLAUDE_CODE* vars are stripped so a nested CLI can spawn.
     assert not any(k.startswith("CLAUDE_CODE") for k in options.env)
+    # No-token case blanks ANTHROPIC_API_KEY to force the host subscription
+    # login — matching the chat path (shared _build_clean_env), not API credits.
+    assert options.env["ANTHROPIC_API_KEY"] == ""
 
 
 def test_env_injects_subscription_token():

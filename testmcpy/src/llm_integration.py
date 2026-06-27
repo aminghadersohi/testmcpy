@@ -1900,25 +1900,35 @@ def resolve_claude_cli_token(
     the profile's default/first such provider. Returns the direct ``api_key``
     or the value of the named ``api_key_env``; ``None`` when nothing is
     configured (the caller then falls back to the host ``claude`` login).
+
+    This is a best-effort fallback: a malformed/unreadable profile config
+    degrades to ``None`` (host login) rather than breaking every
+    ``ClaudeSDKProvider`` construction.
     """
     from testmcpy.llm_profiles import get_llm_profile_config
 
-    profile = get_llm_profile_config().get_profile(llm_profile_id)
-    if not profile:
+    try:
+        profile = get_llm_profile_config().get_profile(llm_profile_id)
+        if not profile:
+            return None
+        candidates = [p for p in profile.providers if p.provider in CLAUDE_SDK_PROVIDERS]
+        if not candidates:
+            return None
+        chosen = None
+        if model:
+            chosen = next((p for p in candidates if p.model == model), None)
+        if chosen is None:
+            chosen = next((p for p in candidates if p.default), None) or candidates[0]
+        if chosen.api_key:
+            return chosen.api_key
+        if chosen.api_key_env:
+            return os.environ.get(chosen.api_key_env)
         return None
-    candidates = [p for p in profile.providers if p.provider in CLAUDE_SDK_PROVIDERS]
-    if not candidates:
+    except (OSError, ValueError, KeyError, AttributeError, TypeError) as e:
+        _claude_sdk_logger.warning(
+            "resolve_claude_cli_token: ignoring bad LLM profile config: %s", e
+        )
         return None
-    chosen = None
-    if model:
-        chosen = next((p for p in candidates if p.model == model), None)
-    if chosen is None:
-        chosen = next((p for p in candidates if p.default), None) or candidates[0]
-    if chosen.api_key:
-        return chosen.api_key
-    if chosen.api_key_env:
-        return os.environ.get(chosen.api_key_env)
-    return None
 
 
 def claude_provider_api_key_kwargs(

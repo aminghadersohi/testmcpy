@@ -5,7 +5,6 @@ Main entry point for creating and running the agent. Wires together
 tools, hooks, prompts, and the Claude Agent SDK.
 """
 
-import os
 import uuid
 from collections.abc import AsyncIterator
 from datetime import datetime, timezone
@@ -15,7 +14,7 @@ from testmcpy.agent.hooks import create_hooks
 from testmcpy.agent.models import AgentRunReport, AgentSession
 from testmcpy.agent.prompts import build_context_prompt
 from testmcpy.agent.tools import ALL_TOOLS, set_tool_context
-from testmcpy.src.llm_integration import claude_cli_auth_env
+from testmcpy.src.llm_integration import ClaudeSDKProvider
 
 try:
     from claude_agent_sdk import (
@@ -118,25 +117,14 @@ class TestExecutionAgent:
         if self.agent_model:
             options.model = self.agent_model
 
-        # Build the SDK subprocess env. Always strip CLAUDE_CODE* vars (they
-        # block nested CLI spawning) and set IS_SANDBOX=1 so the CLI honors
-        # --dangerously-skip-permissions (driven by
-        # permission_mode="bypassPermissions") when running as root in a
-        # container — without it the CLI refuses the flag and the run dies.
-        # Inject the optional UI/profile auth token when set; otherwise the
-        # inherited env / host ``claude`` login is used.
-        env = {
-            k: v
-            for k, v in os.environ.items()
-            if not k.startswith("CLAUDE_CODE") and k != "CLAUDECODE"
-        }
-        env["IS_SANDBOX"] = "1"
-        auth_env = claude_cli_auth_env(self.cli_token)
-        if auth_env:
-            env.pop("ANTHROPIC_API_KEY", None)
-            env.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
-            env.update(auth_env)
-        options.env = env
+        # Build the SDK subprocess env from the provider's single source of
+        # truth (ClaudeSDKProvider._build_clean_env): strips CLAUDE_CODE* vars,
+        # sets IS_SANDBOX=1 so the CLI honors --dangerously-skip-permissions
+        # (driven by permission_mode="bypassPermissions") when running as root
+        # in a container, injects the optional UI/profile auth token, and
+        # blanks ANTHROPIC_API_KEY in the no-token case to force the host
+        # subscription login — matching the chat path exactly.
+        options.env = ClaudeSDKProvider._build_clean_env(cli_token=self.cli_token)
 
         return options
 

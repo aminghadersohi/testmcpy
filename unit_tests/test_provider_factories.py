@@ -219,6 +219,14 @@ class TestResolveClaudeCliToken:
         with patch("testmcpy.llm_profiles.get_llm_profile_config", return_value=cfg):
             assert resolve_claude_cli_token("m") is None
 
+    def test_bad_profile_config_degrades_to_none(self):
+        # A malformed/unreadable profile must not break claude-sdk construction.
+        with patch(
+            "testmcpy.llm_profiles.get_llm_profile_config",
+            side_effect=ValueError("corrupt profile"),
+        ):
+            assert resolve_claude_cli_token("m") is None
+
 
 class TestClaudeProviderApiKeyKwargs:
     def test_empty_for_non_claude_providers(self):

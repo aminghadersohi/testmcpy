@@ -353,25 +353,19 @@ class NoToolCallErrors(BaseEvaluator):
             return " ".join(parts)
         return str(content)
 
-    def evaluate(self, context: dict[str, Any]) -> EvalResult:
-        tool_results = context.get("tool_results", [])
-        if not tool_results:
-            # "No tool calls" is not an error condition for this evaluator
-            # — pair it with `was_mcp_tool_called` if you also want to
-            # assert a tool fired. Returning passed=True keeps it
-            # composable with response-only tests.
-            return EvalResult(
-                passed=True,
-                score=1.0,
-                reason="No tool calls made — nothing to check for errors",
-            )
+    @classmethod
+    def _collect_errors(cls, tool_results: list[Any]) -> list[dict[str, Any]]:
+        """Return one entry per errored tool result (is_error or matching pattern).
 
+        Shared by NoToolCallErrors and ToolCallQuality so both classes detect
+        errors in exactly the same way and cannot drift independently.
+        """
         errors: list[dict[str, Any]] = []
         for result in tool_results:
-            content_str = self._to_str(getattr(result, "content", None))
+            content_str = cls._to_str(getattr(result, "content", None))
             is_error = bool(getattr(result, "is_error", False))
             matched_pattern: str | None = None
-            for pattern in self._ERROR_PATTERNS:
+            for pattern in cls._ERROR_PATTERNS:
                 if pattern in content_str:
                     matched_pattern = pattern
                     break
@@ -389,6 +383,22 @@ class NoToolCallErrors(BaseEvaluator):
                         "snippet": content_str[:200],
                     }
                 )
+        return errors
+
+    def evaluate(self, context: dict[str, Any]) -> EvalResult:
+        tool_results = context.get("tool_results", [])
+        if not tool_results:
+            # "No tool calls" is not an error condition for this evaluator
+            # — pair it with `was_mcp_tool_called` if you also want to
+            # assert a tool fired. Returning passed=True keeps it
+            # composable with response-only tests.
+            return EvalResult(
+                passed=True,
+                score=1.0,
+                reason="No tool calls made — nothing to check for errors",
+            )
+
+        errors = self._collect_errors(tool_results)
 
         if errors:
             return EvalResult(
@@ -403,6 +413,64 @@ class NoToolCallErrors(BaseEvaluator):
             score=1.0,
             reason="All tool calls returned without errors",
             details={"checked": len(tool_results)},
+        )
+
+
+class ToolCallQuality(BaseEvaluator):
+    """Score tool-calling quality based on error rate. Never hard-fails.
+
+    score = 1.0 − (error_calls / total_calls)
+
+    Use instead of ``no_tool_call_errors`` when first-try validation failures
+    (e.g. the model guessing flat args before discovering the ``request``
+    wrapper) should reduce the quality score but not fail the test outright.
+    A test that ultimately succeeded but needed two retries still passes;
+    it just earns a lower score than one that got it right on the first try.
+    """
+
+    # Reuse the same error-detection patterns as NoToolCallErrors.
+    _ERROR_PATTERNS = NoToolCallErrors._ERROR_PATTERNS
+
+    @property
+    def name(self) -> str:
+        return "tool_call_quality"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Scores tool-calling quality as 1 − (error_calls / total_calls). "
+            "Always passes — use execution_successful for hard failure detection."
+        )
+
+    def evaluate(self, context: dict[str, Any]) -> EvalResult:
+        tool_results = context.get("tool_results", [])
+        if not tool_results:
+            return EvalResult(
+                passed=True,
+                score=1.0,
+                reason="No tool calls made — nothing to score",
+            )
+
+        errors = NoToolCallErrors._collect_errors(tool_results)
+        total = len(tool_results)
+        error_count = len(errors)
+        score = round(1.0 - error_count / total, 4)
+
+        if error_count == 0:
+            reason = f"All {total} tool call(s) succeeded"
+        else:
+            reason = f"{error_count}/{total} tool call(s) had errors (score penalised)"
+
+        return EvalResult(
+            passed=True,
+            score=score,
+            reason=reason,
+            details={
+                "error_count": error_count,
+                "total_count": total,
+                "error_rate": round(error_count / total, 4),
+                "errors": errors,
+            },
         )
 
 
@@ -1073,10 +1141,10 @@ class ToolCallSequence(BaseEvaluator):
 
         Examples:
             # Strict sequence - must be exactly these tools in this order
-            ToolCallSequence(["list_datasets", "generate_chart"], strict=True)
+            ToolCallSequence(["fetch_data", "render_result"], strict=True)
 
             # Loose sequence - these tools must appear in order, but other tools allowed
-            ToolCallSequence(["list_datasets", "generate_chart"], strict=False, allow_intermediate=True)
+            ToolCallSequence(["fetch_data", "render_result"], strict=False, allow_intermediate=True)
         """
         self.sequence = sequence
         self.strict = strict
@@ -2804,6 +2872,7 @@ def create_evaluator(name: str, **kwargs) -> BaseEvaluator:
         "was_mcp_tool_called": WasMCPToolCalled,
         "execution_successful": ExecutionSuccessful,
         "no_tool_call_errors": NoToolCallErrors,
+        "tool_call_quality": ToolCallQuality,
         "final_answer_contains": FinalAnswerContains,
         "response_includes": ResponseIncludes,  # More intuitive name
         "no_hallucination": NoHallucination,

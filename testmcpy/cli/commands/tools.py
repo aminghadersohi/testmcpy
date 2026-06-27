@@ -277,13 +277,13 @@ def export(
 
     Examples:
         # Export as TypeScript
-        testmcpy export get_chart_data --format typescript
+        testmcpy export my_tool --format typescript
 
         # Export all tools as Python to file
         testmcpy export --all --format python -o schemas.py
 
         # Generate cURL command
-        testmcpy export list_datasets --format curl
+        testmcpy export my_tool --format curl
 
         # Use specific profile
         testmcpy export search --format protobuf --profile production

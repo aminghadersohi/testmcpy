@@ -124,24 +124,24 @@ class TestUnnecessaryToolCalls:
         assert result.score > 0.0
 
     def test_realistic_false_positive_scenario(self):
-        """Real scenario from meeting: LLM calls get_instance_info 3x and get_chart_info 2x."""
+        """LLM calls fetch_status 3x and get_details 2x — only the first of each is needed."""
         ev = UnnecessaryToolCalls()
         result = ev.evaluate(
             {
                 "tool_calls": [
-                    {"name": "get_instance_info", "arguments": {}},
-                    {"name": "list_dashboards", "arguments": {}},
-                    {"name": "get_instance_info", "arguments": {}},
-                    {"name": "get_chart_info", "arguments": {"id": 5}},
-                    {"name": "get_instance_info", "arguments": {}},
-                    {"name": "get_chart_info", "arguments": {"id": 5}},
+                    {"name": "fetch_status", "arguments": {}},
+                    {"name": "list_items", "arguments": {}},
+                    {"name": "fetch_status", "arguments": {}},
+                    {"name": "get_details", "arguments": {"id": 5}},
+                    {"name": "fetch_status", "arguments": {}},
+                    {"name": "get_details", "arguments": {"id": 5}},
                 ]
             }
         )
         assert result.passed is False
         assert (
             result.details["total_excess_calls"] == 3
-        )  # 2 extra get_instance_info + 1 extra get_chart_info
+        )  # 2 extra fetch_status + 1 extra get_details
 
     def test_factory_creation(self):
         ev = create_evaluator("unnecessary_tool_calls")

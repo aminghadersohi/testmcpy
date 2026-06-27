@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.3] - 2026-06-27
+
+### Fixed
+- **Temp-dir leak in ClaudeSDKProvider**: `tempfile.mkdtemp()` was never removed after
+  each `_run_agent` call, leaking hundreds of `/tmp/testmcpy_sdk_*` directories in
+  long-running servers. Added `shutil.rmtree(_sdk_tmpdir, ignore_errors=True)` in a
+  `finally` block so cleanup happens on all paths (normal, timeout, exception).
+- **DRY evaluator error-detection**: `ToolCallQuality.evaluate` duplicated the
+  error-collection loop from `NoToolCallErrors.evaluate`. Factored it into a shared
+  `NoToolCallErrors._collect_errors(tool_results)` classmethod so both classes use the
+  same logic and cannot drift independently.
+
+### Tests
+- Added `TestToolCallQuality` unit tests: all-success → 1.0, partial errors → fractional
+  score, all errors → 0.0/passed, empty results → 1.0, factory registration.
+
+## [0.11.2] - 2026-06-27
+
+### Changed
+- Removed all references to MCP service-specific tool names (`health_check`,
+  `get_instance_info`, `list_dashboards`, `get_chart_info`, `list_datasets`,
+  `generate_explore_link`, etc.) from source code, system prompts, comments,
+  and unit test fixtures. testmcpy is MCP-server-agnostic — no tool names
+  specific to any particular server should appear in the framework itself.
+- Generalized the ClaudeSDK, Codex, and Gemini provider system prompts so they
+  describe the gateway pattern (`call_tool`) without naming Preset-specific tools.
+- Updated unit test fixtures in `test_unnecessary_tool_calls` and
+  `test_assistant_sse_multi_turn` to use generic tool names (`fetch_status`,
+  `list_items`, `get_details`, `build_url`).
+
+## [0.11.1] - 2026-06-27
+
+### Added
+- **`tool_call_quality` evaluator**: soft alternative to `no_tool_call_errors`.
+  Scores tool-calling quality as `1 − (error_calls / total_calls)` — always
+  passes so the test result is driven by other evaluators, but pulls the
+  aggregate score down proportionally to how many tool calls errored before the
+  model found the right argument format. Use this instead of `no_tool_call_errors`
+  for tests where first-try validation failures (e.g. the model discovering the
+  `request` wrapper via retry) are expected and should reduce quality score
+  rather than hard-failing the test.
+
 ## [0.11.0] - 2026-06-26
 
 ### Added

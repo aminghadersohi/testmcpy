@@ -7,6 +7,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.6] - 2026-06-28
+
+### Added
+- **Run benchmarks from the app**: a "Benchmark" button in Test Manager and on
+  the Performance page (next to the "single runs are noise" warning) opens a
+  matrix builder — models × providers × MCP profiles × repeat, with a combo
+  preview. It runs natively over the websocket (live per-test + per-combo
+  progress), so no shell script is needed. Connection/auth is supplied as
+  fields (with a "paste run-args" parser) since it works without a saved
+  profile; the block is remembered in localStorage. Each combo is saved as its
+  own run under a shared `session_id` and shows up in `/performance`.
+- New websocket `run_benchmark` command and shared `testmcpy/benchmarks.py`
+  combo builder (used by both the `bench` CLI and the websocket runner).
+
+### Fixed
+- **Assistant/chatbot cost is now accurate**: the provider tracked tokens but
+  hardcoded `cost = 0`. It now prices its token usage by the (overridden)
+  model via the registry. When the model is `default` (the backend picks it
+  server-side) it stays unpriceable and the `/performance` leaderboard shows
+  "— not tracked" instead of a misleading `$0.00`.
+- The websocket run path can now connect ad-hoc from a URL + JWT (no saved
+  profile) and honors an explicitly chosen model over a suite `model: default`.
+
+## [0.11.5] - 2026-06-28
+
+### Added
+- **Transparent score breakdown**: every test result now carries a structured
+  `score_breakdown` (base evaluator mean × false-positive penalty = final score),
+  surfaced in the `/reports` test detail as a "Why this score" panel with a
+  verdict banner (Prompt → Answer → Why-this-score), and in `/performance`
+  (avg-score + false-positive-rate columns, a relative cost-per-run/-per-pass bar
+  for comparing models at a glance, and per-run false-positive markers).
+
+### Fixed
+- **`--model` override is no longer swallowed by a suite `model: default`**: chatbot
+  suites declare `model: default` ("let the provider pick"), and the old
+  `effective_model = suite_model or model` let that sentinel mask an explicit
+  `--model claude-opus-4-7`, so the override never reached the provider or the
+  saved run (it showed as `assistant/default` in /performance and /reports). An
+  explicit `--model` now wins; a real suite-level `model:` pin is still honoured;
+  and the `default` sentinel is preserved when no override is passed. `--dry-run`
+  now prints the resolved provider/model.
+
+### Changed
+- **Scoring is now a single source of truth** (`testmcpy/scoring.py`) shared by
+  the runner, storage, and the read APIs. Fixes: multiple expected/"primary"
+  tools are all honoured (was: only the first, wrongly penalising multi-tool
+  tests); the false-positive penalty is applied in the runner so the live score
+  matches the stored report (was: penalty only at save time); manually marking a
+  result as a false positive now actually lowers its score and recomputes on
+  toggle (was: an inert tag); and the coarse `unnecessary_tool_calls` skip no
+  longer cancels the false-positive penalty (the two target disjoint problems).
+
 ## [0.11.4] - 2026-06-27
 
 ### Fixed

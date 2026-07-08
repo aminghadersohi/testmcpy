@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.8] - 2026-07-07
+
+### Security
+- **CI secret-scanning guardrail**: new `.github/workflows/security.yml` runs
+  `gitleaks` (pinned by Docker digest) on every PR diff and push, plus a
+  manually-dispatchable full-history scan for auditing older commits. This is
+  the CI-side counterpart to the v0.11.7 runtime scrubber — it would have
+  caught the original incident commit before merge. Also adds a fast
+  `git ls-files` check that fails the build if any file under
+  `tests/.results/`, `tests/.smoke_reports/`, or `tests/.generation_logs/` is
+  ever tracked, and an advisory (non-blocking) `bandit` pass over `testmcpy/`.
+  A `.gitleaks.toml` allowlists known-safe test fixtures and doc examples
+  (never the result/report directories above).
+- **trufflehog verification pass**: added alongside gitleaks (also pinned by
+  Docker digest) on the same PR-diff/push scope. trufflehog calls each
+  provider's API to confirm whether a matched credential is actually live,
+  so the job only fails the build on a **verified** secret — the fake
+  `user:pass@host`-style fixtures already allowlisted for gitleaks just show
+  up as informational "unverified" findings instead of blocking every PR. A
+  matching `trufflehog-full-history` manual job answers, for the known
+  pre-v0.11.7 leak, whether that specific credential is still live.
+
 ## [0.11.7] - 2026-07-06
 
 ### Security

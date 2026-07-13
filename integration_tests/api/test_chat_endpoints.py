@@ -5,9 +5,12 @@ SELECTED MCP profile's mcp_url/auth, not the default profile's) and the
 TESTMCPY_CHAT_OAUTH_LOGIN-gated interactive OAuth re-login path.
 """
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
+
+from testmcpy.src.mcp_client import MCPToolResult
 
 OAUTH_ERROR = ValueError(
     "No usable cached OAuth token for http://mock-mcp:3000/mcp. Authenticate the MCP profile first."
@@ -96,6 +99,193 @@ class TestChatSelectedProfileAuth:
         assert non_native_response.status_code == 200
         assert non_native_response.json()["tool_calls"][0]["result"] == "OK"
         mock_mcp_client.call_tool.assert_awaited_once()
+
+    def test_chat_pairs_sparse_native_results_by_tool_call_id(self, client, mock_mcp_client):
+        provider = make_fake_provider()
+        provider.generate_with_tools.return_value = SimpleNamespace(
+            response="partial native execution",
+            tool_calls=[
+                {"name": "health_check", "arguments": {}, "id": "native-1"},
+                {"name": "get_data", "arguments": {"id": "42"}, "id": "native-2"},
+            ],
+            tool_results=[
+                MCPToolResult(tool_call_id="native-2", content="second result"),
+            ],
+            thinking=None,
+            token_usage=None,
+            cost=0.0,
+            duration=0.1,
+        )
+
+        with patch("testmcpy.server.api.create_llm_provider", return_value=provider):
+            response = client.post("/api/chat", json=CHAT_BODY)
+
+        assert response.status_code == 200
+        tool_calls = response.json()["tool_calls"]
+        assert tool_calls[0]["result"] is None
+        assert tool_calls[0]["error"] == "Provider did not return a result for this tool call"
+        assert tool_calls[1]["result"] == "second result"
+        mock_mcp_client.call_tool.assert_not_awaited()
+
+    def test_chat_pairs_reordered_native_results_by_tool_call_id(self, client, mock_mcp_client):
+        provider = make_fake_provider()
+        provider.generate_with_tools.return_value = SimpleNamespace(
+            response="reordered native execution",
+            tool_calls=[
+                {"name": "health_check", "arguments": {}, "id": "native-1"},
+                {"name": "get_data", "arguments": {"id": "42"}, "id": "native-2"},
+            ],
+            tool_results=[
+                {"tool_call_id": "native-2", "content": "second result"},
+                {"tool_call_id": "native-1", "content": "first result"},
+            ],
+            thinking=None,
+            token_usage=None,
+            cost=0.0,
+            duration=0.1,
+        )
+
+        with patch("testmcpy.server.api.create_llm_provider", return_value=provider):
+            response = client.post("/api/chat", json=CHAT_BODY)
+
+        assert response.status_code == 200
+        assert [call["result"] for call in response.json()["tool_calls"]] == [
+            "first result",
+            "second result",
+        ]
+        mock_mcp_client.call_tool.assert_not_awaited()
+
+    def test_chat_uses_positional_native_results_only_when_complete(self, client, mock_mcp_client):
+        provider = make_fake_provider()
+        provider.generate_with_tools.return_value = SimpleNamespace(
+            response="idless native execution",
+            tool_calls=[
+                {"name": "health_check", "arguments": {}, "id": "native-1"},
+                {"name": "get_data", "arguments": {"id": "42"}, "id": "native-2"},
+            ],
+            tool_results=[{"content": "first result"}, {"content": "second result"}],
+            thinking=None,
+            token_usage=None,
+            cost=0.0,
+            duration=0.1,
+        )
+
+        with patch("testmcpy.server.api.create_llm_provider", return_value=provider):
+            complete = client.post("/api/chat", json=CHAT_BODY)
+
+        assert [call["result"] for call in complete.json()["tool_calls"]] == [
+            "first result",
+            "second result",
+        ]
+
+        provider.generate_with_tools.return_value.tool_results = [{"content": "ambiguous result"}]
+        with patch("testmcpy.server.api.create_llm_provider", return_value=provider):
+            partial = client.post("/api/chat", json=CHAT_BODY)
+
+        assert partial.status_code == 200
+        assert [call["result"] for call in partial.json()["tool_calls"]] == [None, None]
+        assert all(call["is_error"] for call in partial.json()["tool_calls"])
+        mock_mcp_client.call_tool.assert_not_awaited()
+
+    def test_chat_stream_does_not_replay_non_claude_sdk_tool_calls(self, client, mock_mcp_client):
+        from testmcpy.src.llm_integration import CodexSDKProvider
+
+        provider = CodexSDKProvider(model="codex-o3", openai_api_key="sk-test")
+        provider.initialize = AsyncMock()
+        provider.close = AsyncMock()
+        provider.generate_with_tools = AsyncMock(
+            return_value=SimpleNamespace(
+                response="native SDK response",
+                tool_calls=[
+                    {"name": "health_check", "arguments": {}, "id": "native-1"},
+                    {"name": "get_data", "arguments": {"id": "42"}, "id": "native-2"},
+                ],
+                tool_results=[
+                    MCPToolResult(tool_call_id="native-2", content="second result"),
+                ],
+                thinking=None,
+                token_usage=None,
+                cost=0.0,
+                duration=0.1,
+            )
+        )
+
+        with patch("testmcpy.server.api.create_llm_provider", return_value=provider):
+            response = client.post("/api/chat/stream", json=CHAT_BODY)
+
+        assert response.status_code == 200
+        events = [
+            json.loads(line.removeprefix("data: "))
+            for line in response.text.splitlines()
+            if line.startswith("data: ")
+        ]
+        tool_results = [event["data"] for event in events if event["type"] == "tool_result"]
+        assert tool_results[0]["result"] is None
+        assert tool_results[1]["result"] == "second result"
+        provider.generate_with_tools.assert_awaited_once()
+        mock_mcp_client.call_tool.assert_not_awaited()
+
+    def test_chat_accepts_gemini_native_results_with_matching_ids(self, client, mock_mcp_client):
+        from testmcpy.src.llm_integration import GeminiSDKProvider
+
+        provider = GeminiSDKProvider(model="gemini-sdk-flash", api_key="AIza-test")
+        provider.initialize = AsyncMock()
+        provider.close = AsyncMock()
+        provider.generate_with_tools = AsyncMock(
+            return_value=SimpleNamespace(
+                response="native Gemini response",
+                tool_calls=[
+                    {"name": "health_check", "arguments": {}, "id": "gemini-call-1"},
+                ],
+                tool_results=[
+                    MCPToolResult(
+                        tool_call_id="gemini-call-1",
+                        content={"status": "healthy"},
+                    ),
+                ],
+                thinking=None,
+                token_usage=None,
+                cost=0.0,
+                duration=0.1,
+            )
+        )
+
+        with patch("testmcpy.server.api.create_llm_provider", return_value=provider):
+            response = client.post("/api/chat", json=CHAT_BODY)
+
+        assert response.status_code == 200
+        assert response.json()["tool_calls"][0]["result"] == {"status": "healthy"}
+        mock_mcp_client.call_tool.assert_not_awaited()
+
+    def test_chat_sdk_missing_native_results_fails_closed(self, client, mock_mcp_client):
+        from testmcpy.src.llm_integration import CodexSDKProvider
+
+        provider = CodexSDKProvider(model="codex-o3", openai_api_key="sk-test")
+        provider.initialize = AsyncMock()
+        provider.close = AsyncMock()
+        provider.generate_with_tools = AsyncMock(
+            return_value=SimpleNamespace(
+                response="SDK contract violation",
+                tool_calls=[
+                    {"name": "health_check", "arguments": {}, "id": "native-1"},
+                ],
+                tool_results=[],
+                thinking=None,
+                token_usage=None,
+                cost=0.0,
+                duration=0.1,
+            )
+        )
+
+        with patch("testmcpy.server.api.create_llm_provider", return_value=provider):
+            response = client.post("/api/chat", json=CHAT_BODY)
+
+        assert response.status_code == 200
+        tool_call = response.json()["tool_calls"][0]
+        assert tool_call["result"] is None
+        assert tool_call["is_error"] is True
+        assert tool_call["error"] == "Provider did not return a result for this tool call"
+        mock_mcp_client.call_tool.assert_not_awaited()
 
     def test_chat_rejects_explicit_missing_llm_profile(self, client):
         response = client.post(

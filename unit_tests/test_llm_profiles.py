@@ -1150,6 +1150,31 @@ profiles:
         with pytest.raises(LLMProfileConfigError, match="no provider matching 'openai'"):
             resolve_llm_provider_config("openai", "gpt-test", "isolated")
 
+    def test_default_profile_provider_mismatch_is_a_configuration_error(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("OPENAI_API_KEY", "ambient-key-must-not-be-used")
+        (tmp_path / ".llm_providers.yaml").write_text(
+            """
+default: isolated
+profiles:
+  isolated:
+    name: Isolated
+    providers:
+      - name: Anthropic
+        provider: anthropic
+        model: claude-test
+"""
+        )
+        reload_llm_profile_config()
+
+        error = "LLM profile 'isolated' has no provider matching 'openai'"
+        with pytest.raises(LLMProfileConfigError, match=error):
+            resolve_llm_provider_selection("openai", "gpt-test")
+        with pytest.raises(LLMProfileConfigError, match=error):
+            resolve_llm_provider_config("openai", "gpt-test")
+
     def test_explicit_profile_unresolved_api_key_expression_rejects_ambient_fallback(
         self, tmp_path, monkeypatch
     ):

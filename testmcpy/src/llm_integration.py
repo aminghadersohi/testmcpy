@@ -15,6 +15,7 @@ import tempfile
 import time
 import uuid
 from abc import ABC, abstractmethod
+from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -1919,8 +1920,9 @@ def resolve_claude_cli_token(
 
     Selection goes through the shared runtime resolver so malformed profiles,
     missing named profiles, and configured keys that resolve empty fail closed.
-    A keyless matching profile (or no matching default profile) intentionally
-    returns ``None`` so callers can use the host's ``claude`` login.
+    A keyless matching profile (or no configured default profile) intentionally
+    returns ``None`` so callers can use the host's ``claude`` login. A configured
+    default for another provider remains an isolation boundary and raises.
     """
     from testmcpy.llm_profiles import resolve_llm_provider_selection
 
@@ -4406,8 +4408,8 @@ class GeminiSDKProvider(BaseSDKProvider):
             )
 
             tool_calls: list[dict[str, Any]] = []
-            # Indexed by function name for response correlation.
-            func_responses_by_name: dict[str, Any] = {}
+            func_responses_by_id: defaultdict[str, deque[Any]] = defaultdict(deque)
+            idless_func_responses_by_name: defaultdict[str, deque[Any]] = defaultdict(deque)
             response_parts: list[str] = []
             # Accumulate usage across all model-response events (each tool
             # round-trip can produce one; the final synthesis produces
@@ -4424,16 +4426,22 @@ class GeminiSDKProvider(BaseSDKProvider):
             ):
                 # Collect function calls made by the model.
                 for fc in event.get_function_calls():
-                    tool_calls.append(
-                        {
-                            "name": fc.name,
-                            "arguments": dict(fc.args) if fc.args else {},
-                        }
-                    )
+                    tool_call = {
+                        "name": fc.name,
+                        "arguments": dict(fc.args) if fc.args else {},
+                    }
+                    raw_call_id = getattr(fc, "id", None)
+                    if raw_call_id is not None and raw_call_id != "":
+                        tool_call["id"] = str(raw_call_id)
+                    tool_calls.append(tool_call)
                 # Collect function responses (already executed by McpToolset)
                 # so test_runner.py does not re-execute them.
                 for fr in event.get_function_responses():
-                    func_responses_by_name[fr.name] = fr
+                    raw_response_id = getattr(fr, "id", None)
+                    if raw_response_id is not None and raw_response_id != "":
+                        func_responses_by_id[str(raw_response_id)].append(fr)
+                    elif getattr(fr, "name", None):
+                        idless_func_responses_by_name[str(fr.name)].append(fr)
                 # Collect final response text.
                 if event.is_final_response() and event.content:
                     for part in event.content.parts or []:
@@ -4454,11 +4462,17 @@ class GeminiSDKProvider(BaseSDKProvider):
             # test_runner knows these calls are already executed.
             mcp_tool_results: list[MCPToolResult] = []
             for tc in tool_calls:
-                fr = func_responses_by_name.get(tc["name"])
-                if fr is not None:
+                call_id = str(tc["id"]) if tc.get("id") not in (None, "") else None
+                responses = (
+                    func_responses_by_id.get(call_id)
+                    if call_id is not None
+                    else idless_func_responses_by_name.get(tc["name"])
+                )
+                if responses:
+                    fr = responses.popleft()
                     mcp_tool_results.append(
                         MCPToolResult(
-                            tool_call_id=getattr(fr, "id", tc["name"]),
+                            tool_call_id=call_id or "",
                             tool_name=tc["name"],
                             content=getattr(fr, "response", {}),
                             is_error=False,

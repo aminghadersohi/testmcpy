@@ -211,6 +211,35 @@ async def test_chat_session_routes_profile_credentials(tmp_path, monkeypatch, mc
 
 
 @pytest.mark.asyncio
+async def test_chat_session_does_not_attach_profile_auth_to_overridden_url(tmp_path, monkeypatch):
+    secret = _write_openai_profile(tmp_path, monkeypatch)
+    _write_mcp_profiles(tmp_path, monkeypatch)
+
+    from testmcpy.core.chat_session import ChatSession
+
+    provider = Mock(initialize=AsyncMock(), close=AsyncMock())
+    mcp_client = Mock(
+        initialize=AsyncMock(),
+        list_tools=AsyncMock(return_value=[]),
+        close=AsyncMock(),
+    )
+    override_url = "http://override.example/mcp"
+
+    with (
+        patch("testmcpy.core.chat_session.create_llm_provider", return_value=provider) as factory,
+        patch("testmcpy.core.chat_session.MCPClient", return_value=mcp_client) as mcp_factory,
+    ):
+        session = ChatSession(mcp_url=override_url)
+        await session.initialize()
+        await session.close()
+
+    _assert_profile_factory_call(factory, secret)
+    assert factory.call_args.kwargs["mcp_url"] == override_url
+    assert factory.call_args.kwargs["auth"] is None
+    mcp_factory.assert_called_once_with(override_url, auth=None)
+
+
+@pytest.mark.asyncio
 async def test_chat_session_rolls_back_when_mcp_initialization_is_cancelled(tmp_path, monkeypatch):
     _write_openai_profile(tmp_path, monkeypatch)
 

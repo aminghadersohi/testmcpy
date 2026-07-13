@@ -109,10 +109,12 @@ class ChatSession:
             raise ValueError("Model and provider must be configured")
         # Resolve the selected profile's endpoint and credentials together.
         default_mcp = self.config.get_default_mcp_server()
-        if not mcp_url and default_mcp:
+        self.mcp_auth = None
+        if mcp_url is None and default_mcp:
             mcp_url = default_mcp.mcp_url
+            if default_mcp.auth:
+                self.mcp_auth = default_mcp.auth.to_dict()
         self.mcp_url = mcp_url
-        self.mcp_auth = default_mcp.auth.to_dict() if default_mcp and default_mcp.auth else None
 
         # Initialize clients (will be done in async initialize)
         self.llm_provider: LLMProvider | None = None

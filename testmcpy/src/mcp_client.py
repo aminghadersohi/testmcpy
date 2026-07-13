@@ -6,7 +6,6 @@ specifically designed for testing LLM tool calling capabilities.
 """
 
 import asyncio
-import hashlib
 import json
 import logging
 import os
@@ -28,7 +27,7 @@ from fastmcp.utilities.http import find_available_port as _find_available_port
 from mcp.types import Tool as MCPToolDef
 
 from testmcpy.auth_debugger import AuthDebugger
-from testmcpy.scrubber import register_secrets_from_auth
+from testmcpy.scrubber import register_secret, register_secrets_from_auth
 from testmcpy.src.oauth_storage import (
     create_oauth_key_value_store,
     create_oauth_token_storage,
@@ -1241,6 +1240,8 @@ class MCPClient:
                     )
                     try:
                         await self._token_manager.refresh(force=True)
+                        register_secret(self._token_manager.access_token)
+                        register_secret(getattr(self._token_manager, "refresh_token", None))
                         refreshed_auth = BearerAuth(token=self._token_manager.access_token)
                         tools_cache = self._tools_cache
                         await self._close_unlocked()

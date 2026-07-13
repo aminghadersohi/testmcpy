@@ -790,15 +790,18 @@ def resolve_llm_provider_selection(
         raise LLMProfileConfigError(
             f"Invalid LLM profile configuration: {profile_config.load_error}"
         )
-    _runtime_profile_id(profile_config, profile_id)
-    selected = select_llm_profile_provider(profile_id, provider, model)
-    if profile_id is not None and selected is None:
+    selected_profile_id = _runtime_profile_id(profile_config, profile_id)
+    selected = select_llm_profile_provider(selected_profile_id, provider, model)
+    if selected_profile_id is not None and selected is None:
         requested_provider = _provider_name(provider)
         if requested_provider:
             raise LLMProfileConfigError(
-                f"LLM profile '{profile_id}' has no provider matching '{requested_provider}'"
+                f"LLM profile '{selected_profile_id}' has no provider matching "
+                f"'{requested_provider}'"
             )
-        raise LLMProfileConfigError(f"LLM profile '{profile_id}' has no configured providers")
+        raise LLMProfileConfigError(
+            f"LLM profile '{selected_profile_id}' has no configured providers"
+        )
     effective_provider = (
         _provider_name(provider)
         or (selected.provider if selected else None)
@@ -806,7 +809,7 @@ def resolve_llm_provider_selection(
     )
     effective_model = model or (selected.model if selected else None) or fallback_model
     runtime_config = (
-        resolve_llm_provider_config(effective_provider, effective_model, profile_id)
+        resolve_llm_provider_config(effective_provider, effective_model, selected_profile_id)
         if effective_provider and effective_model
         else {}
     )
@@ -832,11 +835,11 @@ def resolve_llm_provider_config(
             f"Invalid LLM profile configuration: {profile_config.load_error}"
         )
     selected_profile_id = _runtime_profile_id(profile_config, profile_id)
-    selected = select_llm_profile_provider(profile_id, provider, model)
+    selected = select_llm_profile_provider(selected_profile_id, provider, model)
     if selected is None or _provider_family(selected.provider) != _provider_family(provider):
-        if profile_id is not None:
+        if selected_profile_id is not None:
             raise LLMProfileConfigError(
-                f"LLM profile '{profile_id}' has no provider matching '{provider}'"
+                f"LLM profile '{selected_profile_id}' has no provider matching '{provider}'"
             )
         return {}
 
@@ -847,8 +850,8 @@ def resolve_llm_provider_config(
         for field_name in _RUNTIME_PROVIDER_FIELDS
         if (value := getattr(selected, field_name, None)) is not None
     }
-    if _provider_family(provider) == "claude-sdk" and profile_id is not None:
-        resolved["llm_profile_id"] = profile_id
+    if _provider_family(provider) == "claude-sdk" and selected_profile_id is not None:
+        resolved["llm_profile_id"] = selected_profile_id
     from .scrubber import register_secret
 
     for field_name in ("api_key", "api_token", "api_secret"):

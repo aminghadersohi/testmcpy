@@ -6,6 +6,7 @@ import asyncio
 import os
 import time
 import warnings
+from collections import defaultdict, deque
 
 # Suppress all deprecation warnings from websockets before any imports
 warnings.filterwarnings("ignore", category=DeprecationWarning, module="websockets")
@@ -55,7 +56,11 @@ from testmcpy.server.routers import test_profiles as test_profiles_router  # noq
 from testmcpy.server.routers import tests as tests_router  # noqa: E402
 from testmcpy.server.routers import tools as tools_router  # noqa: E402
 from testmcpy.server.websocket import strip_mcp_prefix  # noqa: E402
-from testmcpy.src.llm_integration import create_llm_provider  # noqa: E402
+from testmcpy.src.llm_integration import (  # noqa: E402
+    BaseSDKProvider,
+    ClaudeSDKProvider,
+    create_llm_provider,
+)
 from testmcpy.src.mcp_client import MCPClient, MCPConnectionError, MCPToolCall  # noqa: E402
 
 
@@ -1055,6 +1060,64 @@ def _serialize_tool_content(content):
     return str(content)
 
 
+def _normalize_tool_call_id(value: Any) -> str | None:
+    """Normalize provider-specific tool call IDs for result matching."""
+    return None if value is None or value == "" else str(value)
+
+
+def _pair_native_tool_results(
+    tool_calls: list[dict[str, Any]],
+    native_results: list[Any],
+) -> dict[int, Any]:
+    """Pair native results by ID, falling back only when position is unambiguous."""
+    results_by_id: defaultdict[str, deque[Any]] = defaultdict(deque)
+    idless_results: deque[Any] = deque()
+
+    for result in native_results:
+        raw_id = (
+            result.get("tool_call_id")
+            if isinstance(result, dict)
+            else getattr(result, "tool_call_id", None)
+        )
+        result_id = _normalize_tool_call_id(raw_id)
+        if result_id is None:
+            idless_results.append(result)
+        else:
+            results_by_id[result_id].append(result)
+
+    paired: dict[int, Any] = {}
+    unmatched_calls: list[int] = []
+    for index, tool_call in enumerate(tool_calls):
+        call_id = _normalize_tool_call_id(tool_call.get("id"))
+        candidates = results_by_id.get(call_id) if call_id is not None else None
+        if candidates:
+            paired[index] = candidates.popleft()
+        else:
+            unmatched_calls.append(index)
+
+    # An ID-less result is safe to assign only when every remaining call and
+    # result can be paired one-to-one and no identified result went unmatched.
+    if not any(results_by_id.values()) and len(idless_results) == len(unmatched_calls):
+        paired.update(zip(unmatched_calls, idless_results, strict=True))
+
+    return paired
+
+
+def _native_tool_result_fields(native_result: Any) -> tuple[Any, bool, str | None]:
+    """Extract the common fields from dict and MCPToolResult values."""
+    if isinstance(native_result, dict):
+        content = native_result.get("content", native_result.get("result"))
+        is_error = bool(native_result.get("is_error", False))
+        error = native_result.get("error_message") or native_result.get("error")
+        return content, is_error, error
+
+    return (
+        getattr(native_result, "content", native_result),
+        bool(getattr(native_result, "is_error", False)),
+        getattr(native_result, "error_message", None),
+    )
+
+
 # Chat endpoint
 
 
@@ -1175,10 +1238,12 @@ async def chat(request: ChatRequest) -> ChatResponse:
         # executed the entire turn; never replay those state-changing calls.
         tool_calls_with_results = []
         native_tool_results = getattr(result, "tool_results", None) or []
+        native_results_by_call = _pair_native_tool_results(result.tool_calls, native_tool_results)
+        provider_executes_tools = isinstance(llm_provider, BaseSDKProvider)
         if result.tool_calls:
             for index, tool_call in enumerate(result.tool_calls):
-                if native_tool_results:
-                    if index >= len(native_tool_results):
+                if native_tool_results or provider_executes_tools:
+                    if index not in native_results_by_call:
                         tool_calls_with_results.append(
                             {
                                 "name": tool_call["name"],
@@ -1191,17 +1256,9 @@ async def chat(request: ChatRequest) -> ChatResponse:
                         )
                         continue
 
-                    native_result = native_tool_results[index]
-                    if isinstance(native_result, dict):
-                        native_content = native_result.get("content", native_result.get("result"))
-                        native_is_error = bool(native_result.get("is_error", False))
-                        native_error = native_result.get("error_message") or native_result.get(
-                            "error"
-                        )
-                    else:
-                        native_content = getattr(native_result, "content", native_result)
-                        native_is_error = bool(getattr(native_result, "is_error", False))
-                        native_error = getattr(native_result, "error_message", None)
+                    native_content, native_is_error, native_error = _native_tool_result_fields(
+                        native_results_by_call[index]
+                    )
 
                     tool_calls_with_results.append(
                         {
@@ -1321,7 +1378,8 @@ async def chat_stream(request: ChatRequest):
 
     Supports agentic multi-turn tool chains: after the LLM calls tools, the results
     are fed back and the LLM can call more tools until it produces a final answer
-    (or max_turns is reached). ClaudeSDKProvider loops internally; all other
+    (or max_turns is reached). SDK-backed providers loop internally; Claude streams
+    directly from its SDK while other completed SDK runs are emitted once. Non-SDK
     providers are looped by this endpoint.
     """
     import asyncio
@@ -1477,12 +1535,12 @@ async def chat_stream(request: ChatRequest):
                 # Single retry; a second failure falls to the existing handlers.
                 await llm_provider.initialize()
 
-            # --- Detect if provider is SDK-based (handles its own agentic loop) ---
-            from testmcpy.src.llm_integration import ClaudeSDKProvider
+            # Claude has a dedicated streaming implementation below. Other SDK
+            # providers return their completed native agent loop as one result.
+            is_claude_sdk_provider = isinstance(llm_provider, ClaudeSDKProvider)
+            provider_executes_tools = isinstance(llm_provider, BaseSDKProvider)
 
-            is_sdk_provider = isinstance(llm_provider, ClaudeSDKProvider)
-
-            if is_sdk_provider:
+            if is_claude_sdk_provider:
                 # ============================================================
                 # SDK provider path: stream directly from SDK query() generator
                 # ============================================================
@@ -1785,10 +1843,15 @@ async def chat_stream(request: ChatRequest):
                         yield send_event("turn_complete", {"turn": turn, "tool_count": 0})
                         break
 
-                    # Execute tool calls and stream results
+                    # Execute tool calls and stream results. SDK-backed providers
+                    # already executed these calls and must never be replayed.
                     turn_tool_calls = []
                     turn_tool_results = []
-                    for tool_call in result.tool_calls:
+                    native_tool_results = getattr(result, "tool_results", None) or []
+                    native_results_by_call = _pair_native_tool_results(
+                        result.tool_calls, native_tool_results
+                    )
+                    for index, tool_call in enumerate(result.tool_calls):
                         actual_tool_name = strip_mcp_prefix(tool_call["name"])
                         tc_id = tool_call.get("id", f"tc_{turn}_{actual_tool_name}")
                         yield send_event(
@@ -1800,6 +1863,38 @@ async def chat_stream(request: ChatRequest):
                                 "turn": turn,
                             },
                         )
+
+                        if native_tool_results or provider_executes_tools:
+                            if index not in native_results_by_call:
+                                tr_data = {
+                                    "id": tc_id,
+                                    "name": tool_call["name"],
+                                    "result": None,
+                                    "error": "Provider did not return a result for this tool call",
+                                    "is_error": True,
+                                    "turn": turn,
+                                }
+                            else:
+                                native_content, native_is_error, native_error = (
+                                    _native_tool_result_fields(native_results_by_call[index])
+                                )
+                                tr_data = {
+                                    "id": tc_id,
+                                    "name": tool_call["name"],
+                                    "result": (
+                                        _serialize_tool_content(native_content)
+                                        if not native_is_error
+                                        else None
+                                    ),
+                                    "error": native_error if native_is_error else None,
+                                    "is_error": native_is_error,
+                                    "turn": turn,
+                                }
+                            yield send_event("tool_result", tr_data)
+                            turn_tool_calls.append(tool_call)
+                            turn_tool_results.append(tr_data)
+                            continue
+
                         yield send_event(
                             "status",
                             f"Turn {turn}/{MAX_TURNS} — Executing: {actual_tool_name}...",
@@ -1845,6 +1940,9 @@ async def chat_stream(request: ChatRequest):
                         "turn_complete",
                         {"turn": turn, "tool_count": len(turn_tool_calls)},
                     )
+
+                    if provider_executes_tools:
+                        break
 
                     # Build continuation: update conversation and prompt
                     # Add assistant response to conversation

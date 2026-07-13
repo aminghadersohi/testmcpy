@@ -278,10 +278,15 @@ class TestResolveClaudeCliToken:
         with patch("testmcpy.llm_profiles.get_llm_profile_config", return_value=cfg):
             assert resolve_claude_cli_token("m", "p") is None
 
-    def test_none_when_no_claude_provider(self):
+    def test_default_profile_without_claude_provider_fails_closed(self):
+        from testmcpy.llm_profiles import LLMProfileConfigError
+
         cfg = self._cfg([self._prov(name="x", provider="anthropic", model="m", api_key="k")])
-        with patch("testmcpy.llm_profiles.get_llm_profile_config", return_value=cfg):
-            assert resolve_claude_cli_token("m") is None
+        with (
+            patch("testmcpy.llm_profiles.get_llm_profile_config", return_value=cfg),
+            pytest.raises(LLMProfileConfigError, match="no provider matching 'claude-sdk'"),
+        ):
+            resolve_claude_cli_token("m")
 
     def test_bad_profile_config_fails_closed(self):
         with patch(

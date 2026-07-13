@@ -6,13 +6,16 @@ specifically designed for testing LLM tool calling capabilities.
 """
 
 import asyncio
-import hashlib
 import json
 import logging
 import os
 import sys
+import threading
 import time
 import warnings
+import weakref
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any
 
@@ -20,6 +23,7 @@ import httpx
 from fastmcp import Client
 from fastmcp.client.auth.oauth import OAuth as _FastMCPOAuth
 from fastmcp.client.transports import StreamableHttpTransport
+from fastmcp.utilities.http import find_available_port as _find_available_port
 from mcp.types import Tool as MCPToolDef
 
 from testmcpy.auth_debugger import AuthDebugger
@@ -28,6 +32,28 @@ from testmcpy.src.oauth_storage import (
     create_oauth_key_value_store,
     create_oauth_token_storage,
 )
+
+
+class _CallbackPortLease:
+    """Keep one FastMCP-probed callback port unique within this process."""
+
+
+_callback_port_lock = threading.Lock()
+_callback_port_leases: weakref.WeakValueDictionary[int, _CallbackPortLease] = (
+    weakref.WeakValueDictionary()
+)
+
+
+def _lease_callback_port() -> tuple[int, _CallbackPortLease]:
+    """Allocate an OS-selected port not already leased by another OAuth client."""
+    with _callback_port_lock:
+        for _ in range(100):
+            port = _find_available_port()
+            if port not in _callback_port_leases:
+                lease = _CallbackPortLease()
+                _callback_port_leases[port] = lease
+                return port, lease
+    raise RuntimeError("Unable to allocate a unique OAuth callback port")
 
 
 class MCPOAuth(_FastMCPOAuth):
@@ -69,15 +95,18 @@ class MCPOAuth(_FastMCPOAuth):
         if kwargs.get("token_storage") is None:
             kwargs["token_storage"] = create_oauth_key_value_store()
         key_value_store = kwargs["token_storage"]
+        callback_port_lease = None
         if kwargs.get("callback_port") is None:
-            # Persisted DCR metadata includes the redirect URI. A deterministic
-            # loopback port keeps that registration valid across restarts.
-            digest = hashlib.sha256(mcp_url.rstrip("/").encode()).digest()
-            kwargs["callback_port"] = 49152 + int.from_bytes(digest[:2], byteorder="big") % 16384
+            callback_port, callback_port_lease = _lease_callback_port()
+            kwargs["callback_port"] = callback_port
         super().__init__(mcp_url, **kwargs)
+        self._callback_port_lease = callback_port_lease
+        redirect_uris = self.context.client_metadata.redirect_uris or []
+        redirect_uri = str(redirect_uris[0]) if redirect_uris else None
         persistent_storage = create_oauth_token_storage(
             mcp_url,
             key_value_store=key_value_store,
+            redirect_uri=redirect_uri,
         )
         self._persistent_token_storage = persistent_storage
         self.token_storage_adapter = persistent_storage
@@ -87,8 +116,20 @@ class MCPOAuth(_FastMCPOAuth):
         self._insecure = insecure
 
     async def _initialize(self) -> None:
-        """Restore the original persisted expiry instead of extending it."""
+        """Restore token state and discard registrations for an old callback."""
         await super()._initialize()
+        client_info = self.context.client_info
+        redirect_uris = self.context.client_metadata.redirect_uris or []
+        active_redirect = str(redirect_uris[0]) if redirect_uris else None
+        registered_redirects = (
+            {str(uri) for uri in (client_info.redirect_uris or [])} if client_info else set()
+        )
+        if client_info and active_redirect not in registered_redirects:
+            # FastMCP chooses an available callback port for each client. A DCR
+            # registration restored from disk is only reusable when it contains
+            # that redirect URI; keep tokens, but force a new registration.
+            await self._persistent_token_storage.clear_client_info()
+            self.context.client_info = None
         expiry = await self._persistent_token_storage.get_token_expiry()
         if expiry is not None:
             self.context.token_expiry_time = expiry
@@ -316,6 +357,60 @@ class MCPToolResult:
     tool_name: str | None = None
 
 
+class _TokenRefreshRequired(Exception):
+    """Signal that a tool attempt must upgrade to exclusive lifecycle access."""
+
+
+class _LifecycleGuard:
+    """Writer-preferring shared/exclusive guard for one MCP transport."""
+
+    def __init__(self) -> None:
+        self._condition = asyncio.Condition()
+        self._active_readers = 0
+        self._writer_active = False
+        self._waiting_writers = 0
+
+    @asynccontextmanager
+    async def shared(self) -> AsyncIterator[None]:
+        acquired = False
+        try:
+            async with self._condition:
+                await self._condition.wait_for(
+                    lambda: not self._writer_active and self._waiting_writers == 0
+                )
+                self._active_readers += 1
+                acquired = True
+            yield
+        finally:
+            if acquired:
+                async with self._condition:
+                    self._active_readers -= 1
+                    if self._active_readers == 0:
+                        self._condition.notify_all()
+
+    @asynccontextmanager
+    async def exclusive(self) -> AsyncIterator[None]:
+        acquired = False
+        try:
+            async with self._condition:
+                self._waiting_writers += 1
+                try:
+                    await self._condition.wait_for(
+                        lambda: not self._writer_active and self._active_readers == 0
+                    )
+                    self._writer_active = True
+                    acquired = True
+                finally:
+                    self._waiting_writers -= 1
+                    self._condition.notify_all()
+            yield
+        finally:
+            if acquired:
+                async with self._condition:
+                    self._writer_active = False
+                    self._condition.notify_all()
+
+
 class MCPClient:
     """Client for interacting with MCP services using FastMCP."""
 
@@ -333,7 +428,10 @@ class MCPClient:
         self.auth: BearerAuth | str | None = None  # Will be set in initialize()
         self._token_manager = None  # Optional TokenManager for auto-refresh
         self._extra_headers: dict[str, str] = {}  # For api_key / custom_headers auth
-        self._operation_lock = asyncio.Lock()
+        self._lifecycle_guard = _LifecycleGuard()
+        self._client_generation = 0
+        self._refresh_epoch = 0
+        self._refresh_failure: tuple[int, Exception] | None = None
 
     async def _fetch_jwt_token(
         self,
@@ -789,10 +887,11 @@ class MCPClient:
                 pass
             raise
         self.client = new_client
+        self._client_generation += 1
 
     async def initialize(self, timeout: float = DEFAULT_TIMEOUT) -> dict[str, Any]:
         """Initialize while excluding concurrent operations and shutdown."""
-        async with self._operation_lock:
+        async with self._lifecycle_guard.exclusive():
             return await self._initialize(timeout)
 
     async def _initialize(self, timeout: float = DEFAULT_TIMEOUT) -> dict[str, Any]:
@@ -862,7 +961,7 @@ class MCPClient:
         self, force_refresh: bool = False, timeout: float = DEFAULT_TIMEOUT
     ) -> list[MCPTool]:
         """List tools without racing transport refresh or shutdown."""
-        async with self._operation_lock:
+        async with self._lifecycle_guard.shared():
             return await self._list_tools(force_refresh, timeout)
 
     async def _list_tools(
@@ -1100,28 +1199,72 @@ class MCPClient:
     async def call_tool(
         self, tool_call: MCPToolCall, timeout: float = DEFAULT_TIMEOUT
     ) -> MCPToolResult:
-        """Execute one tool call while protecting refresh/reconnect lifecycle."""
-        loop = asyncio.get_running_loop()
-        started_at = loop.time()
+        """Execute one tool call within one wall-clock lifecycle deadline."""
         try:
-            await asyncio.wait_for(self._operation_lock.acquire(), timeout=timeout)
-        except asyncio.TimeoutError:
+            return await asyncio.wait_for(
+                self._call_tool_with_lifecycle(tool_call, timeout),
+                timeout=timeout,
+            )
+        except (TimeoutError, asyncio.TimeoutError):
             return self._tool_timeout_result(tool_call, timeout)
 
+    async def _call_tool_with_lifecycle(
+        self, tool_call: MCPToolCall, timeout: float
+    ) -> MCPToolResult:
+        """Run one attempt, coordinate a single refresh if needed, and retry."""
+        failed_generation = 0
+        observed_refresh_epoch = 0
         try:
-            remaining = timeout - (loop.time() - started_at)
-            if remaining <= 0:
-                return self._tool_timeout_result(tool_call, timeout)
-            try:
-                # Bound refresh and reconnect work as well as the MCP request.
-                return await asyncio.wait_for(
-                    self._call_tool(tool_call, remaining, allow_refresh=True),
-                    timeout=remaining,
-                )
-            except asyncio.TimeoutError:
-                return self._tool_timeout_result(tool_call, timeout)
-        finally:
-            self._operation_lock.release()
+            async with self._lifecycle_guard.shared():
+                failed_generation = self._client_generation
+                observed_refresh_epoch = self._refresh_epoch
+                return await self._call_tool(tool_call, timeout, allow_refresh=True)
+        except _TokenRefreshRequired:
+            pass
+
+        try:
+            async with self._lifecycle_guard.exclusive():
+                if self._refresh_epoch != observed_refresh_epoch:
+                    if self._refresh_failure and self._refresh_failure[0] == self._refresh_epoch:
+                        raise self._refresh_failure[1]
+                elif self._client_generation == failed_generation:
+                    if not self.client or not self._token_manager:
+                        raise MCPConnectionError("MCP session closed before token refresh")
+                    print(
+                        f"  [Auth] Got 401 for '{tool_call.name}', refreshing token...",
+                        file=sys.stderr,
+                    )
+                    try:
+                        await self._token_manager.refresh(force=True)
+                        refreshed_auth = BearerAuth(token=self._token_manager.access_token)
+                        tools_cache = self._tools_cache
+                        await self._close_unlocked()
+                        self.auth = refreshed_auth
+                        await self._connect_with_auth(refreshed_auth, timeout)
+                        self._tools_cache = tools_cache
+                    except Exception as refresh_err:
+                        self._refresh_epoch += 1
+                        self._refresh_failure = (self._refresh_epoch, refresh_err)
+                        raise
+                    else:
+                        self._refresh_epoch += 1
+                        self._refresh_failure = None
+                elif not self.client:
+                    raise MCPConnectionError("MCP session closed while waiting for token refresh")
+        except Exception as refresh_err:
+            return MCPToolResult(
+                tool_call_id=tool_call.id or "unknown",
+                tool_name=tool_call.name,
+                content=None,
+                is_error=True,
+                error_message=(
+                    f"Tool call '{tool_call.name}' got 401 and token "
+                    f"refresh/reconnect failed: {refresh_err}"
+                ),
+            )
+
+        async with self._lifecycle_guard.shared():
+            return await self._call_tool(tool_call, timeout, allow_refresh=False)
 
     @staticmethod
     def _tool_timeout_result(tool_call: MCPToolCall, timeout: float) -> MCPToolResult:
@@ -1219,30 +1362,7 @@ class MCPClient:
             error_str = str(e)
             is_401 = "401" in error_str or "Unauthorized" in error_str
             if is_401 and self._token_manager and allow_refresh:
-                try:
-                    print(
-                        f"  [Auth] Got 401 for '{tool_call.name}', refreshing token...",
-                        file=sys.stderr,
-                    )
-                    await self._token_manager.refresh(force=True)
-                    refreshed_auth = BearerAuth(token=self._token_manager.access_token)
-                    tools_cache = self._tools_cache
-                    await self._close_unlocked()
-                    self.auth = refreshed_auth
-                    await self._connect_with_auth(refreshed_auth, timeout)
-                    self._tools_cache = tools_cache
-                    return await self._call_tool(tool_call, timeout, allow_refresh=False)
-                except Exception as refresh_err:
-                    return MCPToolResult(
-                        tool_call_id=tool_call.id or "unknown",
-                        tool_name=tool_call.name,
-                        content=None,
-                        is_error=True,
-                        error_message=(
-                            f"Tool call '{tool_call.name}' got 401 and token "
-                            f"refresh/reconnect failed: {refresh_err}"
-                        ),
-                    )
+                raise _TokenRefreshRequired from e
 
             return MCPToolResult(
                 tool_call_id=tool_call.id or "unknown",
@@ -1262,7 +1382,7 @@ class MCPClient:
 
     async def list_resources(self) -> list[dict[str, Any]]:
         """List resources without racing transport refresh or shutdown."""
-        async with self._operation_lock:
+        async with self._lifecycle_guard.shared():
             return await self._list_resources()
 
     async def _list_resources(self) -> list[dict[str, Any]]:
@@ -1290,7 +1410,7 @@ class MCPClient:
 
     async def read_resource(self, uri: str) -> dict[str, Any]:
         """Read a resource without racing transport refresh or shutdown."""
-        async with self._operation_lock:
+        async with self._lifecycle_guard.shared():
             return await self._read_resource(uri)
 
     async def _read_resource(self, uri: str) -> dict[str, Any]:
@@ -1306,7 +1426,7 @@ class MCPClient:
 
     async def list_prompts(self) -> list[dict[str, Any]]:
         """List prompts without racing transport refresh or shutdown."""
-        async with self._operation_lock:
+        async with self._lifecycle_guard.shared():
             return await self._list_prompts()
 
     async def _list_prompts(self) -> list[dict[str, Any]]:
@@ -1333,7 +1453,7 @@ class MCPClient:
 
     async def get_prompt(self, name: str, arguments: dict[str, Any] | None = None) -> str:
         """Get a prompt without racing transport refresh or shutdown."""
-        async with self._operation_lock:
+        async with self._lifecycle_guard.shared():
             return await self._get_prompt(name, arguments)
 
     async def _get_prompt(self, name: str, arguments: dict[str, Any] | None = None) -> str:
@@ -1357,7 +1477,7 @@ class MCPClient:
 
     async def close(self) -> None:
         """Close the MCP session after any active operation finishes."""
-        async with self._operation_lock:
+        async with self._lifecycle_guard.exclusive():
             await self._close_unlocked()
 
     async def _close_unlocked(self) -> None:
@@ -1377,6 +1497,7 @@ class MCPClient:
                 print(f"Warning: Error closing MCP client: {e}", file=sys.stderr)
             finally:
                 self.client = None
+                self._client_generation += 1
                 self._tools_cache = None  # Clear cache on close
 
     async def __aenter__(self):

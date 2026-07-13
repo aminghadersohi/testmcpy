@@ -1802,6 +1802,9 @@ class BaseSDKProvider(LLMProvider, ABC):
         """
         from .oauth_storage import create_oauth_token_storage  # noqa: PLC0415
 
+        if not self.mcp_url:
+            self._logger.warning("Cannot read cached OAuth token without an MCP URL")
+            return None
         server_url = self.mcp_url.rstrip("/")
         try:
             storage = create_oauth_token_storage(server_url)
@@ -1825,7 +1828,7 @@ class BaseSDKProvider(LLMProvider, ABC):
             )
             return None
         access_token = getattr(oauth_token, "access_token", None)
-        if not access_token:
+        if not isinstance(access_token, str) or not access_token:
             self._logger.warning(
                 "Cached OAuth payload for %s is missing access_token — "
                 "authenticate the MCP profile again to refresh it.",

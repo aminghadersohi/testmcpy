@@ -79,6 +79,7 @@ class MCPOAuth(_FastMCPOAuth):
             mcp_url,
             key_value_store=key_value_store,
         )
+        self._persistent_token_storage = persistent_storage
         self.token_storage_adapter = persistent_storage
         self.context.storage = persistent_storage
         # Preserve the path when computing the RFC 8707 resource indicator.
@@ -88,7 +89,7 @@ class MCPOAuth(_FastMCPOAuth):
     async def _initialize(self) -> None:
         """Restore the original persisted expiry instead of extending it."""
         await super()._initialize()
-        expiry = await self.token_storage_adapter.get_token_expiry()
+        expiry = await self._persistent_token_storage.get_token_expiry()
         if expiry is not None:
             self.context.token_expiry_time = expiry
 
@@ -774,10 +775,16 @@ class MCPClient:
         """Connect a new FastMCP session using already-resolved auth."""
         new_client = Client(self._create_transport(transport_auth))
         try:
-            await asyncio.wait_for(new_client.__aenter__(), timeout=timeout)
+            await asyncio.wait_for(
+                new_client.__aenter__(),  # type: ignore[no-untyped-call]
+                timeout=timeout,
+            )
         except BaseException:
             try:
-                await asyncio.wait_for(new_client.__aexit__(None, None, None), timeout=5.0)
+                await asyncio.wait_for(
+                    new_client.__aexit__(None, None, None),  # type: ignore[no-untyped-call]
+                    timeout=5.0,
+                )
             except Exception:
                 pass
             raise
@@ -1348,12 +1355,12 @@ class MCPClient:
         except Exception as e:
             raise MCPError(f"Failed to get prompt {name}: {e}")
 
-    async def close(self):
+    async def close(self) -> None:
         """Close the MCP session after any active operation finishes."""
         async with self._operation_lock:
             await self._close_unlocked()
 
-    async def _close_unlocked(self):
+    async def _close_unlocked(self) -> None:
         """Close the MCP client connection.
 
         This method never raises exceptions to ensure clean shutdown.

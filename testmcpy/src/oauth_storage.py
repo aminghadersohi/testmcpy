@@ -8,7 +8,6 @@ from pathlib import Path
 from cryptography.fernet import Fernet
 from fastmcp.client.auth.oauth import TokenStorageAdapter
 from key_value.aio.protocols import AsyncKeyValue
-from mcp.client.auth.oauth2 import TokenStorage
 from mcp.shared.auth import OAuthToken
 
 _KEY_FILE_NAME = "oauth.key"
@@ -116,7 +115,7 @@ def create_oauth_token_storage(
     mcp_url: str,
     cache_dir: Path | None = None,
     key_value_store: AsyncKeyValue | None = None,
-) -> TokenStorage:
+) -> PersistentTokenStorageAdapter:
     """Create the MCP SDK TokenStorage view for one normalized endpoint."""
     return PersistentTokenStorageAdapter(
         async_key_value=key_value_store or create_oauth_key_value_store(cache_dir),

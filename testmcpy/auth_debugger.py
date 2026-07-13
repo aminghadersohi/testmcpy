@@ -918,9 +918,9 @@ async def prepare_oauth_authorization_flow(
             raise Exception("Dynamic client registration returned no client_id")
         client_information = response_data
 
-    token_endpoint_auth_method = client_information.get(
-        "token_endpoint_auth_method", token_endpoint_auth_method
-    )
+    registered_auth_method = client_information.get("token_endpoint_auth_method")
+    if registered_auth_method:
+        token_endpoint_auth_method = registered_auth_method
     from testmcpy.src.oauth_flows import PKCEFlow
 
     pkce = PKCEFlow.generate_pkce_pair()
@@ -1027,17 +1027,26 @@ async def complete_oauth_authorization_flow(
     async with httpx.AsyncClient(
         verify=not preparation.get("insecure", False), follow_redirects=False
     ) as http_client:
-        response = await http_client.post(
-            preparation["token_endpoint"],
-            data=token_data,
-            auth=auth,
-            headers={"Accept": "application/json"},
-            timeout=20.0,
-        )
+        if auth is None:
+            response = await http_client.post(
+                preparation["token_endpoint"],
+                data=token_data,
+                headers={"Accept": "application/json"},
+                timeout=20.0,
+            )
+        else:
+            response = await http_client.post(
+                preparation["token_endpoint"],
+                data=token_data,
+                auth=auth,
+                headers={"Accept": "application/json"},
+                timeout=20.0,
+            )
     try:
-        response_data = response.json()
+        raw_response_data = response.json()
     except json.JSONDecodeError:
-        response_data = {}
+        raw_response_data = {}
+    response_data: dict[str, Any] = raw_response_data if isinstance(raw_response_data, dict) else {}
     debugger.log_step(
         "13. Token Exchange Response",
         {
@@ -1098,12 +1107,15 @@ def _select_oauth_scopes(metadata: dict[str, Any], requested_scopes: list[str] |
     if requested_scopes:
         return [scope for scope in requested_scopes if scope]
     challenge_scope = (metadata.get("www_authenticate") or {}).get("scope")
-    if challenge_scope:
+    if isinstance(challenge_scope, str) and challenge_scope:
         return challenge_scope.split()
     protected_metadata = metadata.get("protected_resource_metadata") or {}
-    return list(
+    supported_scopes = (
         protected_metadata.get("scopes_supported") or metadata.get("scopes_supported") or []
     )
+    if not isinstance(supported_scopes, list):
+        return []
+    return [scope for scope in supported_scopes if isinstance(scope, str)]
 
 
 def _select_token_endpoint_auth_method(

@@ -11,6 +11,8 @@ Tests cover:
 - Edge cases and error handling
 """
 
+import os
+import stat
 from pathlib import Path
 from unittest.mock import mock_open, patch
 
@@ -20,12 +22,16 @@ import yaml
 from testmcpy.llm_profiles import (
     LLMProfile,
     LLMProfileConfig,
+    LLMProfileConfigError,
+    LLMProfileNotFoundError,
     LLMProviderConfig,
     get_default_llm_profile_id,
     get_llm_profile_config,
     list_available_llm_profiles,
     load_llm_profile,
     reload_llm_profile_config,
+    resolve_llm_provider_config,
+    resolve_llm_provider_selection,
 )
 
 
@@ -70,6 +76,19 @@ class TestLLMProviderConfig:
         assert config.base_url == "https://api.openai.com/v1"
         assert config.timeout == 120
         assert config.default is True
+
+    def test_api_key_env_resolves_lazily_without_materializing(self, monkeypatch):
+        monkeypatch.setenv("CUSTOM_OPENAI_KEY", "runtime-key")
+        config = LLMProviderConfig(
+            name="OpenAI",
+            provider="openai",
+            model="gpt-4o",
+            api_key_env="CUSTOM_OPENAI_KEY",
+        )
+
+        assert config.api_key == "runtime-key"
+        assert config.to_dict()["api_key_env"] == "CUSTOM_OPENAI_KEY"
+        assert "api_key" not in config.to_dict()
 
     def test_to_dict_minimal(self):
         """Test to_dict() with minimal config excludes None values."""
@@ -483,6 +502,84 @@ profiles:
         captured = capsys.readouterr()
         assert "Warning: Failed to load LLM profiles" in captured.out
 
+    def test_secret_placeholders_resolve_lazily_and_round_trip_raw(self, tmp_path, monkeypatch):
+        """Credential reads resolve env vars without persisting their values."""
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-runtime-secret")
+        config_path = tmp_path / ".llm_providers.yaml"
+        config_path.write_text(
+            """
+default: prod
+custom_top_level: keep-top
+profiles:
+  prod:
+    name: ${PROFILE_NAME:-Production}
+    description: Test
+    custom_profile_field: keep-profile
+    providers:
+      - name: OpenAI
+        provider: openai
+        model: gpt-4o
+        api_key: ${OPENAI_API_KEY}
+        base_url: ${OPENAI_BASE_URL:-https://api.openai.test/v1}
+        temperature: 0.2
+        default: true
+"""
+        )
+
+        config = LLMProfileConfig()
+        provider = config.profiles["prod"].providers[0]
+
+        assert provider.api_key == "sk-runtime-secret"
+        assert provider.base_url == "https://api.openai.test/v1"
+        assert config.profiles["prod"].name == "Production"
+        assert provider.to_dict()["api_key"] == "${OPENAI_API_KEY}"
+
+        config.save()
+        saved_text = config_path.read_text()
+        saved = yaml.safe_load(saved_text)
+        assert "sk-runtime-secret" not in saved_text
+        assert saved["profiles"]["prod"]["providers"][0]["api_key"] == "${OPENAI_API_KEY}"
+        assert (
+            saved["profiles"]["prod"]["providers"][0]["base_url"]
+            == "${OPENAI_BASE_URL:-https://api.openai.test/v1}"
+        )
+        assert saved["profiles"]["prod"]["name"] == "${PROFILE_NAME:-Production}"
+        assert saved["custom_top_level"] == "keep-top"
+        assert saved["profiles"]["prod"]["custom_profile_field"] == "keep-profile"
+        assert saved["profiles"]["prod"]["providers"][0]["temperature"] == 0.2
+
+    def test_malformed_later_profile_rejects_entire_document(self, tmp_path, monkeypatch, capsys):
+        """A bad later entry cannot leave earlier profiles partially loaded."""
+        monkeypatch.chdir(tmp_path)
+        config_path = tmp_path / ".llm_providers.yaml"
+        malformed = """
+default: good
+global:
+  timeout: 90
+profiles:
+  good:
+    name: Good
+    description: valid
+    providers: []
+  broken:
+    name: Broken
+    providers:
+      - null
+"""
+        config_path.write_text(malformed)
+
+        config = LLMProfileConfig()
+
+        assert config.profiles == {}
+        assert config.default_profile_id is None
+        assert config.global_settings == {}
+        assert config.load_error
+        assert "Failed to load LLM profiles" in capsys.readouterr().out
+        with pytest.raises(ValueError, match="Refusing to overwrite"):
+            config.save()
+        assert config_path.read_text() == malformed
+
     def test_has_profiles(self):
         """Test has_profiles() method."""
         with patch("pathlib.Path.exists", return_value=False):
@@ -630,14 +727,9 @@ profiles:
             with pytest.raises(ValueError, match="Profile 'nonexistent' not found"):
                 config.set_default_profile("nonexistent")
 
-    @patch("pathlib.Path.cwd")
-    @patch("pathlib.Path.exists")
-    @patch("builtins.open", new_callable=mock_open)
-    def test_save_creates_yaml(self, mock_file, mock_exists, mock_cwd):
-        """Test save() creates YAML file."""
-        mock_cwd.return_value = Path("/test")
-        mock_exists.return_value = False
-
+    def test_save_creates_yaml_with_private_permissions(self, tmp_path, monkeypatch):
+        """save() atomically creates a mode-0600 YAML file."""
+        monkeypatch.chdir(tmp_path)
         config = LLMProfileConfig()
         provider = LLMProviderConfig(
             name="Test",
@@ -655,69 +747,150 @@ profiles:
         config.set_default_profile("test")
         config.global_settings = {"timeout": 120}
 
-        with patch("yaml.dump") as mock_dump:
-            config.save()
+        config.save()
 
-        # Verify yaml.dump was called with correct data structure
-        mock_dump.assert_called_once()
-        call_args = mock_dump.call_args
-        data = call_args[0][0]
-
+        config_path = tmp_path / ".llm_providers.yaml"
+        data = yaml.safe_load(config_path.read_text())
         assert data["default"] == "test"
         assert "test" in data["profiles"]
         assert data["profiles"]["test"]["name"] == "Test Profile"
         assert data["global"] == {"timeout": 120}
+        assert stat.S_IMODE(config_path.stat().st_mode) == 0o600
 
-    @patch("pathlib.Path.cwd")
-    @patch("pathlib.Path.exists")
-    @patch("builtins.open", new_callable=mock_open)
-    @patch("shutil.copy2")
-    def test_save_creates_backup(self, mock_copy, mock_file, mock_exists, mock_cwd):
-        """Test save() creates backup of existing file."""
-        mock_cwd.return_value = Path("/test")
-        mock_exists.return_value = True
+    def test_save_without_fchmod_uses_portable_chmod_fallback(self, tmp_path, monkeypatch):
+        """Windows Python builds do not expose os.fchmod."""
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr("testmcpy.llm_profiles.os.fchmod", None)
+        config = LLMProfileConfig()
+        config.add_profile(LLMProfile(profile_id="test", name="Test", description=""))
 
+        config.save()
+
+        config_path = tmp_path / ".llm_providers.yaml"
+        assert yaml.safe_load(config_path.read_text())["profiles"]["test"]["name"] == "Test"
+        assert stat.S_IMODE(config_path.stat().st_mode) == 0o600
+
+    def test_save_creates_private_backup(self, tmp_path, monkeypatch):
+        """Replacing a config keeps a private backup of the previous bytes."""
+        monkeypatch.chdir(tmp_path)
+        config_path = tmp_path / ".llm_providers.yaml"
+        original = "default: old\nprofiles: {}\n"
+        config_path.write_text(original)
+        config = LLMProfileConfig()
+        config.default_profile_id = "new"
+
+        config.save()
+
+        backup_path = tmp_path / ".llm_providers.yaml.backup"
+        assert backup_path.read_text() == original
+        assert stat.S_IMODE(config_path.stat().st_mode) == 0o600
+        assert stat.S_IMODE(backup_path.stat().st_mode) == 0o600
+
+    def test_save_uses_fallback_when_parent_cannot_atomically_replace(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        """A writable file in a non-writable directory still needs fallback."""
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        fallback_dir = workspace / ".testmcpy"
+        fallback_dir.mkdir()
+        primary = workspace / ".llm_providers.yaml"
+        primary.write_text("default: old\nprofiles: {}\n")
+        primary.chmod(0o600)
+        monkeypatch.chdir(workspace)
+        config = LLMProfileConfig()
+        config.default_profile_id = "new"
+
+        real_access = os.access
+
+        def atomic_access(path, mode):
+            if Path(path) == workspace and mode & os.W_OK:
+                return False
+            return real_access(path, mode)
+
+        monkeypatch.setattr("testmcpy.llm_profiles.os.access", atomic_access)
+        config.save()
+
+        fallback = fallback_dir / ".llm_providers.yaml"
+        assert yaml.safe_load(fallback.read_text())["default"] == "new"
+        assert yaml.safe_load(primary.read_text())["default"] == "old"
+
+    def test_save_writes_through_symlink_without_replacing_it(self, tmp_path, monkeypatch):
+        """Atomic saving preserves a configured symlink and updates its target."""
+        workspace = tmp_path / "workspace"
+        target_dir = tmp_path / "config"
+        workspace.mkdir()
+        target_dir.mkdir()
+        target = target_dir / "providers.yaml"
+        target.write_text("default: old\nprofiles: {}\n")
+        link = workspace / ".llm_providers.yaml"
+        link.symlink_to(target)
+        monkeypatch.chdir(workspace)
+        config = LLMProfileConfig()
+        config.default_profile_id = "new"
+
+        config.save()
+
+        assert link.is_symlink()
+        assert link.resolve() == target
+        assert yaml.safe_load(target.read_text())["default"] == "new"
+
+    def test_save_backup_failure_leaves_original_untouched(self, tmp_path, monkeypatch):
+        """A failed backup aborts before the live config can be replaced."""
+        monkeypatch.chdir(tmp_path)
+        config_path = tmp_path / ".llm_providers.yaml"
+        original = "default: old\nprofiles: {}\n"
+        config_path.write_text(original)
         config = LLMProfileConfig()
 
-        with patch("yaml.dump"):
-            config.save()
+        with patch("testmcpy.llm_profiles._atomic_copy", side_effect=OSError("backup failed")):
+            with pytest.raises(Exception, match="Failed to save LLM profiles"):
+                config.save()
 
-        # Verify backup was attempted
-        mock_copy.assert_called_once()
+        assert config_path.read_text() == original
 
-    @patch("pathlib.Path.cwd")
-    @patch("pathlib.Path.exists")
-    @patch("builtins.open", new_callable=mock_open)
-    @patch("shutil.copy2")
-    def test_save_handles_backup_failure(self, mock_copy, mock_file, mock_exists, mock_cwd, capsys):
-        """Test save() handles backup failure gracefully."""
-        mock_cwd.return_value = Path("/test")
-        mock_exists.return_value = True
-        mock_copy.side_effect = Exception("Backup failed")
-
-        config = LLMProfileConfig()
-
-        with patch("yaml.dump"):
-            config.save()
-
-        # Should print warning but not fail
-        captured = capsys.readouterr()
-        assert "Warning: Failed to create backup" in captured.out
-
-    @patch("pathlib.Path.cwd")
-    @patch("pathlib.Path.exists")
-    @patch("builtins.open", new_callable=mock_open)
-    def test_save_handles_write_failure(self, mock_file, mock_exists, mock_cwd):
-        """Test save() raises exception on write failure."""
-        mock_cwd.return_value = Path("/test")
-        mock_exists.return_value = False
-
+    def test_save_handles_write_failure_without_truncation(self, tmp_path, monkeypatch):
+        """A serializer failure cannot truncate the live configuration."""
+        monkeypatch.chdir(tmp_path)
+        config_path = tmp_path / ".llm_providers.yaml"
+        original = "default: old\nprofiles: {}\n"
+        config_path.write_text(original)
         config = LLMProfileConfig()
 
         with patch("yaml.dump") as mock_dump:
-            mock_dump.side_effect = Exception("Write failed")
+            mock_dump.side_effect = OSError("disk full")
             with pytest.raises(Exception, match="Failed to save LLM profiles"):
                 config.save()
+
+        assert config_path.read_text() == original
+        assert not list(tmp_path.glob("*.tmp"))
+
+    def test_save_restores_backup_if_replace_removes_target(self, tmp_path, monkeypatch):
+        """An unusual destructive replace failure restores the original bytes."""
+        monkeypatch.chdir(tmp_path)
+        config_path = tmp_path / ".llm_providers.yaml"
+        original = "default: old\nprofiles: {}\n"
+        config_path.write_text(original)
+        config = LLMProfileConfig()
+        real_replace = os.replace
+        failed_once = False
+
+        def destructive_replace(source, destination):
+            nonlocal failed_once
+            if Path(destination) == config_path and not failed_once:
+                failed_once = True
+                config_path.unlink()
+                raise OSError("replace failed after removing target")
+            return real_replace(source, destination)
+
+        with patch("testmcpy.llm_profiles.os.replace", side_effect=destructive_replace):
+            with pytest.raises(Exception, match="Failed to save LLM profiles"):
+                config.save()
+
+        assert config_path.read_text() == original
+        assert stat.S_IMODE(config_path.stat().st_mode) == 0o600
 
 
 class TestModuleFunctions:
@@ -748,6 +921,345 @@ class TestModuleFunctions:
         config2 = reload_llm_profile_config()
 
         assert config1 is not config2
+
+    def test_singleton_reloads_when_config_path_changes(self, tmp_path, monkeypatch):
+        """Changing workspace cannot reuse a singleton loaded from another CWD."""
+        import testmcpy.llm_profiles
+
+        workspace_a = tmp_path / "a"
+        workspace_b = tmp_path / "b"
+        workspace_a.mkdir()
+        workspace_b.mkdir()
+        (workspace_a / ".llm_providers.yaml").write_text(
+            "default: a\nprofiles:\n  a: {name: A, description: '', providers: []}\n"
+        )
+        (workspace_b / ".llm_providers.yaml").write_text(
+            "default: b\nprofiles:\n  b: {name: B, description: '', providers: []}\n"
+        )
+        monkeypatch.setattr(testmcpy.llm_profiles, "_llm_profile_config", None)
+
+        monkeypatch.chdir(workspace_a)
+        config_a = get_llm_profile_config()
+        monkeypatch.chdir(workspace_b)
+        config_b = get_llm_profile_config()
+
+        assert config_a is not config_b
+        assert config_a.get_profile().profile_id == "a"
+        assert config_b.get_profile().profile_id == "b"
+
+    @pytest.mark.parametrize(
+        ("configured_provider", "requested_provider"),
+        [("assistant", "chatbot"), ("bedrock", "aws-bedrock")],
+    )
+    def test_runtime_provider_aliases_share_profile_config(
+        self,
+        tmp_path,
+        monkeypatch,
+        configured_provider,
+        requested_provider,
+    ):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / ".llm_providers.yaml").write_text(
+            f"""
+default: prod
+profiles:
+  prod:
+    name: Production
+    providers:
+      - name: Provider
+        provider: {configured_provider}
+        model: test-model
+        api_token: profile-token-for-alias
+"""
+        )
+        reload_llm_profile_config()
+
+        resolved = resolve_llm_provider_config(requested_provider, "test-model")
+
+        assert resolved["api_token"] == "profile-token-for-alias"
+
+    def test_runtime_profile_secrets_are_registered_with_scrubber(self, tmp_path, monkeypatch):
+        from testmcpy.scrubber import scrub_text
+
+        monkeypatch.chdir(tmp_path)
+        secret = "profile-direct-secret-123-unique"
+        (tmp_path / ".llm_providers.yaml").write_text(
+            f"""
+default: prod
+profiles:
+  prod:
+    name: Production
+    providers:
+      - name: OpenAI
+        provider: openai
+        model: gpt-test
+        api_key: {secret}
+"""
+        )
+        reload_llm_profile_config()
+
+        assert resolve_llm_provider_config("openai", "gpt-test")["api_key"] == secret
+        assert secret not in scrub_text(f"upstream echoed {secret}")
+
+    def test_blank_profile_id_uses_default_runtime_config(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / ".llm_providers.yaml").write_text(
+            """
+default: prod
+profiles:
+  prod:
+    name: Production
+    providers:
+      - name: OpenAI
+        provider: openai
+        model: gpt-test
+        api_key: default-profile-secret
+"""
+        )
+        reload_llm_profile_config()
+
+        resolved = resolve_llm_provider_config("openai", "gpt-test", "")
+
+        assert resolved["api_key"] == "default-profile-secret"
+
+    def test_named_profile_selects_provider_model_and_runtime_config(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / ".llm_providers.yaml").write_text(
+            """
+default: default
+profiles:
+  default:
+    name: Default
+    providers:
+      - {name: Claude, provider: anthropic, model: claude-test}
+  selected:
+    name: Selected
+    providers:
+      - name: OpenAI
+        provider: openai
+        model: gpt-test
+        api_key: selected-profile-key
+"""
+        )
+        reload_llm_profile_config()
+
+        provider, model, runtime = resolve_llm_provider_selection(profile_id="selected")
+
+        assert (provider, model) == ("openai", "gpt-test")
+        assert runtime["api_key"] == "selected-profile-key"
+
+    @pytest.mark.parametrize(
+        ("provider", "model", "ambient_key", "profile_key"),
+        [
+            ("openai", "gpt-test", "OPENAI_API_KEY", "PROFILE_OPENAI_KEY"),
+            ("anthropic", "claude-test", "ANTHROPIC_API_KEY", "PROFILE_ANTHROPIC_KEY"),
+            ("codex-sdk", "codex-test", "OPENAI_API_KEY", "PROFILE_CODEX_KEY"),
+            (
+                "claude-sdk",
+                "claude-sdk-test",
+                "CLAUDE_CODE_OAUTH_TOKEN",
+                "PROFILE_CLAUDE_KEY",
+            ),
+        ],
+    )
+    def test_explicit_profile_unresolved_api_key_env_rejects_ambient_fallback(
+        self,
+        tmp_path,
+        monkeypatch,
+        provider,
+        model,
+        ambient_key,
+        profile_key,
+    ):
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv(ambient_key, "ambient-key-must-not-be-used")
+        monkeypatch.delenv(profile_key, raising=False)
+        (tmp_path / ".llm_providers.yaml").write_text(
+            f"""
+profiles:
+  isolated:
+    name: Isolated
+    providers:
+      - name: Provider
+        provider: {provider}
+        model: {model}
+        api_key_env: {profile_key}
+"""
+        )
+        reload_llm_profile_config()
+
+        with pytest.raises(LLMProfileConfigError, match="resolved to an empty value"):
+            resolve_llm_provider_config(provider, model, "isolated")
+
+    def test_default_profile_unresolved_key_rejects_ambient_fallback(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("OPENAI_API_KEY", "ambient-key-must-not-be-used")
+        monkeypatch.delenv("PROFILE_OPENAI_KEY", raising=False)
+        (tmp_path / ".llm_providers.yaml").write_text(
+            """
+default: isolated
+profiles:
+  isolated:
+    name: Isolated
+    providers:
+      - name: OpenAI
+        provider: openai
+        model: gpt-test
+        api_key_env: PROFILE_OPENAI_KEY
+"""
+        )
+        reload_llm_profile_config()
+
+        with pytest.raises(LLMProfileConfigError, match="resolved to an empty value"):
+            resolve_llm_provider_config("openai", "gpt-test")
+
+    def test_dangling_default_profile_is_a_configuration_error(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / ".llm_providers.yaml").write_text(
+            "default: missing\nprofiles:\n  prod: {name: Production, providers: []}\n"
+        )
+        reload_llm_profile_config()
+
+        with pytest.raises(LLMProfileConfigError, match="Default LLM profile 'missing'"):
+            resolve_llm_provider_selection(
+                fallback_provider="openai",
+                fallback_model="gpt-test",
+            )
+        with pytest.raises(LLMProfileConfigError, match="Default LLM profile 'missing'"):
+            resolve_llm_provider_config("openai", "gpt-test")
+
+    def test_explicit_profile_provider_mismatch_is_a_configuration_error(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / ".llm_providers.yaml").write_text(
+            """
+profiles:
+  isolated:
+    name: Isolated
+    providers:
+      - name: Anthropic
+        provider: anthropic
+        model: claude-test
+"""
+        )
+        reload_llm_profile_config()
+
+        with pytest.raises(LLMProfileConfigError, match="no provider matching 'openai'"):
+            resolve_llm_provider_selection("openai", "gpt-test", "isolated")
+        with pytest.raises(LLMProfileConfigError, match="no provider matching 'openai'"):
+            resolve_llm_provider_config("openai", "gpt-test", "isolated")
+
+    def test_default_profile_provider_mismatch_is_a_configuration_error(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("OPENAI_API_KEY", "ambient-key-must-not-be-used")
+        (tmp_path / ".llm_providers.yaml").write_text(
+            """
+default: isolated
+profiles:
+  isolated:
+    name: Isolated
+    providers:
+      - name: Anthropic
+        provider: anthropic
+        model: claude-test
+"""
+        )
+        reload_llm_profile_config()
+
+        error = "LLM profile 'isolated' has no provider matching 'openai'"
+        with pytest.raises(LLMProfileConfigError, match=error):
+            resolve_llm_provider_selection("openai", "gpt-test")
+        with pytest.raises(LLMProfileConfigError, match=error):
+            resolve_llm_provider_config("openai", "gpt-test")
+
+    def test_explicit_profile_unresolved_api_key_expression_rejects_ambient_fallback(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("OPENAI_API_KEY", "ambient-key-must-not-be-used")
+        monkeypatch.delenv("PROFILE_OPENAI_KEY", raising=False)
+        (tmp_path / ".llm_providers.yaml").write_text(
+            """
+profiles:
+  isolated:
+    name: Isolated
+    providers:
+      - name: OpenAI
+        provider: openai
+        model: gpt-test
+        api_key: ${PROFILE_OPENAI_KEY}
+"""
+        )
+        reload_llm_profile_config()
+
+        with pytest.raises(LLMProfileConfigError, match="resolved to an empty value"):
+            resolve_llm_provider_config("openai", "gpt-test", "isolated")
+
+    def test_explicit_profile_without_api_key_binding_can_use_provider_defaults(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / ".llm_providers.yaml").write_text(
+            """
+profiles:
+  host-default:
+    name: Host default
+    providers:
+      - name: OpenAI
+        provider: openai
+        model: gpt-test
+"""
+        )
+        reload_llm_profile_config()
+
+        assert resolve_llm_provider_config("openai", "gpt-test", "host-default") == {"timeout": 60}
+
+    def test_explicit_missing_profile_never_falls_back_to_global_provider(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.chdir(tmp_path)
+        reload_llm_profile_config()
+
+        with pytest.raises(ValueError, match="LLM profile 'missing' was not found"):
+            resolve_llm_provider_selection(
+                profile_id="missing",
+                fallback_provider="openai",
+                fallback_model="gpt-fallback",
+            )
+
+    def test_direct_runtime_config_rejects_explicit_missing_profile(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        reload_llm_profile_config()
+
+        with pytest.raises(LLMProfileNotFoundError, match="LLM profile 'missing' was not found"):
+            resolve_llm_provider_config("openai", "gpt-fallback", "missing")
+
+    def test_blank_profile_id_uses_global_fallback(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        reload_llm_profile_config()
+
+        provider, model, runtime = resolve_llm_provider_selection(
+            profile_id="",
+            fallback_provider="openai",
+            fallback_model="gpt-fallback",
+        )
+
+        assert (provider, model, runtime) == ("openai", "gpt-fallback", {})
+
+    def test_runtime_selection_rejects_malformed_profile_file(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / ".llm_providers.yaml").write_text("profiles: [not-a-mapping]\n")
+        reload_llm_profile_config()
+
+        with pytest.raises(RuntimeError, match="Invalid LLM profile configuration"):
+            resolve_llm_provider_selection(
+                profile_id="missing",
+                fallback_provider="openai",
+                fallback_model="gpt-fallback",
+            )
 
     @patch("pathlib.Path.exists", return_value=False)
     def test_load_llm_profile_with_id(self, mock_exists):
@@ -948,8 +1460,8 @@ global:
 
     @patch("pathlib.Path.cwd")
     @patch("pathlib.Path.exists")
-    def test_yaml_with_null_values(self, mock_exists, mock_cwd):
-        """Test YAML with explicit null values."""
+    def test_yaml_with_null_required_values_is_rejected(self, mock_exists, mock_cwd, capsys):
+        """Explicit nulls in required string fields reject the whole document."""
         mock_cwd.return_value = Path("/test")
         mock_exists.return_value = True
 
@@ -973,10 +1485,5 @@ profiles:
                 config = LLMProfileConfig()
 
         assert config.default_profile_id is None
-        profile = config.profiles["test"]
-        # Note: When YAML has explicit null, it's loaded as None, not converted to ""
-        # This is a potential bug in the code - it doesn't handle null values
-        assert profile.description is None
-        provider = profile.providers[0]
-        assert provider.api_key is None
-        assert provider.base_url is None
+        assert config.profiles == {}
+        assert "description must be a string" in capsys.readouterr().out

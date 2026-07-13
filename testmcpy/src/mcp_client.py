@@ -27,7 +27,7 @@ from fastmcp.utilities.http import find_available_port as _find_available_port
 from mcp.types import Tool as MCPToolDef
 
 from testmcpy.auth_debugger import AuthDebugger
-from testmcpy.scrubber import register_secrets_from_auth
+from testmcpy.scrubber import register_secret, register_secrets_from_auth
 from testmcpy.src.oauth_storage import (
     create_oauth_key_value_store,
     create_oauth_token_storage,
@@ -300,6 +300,7 @@ class BearerAuth(httpx.Auth):
 
     def __init__(self, token: str):
         self.token = token
+        register_secret(token)
 
     def auth_flow(self, request):
         request.headers["Authorization"] = f"Bearer {self.token}"
@@ -546,6 +547,7 @@ class MCPClient:
                     )
 
                 debugger.summarize()
+                register_secret(token)
                 return token
 
         except MCPTimeoutError:
@@ -679,6 +681,7 @@ class MCPClient:
                     )
 
                 debugger.summarize()
+                register_secret(token)
                 return token
 
         except MCPTimeoutError:
@@ -805,6 +808,7 @@ class MCPClient:
                 if not api_key:
                     raise MCPError("API key auth requires 'api_key' or 'api_key_env' field")
 
+                register_secret(api_key)
                 print(
                     f"  [Auth] Using API key authentication (header: {header_name})",
                     file=sys.stderr,
@@ -1236,6 +1240,8 @@ class MCPClient:
                     )
                     try:
                         await self._token_manager.refresh(force=True)
+                        register_secret(self._token_manager.access_token)
+                        register_secret(getattr(self._token_manager, "refresh_token", None))
                         refreshed_auth = BearerAuth(token=self._token_manager.access_token)
                         tools_cache = self._tools_cache
                         await self._close_unlocked()

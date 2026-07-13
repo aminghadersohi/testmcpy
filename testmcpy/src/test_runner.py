@@ -11,6 +11,13 @@ from typing import Any
 
 from ..evals.base_evaluators import BaseEvaluator, create_evaluator
 from ..evals.evaluator_packs import resolve_evaluators
+from ..llm_profiles import (
+    LLMProfileConfigError,
+    LLMProfileNotFoundError,
+    get_llm_profile_config,
+    load_llm_profile,
+    resolve_llm_provider_config,
+)
 from ..scoring import compute_score_breakdown
 from .llm_integration import LLMProvider, create_llm_provider
 from .mcp_client import MCPClient, MCPToolCall
@@ -265,6 +272,7 @@ class TestRunner:
         log_callback=None,
         provider_config: dict[str, Any] | None = None,
         quiet_test_announcement: bool = False,
+        llm_profile: str | None = None,
     ):
         self.model = model
         self.provider = provider
@@ -280,6 +288,7 @@ class TestRunner:
         self.log_callback = log_callback
         # Additional provider-specific config (e.g., from suite-level override)
         self.provider_config = provider_config or {}
+        self.llm_profile = llm_profile or None
         # Callers that already announce test start themselves (the websocket
         # streams its own "🧪 Running test 1/N: name" + "📝 Prompt:" + "⏱️ Timeout:"
         # block) set this True to avoid duplicate header/prompt/provider lines.
@@ -311,19 +320,52 @@ class TestRunner:
     async def initialize(self):
         """Initialize LLM provider and MCP client."""
         if not self.llm_provider:
+            if self.llm_profile:
+                profile_config = get_llm_profile_config()
+                if profile_config.load_error:
+                    raise LLMProfileConfigError(
+                        f"Invalid LLM profile configuration: {profile_config.load_error}"
+                    )
+                if load_llm_profile(self.llm_profile) is None:
+                    raise LLMProfileNotFoundError(f"LLM profile '{self.llm_profile}' was not found")
             # Get auth config dict from mcp_client if available
             auth = None
             if self.mcp_client and hasattr(self.mcp_client, "auth_config"):
                 auth = self.mcp_client.auth_config
-            self.llm_provider = create_llm_provider(
-                provider=self.provider,
-                model=self.model,
-                mcp_url=self.mcp_url,
-                auth=auth,
-                log_callback=self.log_callback,
-                **self.provider_config,
+            profile_config = resolve_llm_provider_config(
+                self.provider,
+                self.model,
+                self.llm_profile,
             )
-            await self.llm_provider.initialize()
+            effective_provider_config = {**profile_config, **self.provider_config}
+            from ..scrubber import register_secret
+
+            for field_name in ("api_key", "api_token", "api_secret"):
+                register_secret(effective_provider_config.get(field_name))
+            try:
+                self.llm_provider = create_llm_provider(
+                    provider=self.provider,
+                    model=self.model,
+                    mcp_url=self.mcp_url,
+                    auth=auth,
+                    log_callback=self.log_callback,
+                    **effective_provider_config,
+                )
+                await self.llm_provider.initialize()
+            except Exception as exc:
+                # Initialization errors can include an upstream response body.
+                # Never let an endpoint that echoes credentials leak them into
+                # API responses, WebSocket logs, or tracebacks.
+                from ..scrubber import scrub_text
+
+                provider_to_close = self.llm_provider
+                self.llm_provider = None
+                if provider_to_close is not None:
+                    try:
+                        await provider_to_close.close()
+                    except Exception:
+                        pass
+                raise RuntimeError(scrub_text(str(exc))) from None
 
         # The assistant/chatbot providers talk to a chatbot endpoint that
         # calls MCP server-side, so they should not eagerly open a local MCP

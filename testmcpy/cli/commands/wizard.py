@@ -1,8 +1,12 @@
 """Interactive wizard commands for adding MCP servers, LLM providers, and tests."""
 
 import asyncio
+import json
+import os
 import re
 from pathlib import Path
+from typing import Any, Optional
+from urllib.parse import urlsplit
 
 import typer
 import yaml
@@ -10,8 +14,27 @@ from rich.panel import Panel
 from rich.prompt import Confirm, IntPrompt, Prompt
 from rich.syntax import Syntax
 from rich.table import Table
+from rich.text import Text
 
 from testmcpy.cli.app import app, console
+
+_CREATE_LLM_PROFILE_CHOICE = "Create a new profile"
+_DEFAULT_LLM_KEY_ENVS = {
+    "anthropic": "ANTHROPIC_API_KEY",
+    "openai": "OPENAI_API_KEY",
+    "google": "GOOGLE_API_KEY",
+    "gemini": "GOOGLE_API_KEY",
+    "gemini-sdk": "GOOGLE_API_KEY",
+    "xai": "XAI_API_KEY",
+    "grok": "XAI_API_KEY",
+}
+_HOST_AUTH_LLM_PROVIDERS = {
+    "claude-code",
+    "claude-cli",
+    "claude-sdk",
+    "gemini-cli",
+}
+_CODEX_PROVIDERS = {"codex", "codex-cli", "codex-sdk"}
 
 
 def _prompt(label: str, default: str = "", password: bool = False) -> str:
@@ -28,8 +51,9 @@ def _choose(label: str, choices: list[str], default: str | None = None) -> str:
         marker = "[green]*[/green] " if choice == default else "  "
         console.print(f"  {marker}{i}. {choice}")
 
+    default_index = choices.index(default) + 1 if default in choices else 1
     while True:
-        raw = Prompt.ask("Enter number", default="1")
+        raw = Prompt.ask("Enter number", default=str(default_index))
         try:
             idx = int(raw) - 1
             if 0 <= idx < len(choices):
@@ -37,6 +61,63 @@ def _choose(label: str, choices: list[str], default: str | None = None) -> str:
         except ValueError:
             pass
         console.print("[red]Invalid choice, try again.[/red]")
+
+
+def _redacted_provider_preview(provider_entry: dict[str, Any]) -> dict[str, Any]:
+    """Return preview data that indicates direct credentials without exposing them."""
+    preview = provider_entry.copy()
+    for field in ("api_key", "api_token", "api_secret"):
+        if preview.get(field):
+            preview[field] = "*** configured ***"
+    return preview
+
+
+def _has_cached_codex_api_key() -> bool:
+    """Return whether Codex's auth file contains a Platform API key, not OAuth only."""
+    try:
+        data = json.loads((Path.home() / ".codex" / "auth.json").read_text())
+    except (OSError, json.JSONDecodeError):
+        return False
+    api_key = data.get("OPENAI_API_KEY") if isinstance(data, dict) else None
+    return isinstance(api_key, str) and bool(api_key)
+
+
+def _credential_status(provider: Any) -> str:
+    """Describe configured credentials without resolving or displaying secrets."""
+    raw = vars(provider)
+    if raw.get("api_key"):
+        return "direct key (configured)"
+
+    provider_type = str(raw.get("provider") or "").lower()
+    if provider_type in {"assistant", "chatbot"}:
+        token_set = bool(raw.get("api_token"))
+        secret_set = bool(raw.get("api_secret"))
+        if token_set and secret_set:
+            return "assistant token + secret (configured)"
+        if token_set or secret_set:
+            return "assistant credentials (partial)"
+        return "assistant credentials (not configured)"
+
+    env_name = raw.get("api_key_env")
+    if env_name:
+        state = "set" if os.environ.get(str(env_name)) else "unset"
+        return f"env {env_name} ({state})"
+
+    if provider_type in _HOST_AUTH_LLM_PROVIDERS:
+        return "host login"
+
+    if provider_type in _CODEX_PROVIDERS:
+        if _has_cached_codex_api_key():
+            return "host API key (configured)"
+        return "Codex API key (not configured)"
+
+    default_env = _DEFAULT_LLM_KEY_ENVS.get(provider_type)
+    if default_env:
+        state = "set" if os.environ.get(default_env) else "unset"
+        return f"env {default_env} ({state})"
+    if provider_type == "ollama":
+        return "not required"
+    return "not configured"
 
 
 @app.command(name="add-mcp")
@@ -223,6 +304,7 @@ def add_llm():
             "claude-code",
             "codex-sdk",
             "gemini-sdk",
+            "assistant",
         ],
         default="anthropic",
     )
@@ -265,7 +347,7 @@ def add_llm():
             model_name = raw
     else:
         model_id = _prompt("Model ID")
-        model_name = _prompt("Display name", model_id)
+        model_name = model_id
 
     display_name = _prompt("Display name", model_name)
 
@@ -275,14 +357,46 @@ def add_llm():
     api_key = ""
     api_key_env = ""
     base_url = ""
+    assistant_config: dict[str, str] = {}
 
     if provider in ("claude-sdk", "claude-code"):
         console.print("[green]No API key needed - uses Claude Code authentication.[/green]")
-    elif provider == "codex-sdk":
-        console.print("[green]No API key needed if you have run `codex auth login`.[/green]")
-        console.print("[dim]Or set OPENAI_API_KEY in your environment for direct API access.[/dim]")
+    elif provider == "ollama":
+        console.print("[green]No API key needed - Ollama runs locally.[/green]")
+    elif provider == "assistant":
+        console.print("Enter the Preset workspace and JWT authentication settings.")
+        assistant_config = {
+            "workspace_hash": _prompt("Workspace hash"),
+            "domain": _prompt("Domain"),
+            "api_url": _prompt("Auth API URL"),
+            "api_token": _prompt("API token", password=True),
+            "api_secret": _prompt("API secret", password=True),
+            "conversations_path": _prompt("Conversations path", "/api/v1/copilot/conversations"),
+            "completions_path": _prompt("Completions path", "/api/v1/copilot/completions"),
+        }
+        missing = [field for field, value in assistant_config.items() if not value.strip()]
+        if missing:
+            console.print("[red]Assistant configuration requires: " + ", ".join(missing) + "[/red]")
+            raise typer.Abort()
+        parsed_api_url = urlsplit(assistant_config["api_url"])
+        if parsed_api_url.scheme not in {"http", "https"} or not parsed_api_url.netloc:
+            console.print("[red]Auth API URL must be an absolute HTTP(S) URL[/red]")
+            raise typer.Abort()
+        from testmcpy.llm_profiles import validate_assistant_endpoint_path
+
+        try:
+            for field in ("conversations_path", "completions_path"):
+                validate_assistant_endpoint_path(assistant_config[field], field)
+        except ValueError as error:
+            console.print(f"[red]{error}[/red]")
+            raise typer.Abort()
     else:
-        if provider == "gemini-sdk":
+        if provider == "codex-sdk":
+            console.print(
+                "[yellow]Codex requires an OpenAI API key; an OAuth-only Codex login "
+                "cannot authenticate the Agents SDK.[/yellow]"
+            )
+        elif provider == "gemini-sdk":
             console.print(
                 "[green]Requires a Google API key — get one at https://aistudio.google.com[/green]"
             )
@@ -293,6 +407,7 @@ def add_llm():
             default_env = {
                 "anthropic": "ANTHROPIC_API_KEY",
                 "openai": "OPENAI_API_KEY",
+                "codex-sdk": "OPENAI_API_KEY",
                 "google": "GOOGLE_API_KEY",
                 "gemini-sdk": "GOOGLE_API_KEY",
             }.get(provider, "")
@@ -309,34 +424,49 @@ def add_llm():
     if Confirm.ask("Test credentials now?", default=True):
         console.print("[dim]Sending test prompt...[/dim]")
         try:
-            import httpx
+            from testmcpy.llm_testing import test_llm_provider_connection
 
-            test_data = {
+            test_kwargs: dict[str, Any] = {
                 "provider": provider,
                 "model": model_id,
+                "api_key": api_key or None,
+                "api_key_env": api_key_env or None,
+                "base_url": base_url or None,
                 "timeout": timeout,
             }
-            if api_key:
-                test_data["api_key"] = api_key
-            if api_key_env:
-                test_data["api_key_env"] = api_key_env
-            if base_url:
-                test_data["base_url"] = base_url
-
-            # Try via the running server first
-            resp = httpx.post("http://localhost:8765/api/llm/test", json=test_data, timeout=timeout)
-            result = resp.json()
+            if provider == "assistant":
+                test_kwargs.update(assistant_config)
+            result = asyncio.run(test_llm_provider_connection(**test_kwargs))
             if result.get("success"):
                 console.print(f"[green]Test passed! ({result.get('duration', 0):.2f}s)[/green]")
             else:
-                console.print(f"[red]Test failed: {result.get('error', 'Unknown error')}[/red]")
+                error = str(result.get("error", "Unknown error"))
+                for secret in (
+                    api_key,
+                    assistant_config.get("api_token"),
+                    assistant_config.get("api_secret"),
+                ):
+                    if secret:
+                        error = error.replace(secret, "***")
+                if result.get("tested") is False:
+                    console.print(f"[yellow]Test skipped: {error}[/yellow]")
+                else:
+                    console.print(f"[red]Test failed: {error}[/red]")
         except (ConnectionError, TimeoutError, OSError, RuntimeError, ValueError) as e:
-            console.print(f"[yellow]Could not test (server may not be running): {e}[/yellow]")
+            error = str(e)
+            for secret in (
+                api_key,
+                assistant_config.get("api_token"),
+                assistant_config.get("api_secret"),
+            ):
+                if secret:
+                    error = error.replace(secret, "***")
+            console.print(f"[yellow]Could not test: {error}[/yellow]")
 
     # Step 5: Save
     console.print("\n[bold yellow]Step 5: Save[/bold yellow]")
 
-    provider_entry: dict = {
+    provider_entry: dict[str, Any] = {
         "name": display_name,
         "provider": provider,
         "model": model_id,
@@ -349,55 +479,155 @@ def add_llm():
         provider_entry["api_key_env"] = api_key_env
     if base_url:
         provider_entry["base_url"] = base_url
+    provider_entry.update(assistant_config)
 
-    # Show preview
+    # The entered key is saved but never rendered back to the terminal.
     console.print("\n[bold]Configuration preview:[/bold]")
-    yaml_str = yaml.dump(provider_entry, default_flow_style=False, sort_keys=False)
+    yaml_str = yaml.dump(
+        _redacted_provider_preview(provider_entry),
+        default_flow_style=False,
+        sort_keys=False,
+    )
     console.print(Syntax(yaml_str, "yaml", theme="monokai"))
 
-    # Load existing config
-    config_path = Path.cwd() / ".llm_providers.yaml"
-    if config_path.exists():
-        with open(config_path) as f:
-            config = yaml.safe_load(f) or {}
-    else:
-        config = {"default": None, "profiles": {}}
+    from testmcpy.llm_profiles import (
+        LLM_PROFILE_ID_MAX_LENGTH,
+        LLM_PROFILE_ID_PATTERN,
+        LLMProfile,
+        LLMProfileConfig,
+        LLMProviderConfig,
+    )
 
-    profiles = config.get("profiles", {})
-    profile_ids = list(profiles.keys())
+    profile_config = LLMProfileConfig()
+    if profile_config.load_error:
+        console.print(
+            f"[red]Cannot update invalid .llm_providers.yaml:[/red] {profile_config.load_error}"
+        )
+        raise typer.Exit(code=1)
+    profile_ids = profile_config.list_profiles()
 
     if profile_ids:
-        target_profile = _choose("Add to profile:", profile_ids, default=profile_ids[0])
+        resolved_default = profile_config.get_profile()
+        default_profile = resolved_default.profile_id if resolved_default else profile_ids[0]
+        target_profile = _choose(
+            "Add to profile:",
+            [*profile_ids, _CREATE_LLM_PROFILE_CHOICE],
+            default=default_profile,
+        )
     else:
+        target_profile = _CREATE_LLM_PROFILE_CHOICE
+
+    if target_profile == _CREATE_LLM_PROFILE_CHOICE:
         target_profile = _prompt("Profile ID to create", "prod")
-        profiles[target_profile] = {
-            "name": "Production",
-            "description": "Created by wizard",
-            "providers": [],
-        }
-        config["profiles"] = profiles
-        if not config.get("default"):
-            config["default"] = target_profile
+        if len(target_profile) > LLM_PROFILE_ID_MAX_LENGTH or not re.fullmatch(
+            LLM_PROFILE_ID_PATTERN,
+            target_profile,
+        ):
+            console.print(
+                "[red]Invalid profile ID - start with a letter or number and use at most "
+                "64 letters, numbers, dots, underscores, tildes, or hyphens[/red]"
+            )
+            raise typer.Abort()
+        if target_profile in profile_config.profiles:
+            console.print(f"[red]Profile '{target_profile}' already exists.[/red]")
+            raise typer.Abort()
+        profile_config.add_profile(
+            LLMProfile(
+                profile_id=target_profile,
+                name=target_profile.replace("-", " ").title(),
+                description="Created by wizard",
+            )
+        )
 
-    # If setting as default, unset other defaults
+    if profile_config.get_profile() is None:
+        profile_config.default_profile_id = target_profile
+
+    profile = profile_config.profiles[target_profile]
     if is_default:
-        for p in profiles.get(target_profile, {}).get("providers", []):
-            p["default"] = False
-
-    # Add provider
-    profile = profiles[target_profile]
-    if "providers" not in profile:
-        profile["providers"] = []
-    profile["providers"].append(provider_entry)
-
-    # Write config
-    with open(config_path, "w") as f:
-        yaml.dump(config, f, default_flow_style=False, sort_keys=False)
+        for configured_provider in profile.providers:
+            configured_provider.default = False
+    profile.providers.append(LLMProviderConfig(**provider_entry))
+    profile_config.save()  # type: ignore[no-untyped-call]
 
     console.print(
         f"\n[green]LLM provider '{display_name}' added to profile '{target_profile}'![/green]"
     )
-    console.print(f"[dim]Config saved to {config_path}[/dim]")
+    console.print(Text(f"Config saved to {profile_config.source_path}", style="dim"))
+
+
+@app.command(name="llm-profiles")
+def llm_profiles(
+    profile: Optional[str] = typer.Option(
+        None,
+        "--profile",
+        "-p",
+        help="Show one LLM profile instead of all profiles",
+    ),
+):
+    """List configured LLM profiles and masked credential status."""
+    from testmcpy.llm_profiles import LLMProfileConfig
+
+    profile_config = LLMProfileConfig()
+    if profile_config.load_error:
+        console.print(f"[red]Invalid .llm_providers.yaml:[/red] {profile_config.load_error}")
+        raise typer.Exit(code=1)
+    if profile:
+        selected = profile_config.get_profile(profile)
+        if selected is None:
+            console.print(f"[red]LLM profile '{profile}' was not found.[/red]")
+            raise typer.Exit(code=1)
+        profiles = [(profile, selected)]
+    else:
+        profiles = [
+            (profile_id, profile_config.profiles[profile_id])
+            for profile_id in profile_config.list_profiles()
+        ]
+
+    if not profiles:
+        console.print("[yellow]No LLM profiles configured.[/yellow]")
+        console.print(Text(f"Config: {profile_config.source_path}", style="dim"))
+        return
+
+    table = Table(title="LLM Profiles", show_lines=True)
+    table.add_column("Profile", style="cyan", no_wrap=True)
+    table.add_column("Name")
+    table.add_column("Provider", overflow="fold")
+    table.add_column("Model", overflow="fold")
+    table.add_column("Credentials", overflow="fold")
+    table.add_column("Default", justify="center")
+
+    resolved_default = profile_config.get_profile()
+    default_profile_id = resolved_default.profile_id if resolved_default else None
+    for profile_id, configured_profile in profiles:
+        profile_default = profile_id == default_profile_id
+        if not configured_profile.providers:
+            table.add_row(
+                Text(profile_id),
+                Text(configured_profile.name),
+                Text("-"),
+                Text("-"),
+                Text("not configured"),
+                Text("profile" if profile_default else ""),
+            )
+            continue
+
+        for index, configured_provider in enumerate(configured_profile.providers):
+            defaults = []
+            if profile_default and index == 0:
+                defaults.append("profile")
+            if configured_provider.default:
+                defaults.append("provider")
+            table.add_row(
+                Text(profile_id if index == 0 else ""),
+                Text(configured_profile.name if index == 0 else ""),
+                Text(configured_provider.provider),
+                Text(configured_provider.model),
+                Text(_credential_status(configured_provider)),
+                Text(", ".join(defaults)),
+            )
+
+    console.print(table)
+    console.print(Text(f"Config: {profile_config.source_path}", style="dim"))
 
 
 @app.command(name="add-test")

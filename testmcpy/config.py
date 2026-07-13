@@ -13,6 +13,8 @@ Priority order (highest to lowest):
 from pathlib import Path
 from typing import Any
 
+from .scrubber import register_secrets_from_auth
+
 # Import profile configuration
 try:
     from .mcp_profiles import MCPProfile, list_available_profiles, load_profile
@@ -220,6 +222,7 @@ class Config:
 
                         # Only override if key is relevant and not already set from higher priority
                         if key in self.GENERIC_KEYS | self.TESTMCPY_KEYS:
+                            register_secrets_from_auth({key: value})
                             # For generic keys, only override if not from environment
                             if key in self.GENERIC_KEYS:
                                 if (
@@ -342,7 +345,18 @@ def get_config() -> Config:
     return _config
 
 
-def reload_config():
+def reload_config() -> Config:
     """Reload configuration from all sources."""
     global _config
+
+    # Config delegates profile loading to module-level singletons. Refresh
+    # those first so a new Config cannot retain data from an earlier cwd.
+    from .llm_profiles import reload_llm_profile_config
+    from .mcp_profiles import reload_profile_config
+    from .test_profiles import reload_test_profile_config
+
+    reload_profile_config()
+    reload_llm_profile_config()
+    reload_test_profile_config()
     _config = Config()
+    return _config

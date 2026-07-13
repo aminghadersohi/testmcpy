@@ -724,10 +724,25 @@ class TestGlobalConfigInstance:
 
         with patch("pathlib.Path.exists", return_value=False):
             config1 = get_config()
-            reload_config()
+            reloaded = reload_config()
             config2 = get_config()
 
             assert config1 is not config2
+            assert reloaded is config2
+
+    def test_reload_config_refreshes_profile_caches(self, clean_env, mock_profile_modules):
+        """Test that reload_config() reloads every delegated profile source."""
+        with (
+            patch("testmcpy.mcp_profiles.reload_profile_config") as reload_mcp,
+            patch("testmcpy.llm_profiles.reload_llm_profile_config") as reload_llm,
+            patch("testmcpy.test_profiles.reload_test_profile_config") as reload_tests,
+            patch("pathlib.Path.exists", return_value=False),
+        ):
+            reload_config()
+
+        reload_mcp.assert_called_once_with()
+        reload_llm.assert_called_once_with()
+        reload_tests.assert_called_once_with()
 
 
 class TestEdgeCases:

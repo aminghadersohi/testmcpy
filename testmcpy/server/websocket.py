@@ -14,6 +14,7 @@ import yaml
 from fastapi import WebSocket, WebSocketDisconnect
 
 from testmcpy.config import get_config
+from testmcpy.scrubber import scrub_obj, scrub_text
 from testmcpy.server import run_registry
 from testmcpy.server.run_persistence import RunRecord
 from testmcpy.server.run_registry import RunHandle
@@ -218,7 +219,9 @@ async def handle_chat_websocket(websocket: WebSocket, mcp_client: MCPClient):
                     await llm_provider.close()
 
                 except Exception as e:
-                    await manager.send_message({"type": "error", "content": str(e)}, websocket)
+                    await manager.send_message(
+                        {"type": "error", "content": scrub_text(str(e))}, websocket
+                    )
 
     except WebSocketDisconnect:
         manager.disconnect(websocket)
@@ -230,13 +233,13 @@ async def handle_chat_websocket(websocket: WebSocket, mcp_client: MCPClient):
 def _emit_log(handle: RunHandle, msg: str) -> None:
     """Publish a free-text log line through the registry. The registry
     buffers it AND forwards to whoever (if anyone) is currently attached."""
-    run_registry.log(handle, msg)
+    run_registry.log(handle, scrub_text(msg))
 
 
 def _emit_event(handle: RunHandle, event_msg: dict[str, Any]) -> None:
     """Publish a structured event (test_start / test_complete / file_start /
     all_complete / error) through the registry."""
-    run_registry.event(handle, event_msg)
+    run_registry.event(handle, scrub_obj(event_msg))
 
 
 def _emit_run_error(
@@ -345,10 +348,10 @@ async def _run_test_command(handle: RunHandle, data: dict, config) -> None:
     """
     test_path = Path(data.get("test_path", ""))
     test_name = data.get("test_name")
-    model = data.get("model") or config.default_model
-    provider = data.get("provider") or config.default_provider
+    requested_model = data.get("model")
+    requested_provider = data.get("provider")
     profile = data.get("profile")
-    llm_profile_id = data.get("llm_profile")
+    llm_profile_id = data.get("llm_profile") or None
 
     if not test_path.exists():
         _emit_run_error(handle, data, f"Test file not found: {test_path}")
@@ -364,6 +367,7 @@ async def _run_test_command(handle: RunHandle, data: dict, config) -> None:
     # (so its _owns_mcp_client is False). Closing it per run matters for a
     # benchmark, which opens one client per combo × file.
     adhoc_client = None
+    runner = None
 
     try:
         # Load test cases
@@ -382,53 +386,34 @@ async def _run_test_command(handle: RunHandle, data: dict, config) -> None:
         suite_provider_config = file_data.get("provider_config", {})
         suite_model = file_data.get("model")
 
-        effective_provider = suite_provider or provider
+        effective_requested_provider = suite_provider or requested_provider
         # A suite-level `model: default` sentinel must not mask an explicitly
         # chosen model (e.g. a benchmark combo). When ``_force_model`` is set the
         # passed model wins — same precedence the CLI applies for `--model`.
         if data.get("_force_model"):
-            effective_model = model
+            effective_requested_model = requested_model
         else:
-            effective_model = suite_model or model
+            effective_requested_model = suite_model or requested_model
 
-        # Build the final provider_config. For assistant/chatbot we fold in
-        # the assistant-specific fields (workspace_hash, domain, JWT auth,
-        # path overrides) from the selected LLM profile in `.llm_providers.yaml`
-        # — without these, AssistantProvider.__init__ raises ValueError. The
-        # CLI accepts them as flags; the websocket has no flags so it must
-        # pick them up from the profile config the user already maintains.
-        # Precedence: explicit suite YAML `provider_config:` > LLM profile.
-        effective_provider_config: dict[str, Any] = dict(suite_provider_config or {})
-        if effective_provider in ("assistant", "chatbot") and llm_profile_id:
-            from testmcpy.llm_profiles import load_llm_profile
+        # Profile values provide defaults; explicit run/suite values select a
+        # compatible entry and suite credentials still win below.
+        from testmcpy.llm_profiles import resolve_llm_provider_selection
 
-            llm_profile = load_llm_profile(llm_profile_id)
-            if llm_profile:
-                # Prefer the entry in the profile whose `provider` matches the
-                # one we're about to run; otherwise fall back to the profile
-                # default. This handles the common pattern of an LLM profile
-                # bundling several providers (e.g. claude-sdk + assistant) where
-                # the suite YAML pins which one to use.
-                assistant_entry = (
-                    next(
-                        (p for p in llm_profile.providers if p.provider == effective_provider),
-                        None,
-                    )
-                    or llm_profile.get_default_provider()
-                )
-                if assistant_entry:
-                    for fname in (
-                        "workspace_hash",
-                        "domain",
-                        "api_token",
-                        "api_secret",
-                        "api_url",
-                        "conversations_path",
-                        "completions_path",
-                    ):
-                        val = getattr(assistant_entry, fname, None)
-                        if val and not effective_provider_config.get(fname):
-                            effective_provider_config[fname] = val
+        effective_provider, effective_model, profile_provider_config = (
+            resolve_llm_provider_selection(
+                effective_requested_provider,
+                effective_requested_model,
+                llm_profile_id,
+                fallback_provider=config.default_provider,
+                fallback_model=config.default_model,
+            )
+        )
+        if not effective_provider or not effective_model:
+            raise ValueError("Model and provider must be configured")
+        effective_provider_config: dict[str, Any] = {
+            **profile_provider_config,
+            **(suite_provider_config or {}),
+        }
 
         # Ad-hoc assistant credentials supplied directly in the message (no saved
         # profile) — how the benchmark dialog passes the user's run-args. Suite
@@ -534,6 +519,7 @@ async def _run_test_command(handle: RunHandle, data: dict, config) -> None:
             hide_tool_output=False,
             log_callback=lambda msg: _emit_log(handle, msg),
             provider_config=effective_provider_config,
+            llm_profile=llm_profile_id,
             # We emit our own per-test "🧪 Running test … / 📝 Prompt / ⏱️ Timeout"
             # block below, so the runner must not also emit its own (would create
             # two collapsible test groups in the UI for every test).
@@ -677,6 +663,9 @@ async def _run_test_command(handle: RunHandle, data: dict, config) -> None:
         _emit_log(handle, f"Traceback:\n{tb}")
         _emit_run_error(handle, data, str(e), traceback=tb)
     finally:
+        if runner is not None:
+            with contextlib.suppress(Exception):
+                await runner.cleanup()
         # Release the ad-hoc client's HTTP session + auth token. Cached profile
         # clients are shared and must NOT be closed here.
         if adhoc_client is not None:

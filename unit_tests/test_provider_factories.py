@@ -128,6 +128,48 @@ class TestClaudeSDKProviderTokenInjection:
             p = ClaudeSDKProvider(model="m", api_key="sk-direct", api_key_env="MY_CLAUDE_TOK")
             assert p._cli_token == "sk-direct"
 
+    def test_named_keyless_profile_does_not_inherit_default_profile_token(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        from testmcpy.llm_profiles import (
+            LLMProfileNotFoundError,
+            reload_llm_profile_config,
+            resolve_llm_provider_config,
+        )
+
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / ".llm_providers.yaml").write_text(
+            """
+default: secret
+profiles:
+  secret:
+    name: Secret
+    providers:
+      - name: Claude
+        provider: claude-sdk
+        model: claude-test
+        api_key: default-secret-token
+  host:
+    name: Host login
+    providers:
+      - name: Claude
+        provider: claude-sdk
+        model: claude-test
+"""
+        )
+        reload_llm_profile_config()
+
+        kwargs = resolve_llm_provider_config("claude-sdk", "claude-test", "host")
+        provider = create_llm_provider("claude-sdk", "claude-test", **kwargs)
+
+        assert kwargs["llm_profile_id"] == "host"
+        assert provider._cli_token is None
+
+        with pytest.raises(LLMProfileNotFoundError, match="LLM profile 'missing' was not found"):
+            resolve_llm_provider_config("claude-sdk", "claude-test", "missing")
+
     def test_clean_env_with_oauth_token_drops_api_key(self):
         env = ClaudeSDKProvider._build_clean_env(
             source_env={"ANTHROPIC_API_KEY": "old", "CLAUDE_CODE_FOO": "x", "PATH": "/bin"},
@@ -161,8 +203,12 @@ class TestResolveClaudeCliToken:
         profile = LLMProfile(profile_id="p", name="p", description="", providers=providers)
 
         class _Cfg:
-            def get_profile(self, _pid=None):
-                return profile
+            load_error = None
+            default_profile_id = "p"
+            profiles = {"p": profile}
+
+            def get_profile(self, profile_id=None):
+                return profile if profile_id in (None, "p") else None
 
         return _Cfg()
 
@@ -214,18 +260,54 @@ class TestResolveClaudeCliToken:
             with patch.dict("os.environ", {"MY_TOK": "sk-ant-oat-env"}):
                 assert resolve_claude_cli_token("m") == "sk-ant-oat-env"
 
-    def test_none_when_no_claude_provider(self):
-        cfg = self._cfg([self._prov(name="x", provider="anthropic", model="m", api_key="k")])
-        with patch("testmcpy.llm_profiles.get_llm_profile_config", return_value=cfg):
-            assert resolve_claude_cli_token("m") is None
+    def test_configured_api_key_env_that_resolves_empty_fails_closed(self):
+        from testmcpy.llm_profiles import LLMProfileConfigError
 
-    def test_bad_profile_config_degrades_to_none(self):
-        # A malformed/unreadable profile must not break claude-sdk construction.
+        cfg = self._cfg(
+            [self._prov(name="x", provider="claude-sdk", model="m", api_key_env="MY_TOK")]
+        )
+        with (
+            patch("testmcpy.llm_profiles.get_llm_profile_config", return_value=cfg),
+            patch.dict("os.environ", {}, clear=True),
+            pytest.raises(LLMProfileConfigError, match="resolved to an empty value"),
+        ):
+            resolve_claude_cli_token("m")
+
+    def test_keyless_named_profile_intentionally_uses_host_login(self):
+        cfg = self._cfg([self._prov(name="x", provider="claude-sdk", model="m")])
+        with patch("testmcpy.llm_profiles.get_llm_profile_config", return_value=cfg):
+            assert resolve_claude_cli_token("m", "p") is None
+
+    def test_default_profile_without_claude_provider_fails_closed(self):
+        from testmcpy.llm_profiles import LLMProfileConfigError
+
+        cfg = self._cfg([self._prov(name="x", provider="anthropic", model="m", api_key="k")])
+        with (
+            patch("testmcpy.llm_profiles.get_llm_profile_config", return_value=cfg),
+            pytest.raises(LLMProfileConfigError, match="no provider matching 'claude-sdk'"),
+        ):
+            resolve_claude_cli_token("m")
+
+    def test_bad_profile_config_fails_closed(self):
         with patch(
             "testmcpy.llm_profiles.get_llm_profile_config",
             side_effect=ValueError("corrupt profile"),
         ):
-            assert resolve_claude_cli_token("m") is None
+            with pytest.raises(ValueError, match="corrupt profile"):
+                resolve_claude_cli_token("m")
+
+    def test_resolved_token_is_registered_for_result_scrubbing(self):
+        from testmcpy.scrubber import reset_cache, scrub_text
+
+        token = "resolved-claude-profile-token-12345"
+        cfg = self._cfg([self._prov(name="x", provider="claude-sdk", model="m", api_key=token)])
+        reset_cache()
+        try:
+            with patch("testmcpy.llm_profiles.get_llm_profile_config", return_value=cfg):
+                assert resolve_claude_cli_token("m") == token
+            assert token not in scrub_text(f"provider echoed {token}")
+        finally:
+            reset_cache()
 
 
 class TestClaudeProviderApiKeyKwargs:

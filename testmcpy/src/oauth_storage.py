@@ -15,6 +15,8 @@ from key_value.aio.protocols import AsyncKeyValue
 from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 from pydantic import BaseModel
 
+from testmcpy.scrubber import register_secret
+
 _KEY_FILE_NAME = "oauth.key"
 _TOKEN_METADATA_COLLECTION = "testmcpy-oauth-token-metadata"
 _OAUTH_SESSION_COLLECTION = "testmcpy-oauth-sessions"
@@ -169,9 +171,15 @@ class PersistentTokenStorageAdapter(TokenStorageAdapter):
 
     async def get_tokens(self) -> OAuthToken | None:
         snapshot = await self._load_snapshot()
-        return snapshot.tokens if snapshot is not None else None
+        tokens = snapshot.tokens if snapshot is not None else None
+        if tokens is not None:
+            register_secret(tokens.access_token)
+            register_secret(tokens.refresh_token)
+        return tokens
 
     async def set_tokens(self, tokens: OAuthToken) -> None:
+        register_secret(tokens.access_token)
+        register_secret(tokens.refresh_token)
         if not self._snapshot_loaded:
             await self._load_snapshot()
         client_info = (

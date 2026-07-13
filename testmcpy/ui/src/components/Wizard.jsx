@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react'
+import React, { useState, useCallback, useRef } from 'react'
 import { ChevronLeft, ChevronRight, Check, Circle, SkipForward } from 'lucide-react'
 
 /**
@@ -17,6 +17,8 @@ function Wizard({ steps, onComplete, onCancel, title, data, setData }) {
   const [validationError, setValidationError] = useState(null)
   const [direction, setDirection] = useState('forward') // 'forward' or 'backward'
   const [animating, setAnimating] = useState(false)
+  const [completing, setCompleting] = useState(false)
+  const completingRef = useRef(false)
 
   const isLastStep = currentStep === steps.length - 1
   const isFirstStep = currentStep === 0
@@ -32,7 +34,8 @@ function Wizard({ steps, onComplete, onCancel, title, data, setData }) {
     }, 150)
   }, [])
 
-  const handleNext = useCallback(() => {
+  const handleNext = useCallback(async () => {
+    if (completingRef.current) return
     setValidationError(null)
 
     // Run validation if step has a validate function
@@ -46,33 +49,52 @@ function Wizard({ steps, onComplete, onCancel, title, data, setData }) {
     }
 
     if (isLastStep) {
-      onComplete(data)
+      completingRef.current = true
+      setCompleting(true)
+      try {
+        const result = await onComplete(data)
+        if (result === false) {
+          setValidationError('Could not save. Review the error and try again.')
+        }
+      } catch (error) {
+        setValidationError(error?.message || 'Could not save. Try again.')
+      } finally {
+        completingRef.current = false
+        setCompleting(false)
+      }
     } else {
       animateTransition(currentStep + 1, 'forward')
     }
   }, [step, data, isLastStep, currentStep, onComplete, animateTransition])
 
   const handleBack = useCallback(() => {
+    if (completing) return
     setValidationError(null)
     if (!isFirstStep) {
       animateTransition(currentStep - 1, 'backward')
     }
-  }, [isFirstStep, currentStep, animateTransition])
+  }, [completing, isFirstStep, currentStep, animateTransition])
 
   const handleSkip = useCallback(() => {
+    if (completing) return
     setValidationError(null)
     if (step.optional && !isLastStep) {
       animateTransition(currentStep + 1, 'forward')
     }
-  }, [step, isLastStep, currentStep, animateTransition])
+  }, [completing, step, isLastStep, currentStep, animateTransition])
 
   const handleStepClick = useCallback((idx) => {
+    if (completing) return
     // Allow clicking on previous steps or current step
     if (idx < currentStep) {
       setValidationError(null)
       animateTransition(idx, 'backward')
     }
-  }, [currentStep, animateTransition])
+  }, [completing, currentStep, animateTransition])
+
+  const handleCancel = useCallback(() => {
+    if (!completing) onCancel?.()
+  }, [completing, onCancel])
 
   // Determine step completion status
   const getStepStatus = (idx) => {
@@ -101,7 +123,7 @@ function Wizard({ steps, onComplete, onCancel, title, data, setData }) {
                   )}
                   <button
                     onClick={() => handleStepClick(idx)}
-                    disabled={idx > currentStep}
+                    disabled={completing || idx > currentStep}
                     className={`flex items-center gap-1.5 flex-shrink-0 px-2 py-1 rounded-md transition-all duration-200 ${
                       status === 'current'
                         ? 'bg-primary/10 text-primary'
@@ -140,7 +162,10 @@ function Wizard({ steps, onComplete, onCancel, title, data, setData }) {
         </div>
 
         {/* Step Content */}
-        <div className="flex-1 overflow-auto p-6 min-h-0">
+        <div
+          className={`flex-1 overflow-auto p-6 min-h-0 ${completing ? 'pointer-events-none opacity-70' : ''}`}
+          aria-busy={completing}
+        >
           <div className={`transition-all duration-150 ${
             animating
               ? direction === 'forward'
@@ -175,7 +200,8 @@ function Wizard({ steps, onComplete, onCancel, title, data, setData }) {
           <div>
             {onCancel && (
               <button
-                onClick={onCancel}
+                onClick={handleCancel}
+                disabled={completing}
                 className="btn btn-ghost text-sm"
               >
                 Cancel
@@ -186,6 +212,7 @@ function Wizard({ steps, onComplete, onCancel, title, data, setData }) {
             {!isFirstStep && (
               <button
                 onClick={handleBack}
+                disabled={completing}
                 className="btn btn-secondary text-sm"
               >
                 <ChevronLeft size={14} />
@@ -195,6 +222,7 @@ function Wizard({ steps, onComplete, onCancel, title, data, setData }) {
             {step.optional && !isLastStep && (
               <button
                 onClick={handleSkip}
+                disabled={completing}
                 className="btn btn-ghost text-sm"
               >
                 <SkipForward size={14} />
@@ -203,12 +231,13 @@ function Wizard({ steps, onComplete, onCancel, title, data, setData }) {
             )}
             <button
               onClick={handleNext}
+              disabled={completing}
               className="btn btn-primary text-sm"
             >
               {isLastStep ? (
                 <>
                   <Check size={14} />
-                  Finish
+                  {completing ? 'Saving...' : 'Finish'}
                 </>
               ) : (
                 <>

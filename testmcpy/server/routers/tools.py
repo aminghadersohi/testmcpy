@@ -1,5 +1,6 @@
 """Tool management and debugging endpoints."""
 
+import contextlib
 import json
 import logging
 import re
@@ -10,12 +11,11 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from testmcpy.config import get_config
+from testmcpy.llm_profiles import resolve_llm_provider_config, resolve_llm_provider_selection
 from testmcpy.mcp_profiles import load_profile
+from testmcpy.scrubber import scrub_obj, scrub_text
 from testmcpy.server.state import get_default_mcp_client, get_mcp_clients
-from testmcpy.src.llm_integration import (
-    claude_provider_api_key_kwargs,
-    create_llm_provider,
-)
+from testmcpy.src.llm_integration import create_llm_provider
 from testmcpy.src.mcp_client import MCPClient, MCPError, MCPToolCall
 
 logger = logging.getLogger(__name__)
@@ -291,8 +291,13 @@ async def optimize_tool_docs(request: OptimizeDocsRequest) -> OptimizeDocsRespon
     Uses an LLM to evaluate tool documentation against best practices
     for LLM tool calling and provides actionable suggestions.
     """
-    model = request.model or config.default_model
-    provider = request.provider or config.default_provider
+    provider, model, _ = resolve_llm_provider_selection(
+        request.provider,
+        request.model,
+        request.llm_profile,
+        fallback_provider=config.default_provider,
+        fallback_model=config.default_model,
+    )
 
     if not model or not provider:
         raise HTTPException(
@@ -300,6 +305,7 @@ async def optimize_tool_docs(request: OptimizeDocsRequest) -> OptimizeDocsRespon
             detail="Model and provider must be configured. Set DEFAULT_MODEL and DEFAULT_PROVIDER in config.",
         )
 
+    llm_provider = None
     try:
         # Initialize LLM provider (use Haiku for cost efficiency)
         llm_model = model
@@ -307,8 +313,7 @@ async def optimize_tool_docs(request: OptimizeDocsRequest) -> OptimizeDocsRespon
             # Use Haiku for analysis to save costs
             llm_model = "claude-haiku-4-5"
 
-        # Inject a UI-entered Claude token for claude-sdk/code providers.
-        kwargs = claude_provider_api_key_kwargs(provider, llm_model, request.llm_profile)
+        kwargs = resolve_llm_provider_config(provider, llm_model, request.llm_profile)
         llm_provider = create_llm_provider(provider, llm_model, **kwargs)
         await llm_provider.initialize()
 
@@ -496,15 +501,16 @@ Call the submit_analysis tool NOW with complete data."""
 
             # Debug logging
             print("\n=== LLM Response Debug ===")
-            print(f"Tool calls count: {len(result.tool_calls) if result.tool_calls else 0}")
+            safe_tool_calls = scrub_obj(result.tool_calls)
+            print(f"Tool calls count: {len(safe_tool_calls) if safe_tool_calls else 0}")
             print(f"Response text length: {len(result.response)}")
-            print(f"Response preview: {result.response[:200]}")
+            print(f"Response preview: {scrub_text(result.response[:200])}")
 
             # First, check if the LLM made a tool call
-            if result.tool_calls and len(result.tool_calls) > 0:
+            if safe_tool_calls and len(safe_tool_calls) > 0:
                 # LLM used the submit_analysis tool - perfect!
-                print(f"Tool calls: {result.tool_calls}")
-                tool_call = result.tool_calls[0]
+                print(f"Tool calls: {safe_tool_calls}")
+                tool_call = safe_tool_calls[0]
                 print(f"Tool call name: {tool_call.get('name')}")
                 print(f"Tool call keys: {list(tool_call.keys())}")
 
@@ -540,7 +546,7 @@ Call the submit_analysis tool NOW with complete data."""
             # If no tool call, try to parse JSON from response text
             if not analysis_data:
                 print("No tool call found, attempting to parse JSON from response text")
-                response_text = result.response.strip()
+                response_text = scrub_text(result.response).strip()
 
                 # Remove any markdown code blocks
                 response_text = re.sub(r"```(?:json)?\s*", "", response_text)
@@ -606,8 +612,8 @@ Call the submit_analysis tool NOW with complete data."""
         except Exception as e:
             # Fallback to basic response if parsing fails
             print(f"✗ Failed to parse LLM response: {e}")
-            print(f"Response text (first 500 chars): {result.response[:500]}")
-            print(f"Tool calls: {result.tool_calls}")
+            print(f"Response text (first 500 chars): {scrub_text(result.response[:500])}")
+            print(f"Tool calls: {safe_tool_calls}")
             analysis_data = {
                 "clarity_score": 50,
                 "issues": [
@@ -616,14 +622,12 @@ Call the submit_analysis tool NOW with complete data."""
                         "severity": "high",
                         "issue": "LLM response parsing failed - check server logs for details",
                         "current": request.description,
-                        "suggestion": f"Error: {str(e)}",
+                        "suggestion": f"Error: {scrub_text(str(e))}",
                     }
                 ],
                 "improved_description": request.description,
                 "improvements": [],
             }
-
-        await llm_provider.close()
 
         # Build response
         return OptimizeDocsResponse(
@@ -652,7 +656,14 @@ Call the submit_analysis tool NOW with complete data."""
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to optimize documentation: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to optimize documentation: {scrub_text(str(e))}",
+        )
+    finally:
+        if llm_provider is not None:
+            with contextlib.suppress(Exception):
+                await llm_provider.close()
 
 
 @router.post("/mcp/optimize-docs/eval", response_model=DocEvalResponse)
@@ -667,8 +678,13 @@ async def eval_tool_docs(request: DocEvalRequest) -> DocEvalResponse:
     start_time = time.time()
     total_cost = 0.0
 
-    model = request.model or config.default_model
-    provider = request.provider or config.default_provider
+    provider, model, _ = resolve_llm_provider_selection(
+        request.provider,
+        request.model,
+        request.llm_profile,
+        fallback_provider=config.default_provider,
+        fallback_model=config.default_model,
+    )
 
     if not model or not provider:
         raise HTTPException(
@@ -676,14 +692,14 @@ async def eval_tool_docs(request: DocEvalRequest) -> DocEvalResponse:
             detail="Model and provider must be configured.",
         )
 
+    llm_provider = None
     try:
         # Use Haiku for cost efficiency
         llm_model = model
         if provider == "anthropic" and "haiku" not in model.lower():
             llm_model = "claude-haiku-4-5"
 
-        # Inject a UI-entered Claude token for claude-sdk/code providers.
-        kwargs = claude_provider_api_key_kwargs(provider, llm_model, request.llm_profile)
+        kwargs = resolve_llm_provider_config(provider, llm_model, request.llm_profile)
         llm_provider = create_llm_provider(provider, llm_model, **kwargs)
         await llm_provider.initialize()
 
@@ -722,11 +738,15 @@ right names despite the ambiguous prompt.
 
 Return ONLY the JSON array, no other text."""
 
-        gen_result = await llm_provider.generate(gen_prompt)
+        gen_result = await llm_provider.generate_with_tools(
+            prompt=gen_prompt,
+            tools=[],
+            timeout=60.0,
+        )
         total_cost += gen_result.cost
 
         # Parse generated prompts
-        gen_text = gen_result.text.strip()
+        gen_text = scrub_text(gen_result.response).strip()
         # Strip markdown code fences if present
         if gen_text.startswith("```"):
             gen_text = re.sub(r"^```\w*\n?", "", gen_text)
@@ -799,8 +819,9 @@ Return ONLY the JSON array, no other text."""
             # Determine what the LLM did
             actual_tool = None
             actual_params = None
-            if eval_result.tool_calls:
-                tc = eval_result.tool_calls[0]
+            safe_tool_calls = scrub_obj(eval_result.tool_calls)
+            if safe_tool_calls:
+                tc = safe_tool_calls[0]
                 actual_tool = tc.get("name")
                 actual_params = tc.get("arguments", {})
 
@@ -894,8 +915,6 @@ Return ONLY the JSON array, no other text."""
                 )
             )
 
-        await llm_provider.close()
-
         # ------------------------------------------------------------------
         # Phase 3: Aggregate scores
         # ------------------------------------------------------------------
@@ -961,12 +980,16 @@ Return ONLY the JSON array, no other text."""
     except json.JSONDecodeError as e:
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to parse LLM-generated test prompts: {e}",
+            detail=f"Failed to parse LLM-generated test prompts: {scrub_text(str(e))}",
         )
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Doc eval failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Doc eval failed: {scrub_text(str(e))}")
+    finally:
+        if llm_provider is not None:
+            with contextlib.suppress(Exception):
+                await llm_provider.close()
 
 
 @router.post("/tools/compare")

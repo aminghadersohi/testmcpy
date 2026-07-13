@@ -5,8 +5,12 @@ SELECTED MCP profile's mcp_url/auth, not the default profile's) and the
 TESTMCPY_CHAT_OAUTH_LOGIN-gated interactive OAuth re-login path.
 """
 
+import json
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
+
+from testmcpy.src.mcp_client import MCPToolResult
 
 OAUTH_ERROR = ValueError(
     "No usable cached OAuth token for http://mock-mcp:3000/mcp. Authenticate the MCP profile first."
@@ -21,6 +25,7 @@ def make_fake_provider(init_error: Exception | None = None) -> AsyncMock:
     provider.generate_with_tools.return_value = SimpleNamespace(
         response="hello",
         tool_calls=[],
+        tool_results=[],
         thinking=None,
         token_usage={"prompt": 1, "completion": 1, "total": 2},
         cost=0.0,
@@ -52,6 +57,279 @@ class TestChatSelectedProfileAuth:
         assert kwargs["mcp_url"] == mock_mcp_client.base_url
         assert kwargs["auth"] == {"type": "oauth", "oauth_auto_discover": True}
 
+    def test_chat_uses_native_results_without_replaying_tool_calls(self, client, mock_mcp_client):
+        native_provider = make_fake_provider()
+        native_provider.generate_with_tools.return_value = SimpleNamespace(
+            response="created once",
+            tool_calls=[{"name": "health_check", "arguments": {"mutate": True}, "id": "native-1"}],
+            tool_results=[
+                {
+                    "tool_call_id": "native-1",
+                    "content": "already executed by provider",
+                    "is_error": False,
+                }
+            ],
+            thinking=None,
+            token_usage=None,
+            cost=0.0,
+            duration=0.1,
+        )
+
+        with patch("testmcpy.server.api.create_llm_provider", return_value=native_provider):
+            native_response = client.post("/api/chat", json=CHAT_BODY)
+
+        assert native_response.status_code == 200
+        assert native_response.json()["tool_calls"][0]["result"] == ("already executed by provider")
+        mock_mcp_client.call_tool.assert_not_awaited()
+
+        non_native_provider = make_fake_provider()
+        non_native_provider.generate_with_tools.return_value = SimpleNamespace(
+            response="execute through MCP",
+            tool_calls=[{"name": "health_check", "arguments": {}, "id": "mcp-1"}],
+            tool_results=[],
+            thinking=None,
+            token_usage=None,
+            cost=0.0,
+            duration=0.1,
+        )
+
+        with patch("testmcpy.server.api.create_llm_provider", return_value=non_native_provider):
+            non_native_response = client.post("/api/chat", json=CHAT_BODY)
+
+        assert non_native_response.status_code == 200
+        assert non_native_response.json()["tool_calls"][0]["result"] == "OK"
+        mock_mcp_client.call_tool.assert_awaited_once()
+
+    def test_chat_pairs_sparse_native_results_by_tool_call_id(self, client, mock_mcp_client):
+        provider = make_fake_provider()
+        provider.generate_with_tools.return_value = SimpleNamespace(
+            response="partial native execution",
+            tool_calls=[
+                {"name": "health_check", "arguments": {}, "id": "native-1"},
+                {"name": "get_data", "arguments": {"id": "42"}, "id": "native-2"},
+            ],
+            tool_results=[
+                MCPToolResult(tool_call_id="native-2", content="second result"),
+            ],
+            thinking=None,
+            token_usage=None,
+            cost=0.0,
+            duration=0.1,
+        )
+
+        with patch("testmcpy.server.api.create_llm_provider", return_value=provider):
+            response = client.post("/api/chat", json=CHAT_BODY)
+
+        assert response.status_code == 200
+        tool_calls = response.json()["tool_calls"]
+        assert tool_calls[0]["result"] is None
+        assert tool_calls[0]["error"] == "Provider did not return a result for this tool call"
+        assert tool_calls[1]["result"] == "second result"
+        mock_mcp_client.call_tool.assert_not_awaited()
+
+    def test_chat_pairs_reordered_native_results_by_tool_call_id(self, client, mock_mcp_client):
+        provider = make_fake_provider()
+        provider.generate_with_tools.return_value = SimpleNamespace(
+            response="reordered native execution",
+            tool_calls=[
+                {"name": "health_check", "arguments": {}, "id": "native-1"},
+                {"name": "get_data", "arguments": {"id": "42"}, "id": "native-2"},
+            ],
+            tool_results=[
+                {"tool_call_id": "native-2", "content": "second result"},
+                {"tool_call_id": "native-1", "content": "first result"},
+            ],
+            thinking=None,
+            token_usage=None,
+            cost=0.0,
+            duration=0.1,
+        )
+
+        with patch("testmcpy.server.api.create_llm_provider", return_value=provider):
+            response = client.post("/api/chat", json=CHAT_BODY)
+
+        assert response.status_code == 200
+        assert [call["result"] for call in response.json()["tool_calls"]] == [
+            "first result",
+            "second result",
+        ]
+        mock_mcp_client.call_tool.assert_not_awaited()
+
+    def test_chat_uses_positional_native_results_only_when_complete(self, client, mock_mcp_client):
+        provider = make_fake_provider()
+        provider.generate_with_tools.return_value = SimpleNamespace(
+            response="idless native execution",
+            tool_calls=[
+                {"name": "health_check", "arguments": {}, "id": "native-1"},
+                {"name": "get_data", "arguments": {"id": "42"}, "id": "native-2"},
+            ],
+            tool_results=[{"content": "first result"}, {"content": "second result"}],
+            thinking=None,
+            token_usage=None,
+            cost=0.0,
+            duration=0.1,
+        )
+
+        with patch("testmcpy.server.api.create_llm_provider", return_value=provider):
+            complete = client.post("/api/chat", json=CHAT_BODY)
+
+        assert [call["result"] for call in complete.json()["tool_calls"]] == [
+            "first result",
+            "second result",
+        ]
+
+        provider.generate_with_tools.return_value.tool_results = [{"content": "ambiguous result"}]
+        with patch("testmcpy.server.api.create_llm_provider", return_value=provider):
+            partial = client.post("/api/chat", json=CHAT_BODY)
+
+        assert partial.status_code == 200
+        assert [call["result"] for call in partial.json()["tool_calls"]] == [None, None]
+        assert all(call["is_error"] for call in partial.json()["tool_calls"])
+        mock_mcp_client.call_tool.assert_not_awaited()
+
+    def test_chat_stream_does_not_replay_non_claude_sdk_tool_calls(self, client, mock_mcp_client):
+        from testmcpy.src.llm_integration import CodexSDKProvider
+
+        provider = CodexSDKProvider(model="codex-o3", openai_api_key="sk-test")
+        provider.initialize = AsyncMock()
+        provider.close = AsyncMock()
+        provider.generate_with_tools = AsyncMock(
+            return_value=SimpleNamespace(
+                response="native SDK response",
+                tool_calls=[
+                    {"name": "health_check", "arguments": {}, "id": "native-1"},
+                    {"name": "get_data", "arguments": {"id": "42"}, "id": "native-2"},
+                ],
+                tool_results=[
+                    MCPToolResult(tool_call_id="native-2", content="second result"),
+                ],
+                thinking=None,
+                token_usage=None,
+                cost=0.0,
+                duration=0.1,
+            )
+        )
+
+        with patch("testmcpy.server.api.create_llm_provider", return_value=provider):
+            response = client.post("/api/chat/stream", json=CHAT_BODY)
+
+        assert response.status_code == 200
+        events = [
+            json.loads(line.removeprefix("data: "))
+            for line in response.text.splitlines()
+            if line.startswith("data: ")
+        ]
+        tool_results = [event["data"] for event in events if event["type"] == "tool_result"]
+        assert tool_results[0]["result"] is None
+        assert tool_results[1]["result"] == "second result"
+        provider.generate_with_tools.assert_awaited_once()
+        mock_mcp_client.call_tool.assert_not_awaited()
+
+    def test_chat_accepts_gemini_native_results_with_matching_ids(self, client, mock_mcp_client):
+        from testmcpy.src.llm_integration import GeminiSDKProvider
+
+        provider = GeminiSDKProvider(model="gemini-sdk-flash", api_key="AIza-test")
+        provider.initialize = AsyncMock()
+        provider.close = AsyncMock()
+        provider.generate_with_tools = AsyncMock(
+            return_value=SimpleNamespace(
+                response="native Gemini response",
+                tool_calls=[
+                    {"name": "health_check", "arguments": {}, "id": "gemini-call-1"},
+                ],
+                tool_results=[
+                    MCPToolResult(
+                        tool_call_id="gemini-call-1",
+                        content={"status": "healthy"},
+                    ),
+                ],
+                thinking=None,
+                token_usage=None,
+                cost=0.0,
+                duration=0.1,
+            )
+        )
+
+        with patch("testmcpy.server.api.create_llm_provider", return_value=provider):
+            response = client.post("/api/chat", json=CHAT_BODY)
+
+        assert response.status_code == 200
+        assert response.json()["tool_calls"][0]["result"] == {"status": "healthy"}
+        mock_mcp_client.call_tool.assert_not_awaited()
+
+    def test_chat_sdk_missing_native_results_fails_closed(self, client, mock_mcp_client):
+        from testmcpy.src.llm_integration import CodexSDKProvider
+
+        provider = CodexSDKProvider(model="codex-o3", openai_api_key="sk-test")
+        provider.initialize = AsyncMock()
+        provider.close = AsyncMock()
+        provider.generate_with_tools = AsyncMock(
+            return_value=SimpleNamespace(
+                response="SDK contract violation",
+                tool_calls=[
+                    {"name": "health_check", "arguments": {}, "id": "native-1"},
+                ],
+                tool_results=[],
+                thinking=None,
+                token_usage=None,
+                cost=0.0,
+                duration=0.1,
+            )
+        )
+
+        with patch("testmcpy.server.api.create_llm_provider", return_value=provider):
+            response = client.post("/api/chat", json=CHAT_BODY)
+
+        assert response.status_code == 200
+        tool_call = response.json()["tool_calls"][0]
+        assert tool_call["result"] is None
+        assert tool_call["is_error"] is True
+        assert tool_call["error"] == "Provider did not return a result for this tool call"
+        mock_mcp_client.call_tool.assert_not_awaited()
+
+    def test_chat_rejects_explicit_missing_llm_profile(self, client):
+        response = client.post(
+            "/api/chat",
+            json={
+                "message": "hey",
+                "llm_profile": "missing",
+                "profiles": ["test:Test MCP"],
+            },
+        )
+
+        assert response.status_code == 404
+        assert response.json()["detail"] == "LLM profile 'missing' was not found"
+
+    def test_chat_treats_blank_llm_profile_as_unselected(self, client):
+        body = {**CHAT_BODY, "llm_profile": ""}
+        with patch("testmcpy.server.api.create_llm_provider", return_value=make_fake_provider()):
+            response = client.post("/api/chat", json=body)
+
+        assert response.status_code == 200
+
+    def test_chat_reports_malformed_profile_config_as_conflict(self, client):
+        Path(".llm_providers.yaml").write_text("profiles: [not-a-mapping]\n")
+
+        response = client.post(
+            "/api/chat",
+            json={"message": "hey", "llm_profile": "missing"},
+        )
+
+        assert response.status_code == 409
+        assert "Invalid LLM profile configuration" in response.json()["detail"]
+
+    def test_chat_stream_reports_malformed_profile_config_detail(self, client):
+        Path(".llm_providers.yaml").write_text("profiles: [not-a-mapping]\n")
+
+        response = client.post(
+            "/api/chat/stream",
+            json={"message": "hey", "profiles": ["test:Test MCP"]},
+        )
+
+        assert response.status_code == 200
+        assert "Invalid LLM profile configuration" in response.text
+        assert "Internal error" not in response.text
+
     def test_chat_stream_passes_selected_profile_mcp_url_and_auth(self, client, mock_mcp_client):
         mock_mcp_client.auth_config = {"type": "oauth", "oauth_auto_discover": True}
         with patch(
@@ -63,6 +341,239 @@ class TestChatSelectedProfileAuth:
         kwargs = factory.call_args.kwargs
         assert kwargs["mcp_url"] == mock_mcp_client.base_url
         assert kwargs["auth"] == {"type": "oauth", "oauth_auto_discover": True}
+
+    def test_chat_resolves_profile_api_key_env(self, client, monkeypatch):
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "runtime-profile-key")
+        Path(".llm_providers.yaml").write_text(
+            """
+default: env-profile
+profiles:
+  env-profile:
+    name: Environment profile
+    providers:
+      - name: Claude
+        provider: anthropic
+        model: claude-test
+        api_key_env: ANTHROPIC_API_KEY
+        default: true
+"""
+        )
+        body = {
+            "message": "hey",
+            "llm_profile": "env-profile",
+            "profiles": ["test:Test MCP"],
+        }
+
+        with patch(
+            "testmcpy.server.api.create_llm_provider", return_value=make_fake_provider()
+        ) as factory:
+            response = client.post("/api/chat", json=body)
+
+        assert response.status_code == 200
+        assert factory.call_args.kwargs["api_key"] == "runtime-profile-key"
+
+    def test_chat_openai_profile_missing_bound_env_never_uses_ambient_key(
+        self, client, monkeypatch
+    ):
+        ambient_secret = "ambient-openai-key-must-not-be-used"
+        monkeypatch.setenv("OPENAI_API_KEY", ambient_secret)
+        monkeypatch.delenv("PROFILE_OPENAI_KEY", raising=False)
+        Path(".llm_providers.yaml").write_text(
+            """
+profiles:
+  isolated:
+    name: Isolated OpenAI
+    providers:
+      - name: OpenAI
+        provider: openai
+        model: gpt-test
+        api_key_env: PROFILE_OPENAI_KEY
+"""
+        )
+
+        with patch("testmcpy.server.api.create_llm_provider") as factory:
+            response = client.post(
+                "/api/chat",
+                json={
+                    "message": "hey",
+                    "llm_profile": "isolated",
+                    "profiles": ["test:Test MCP"],
+                },
+            )
+
+        assert response.status_code == 409
+        assert "configured API key" in response.json()["detail"]
+        assert ambient_secret not in response.text
+        factory.assert_not_called()
+
+    def test_chat_default_profile_missing_bound_env_never_uses_ambient_key(
+        self, client, monkeypatch
+    ):
+        ambient_secret = "ambient-default-key-must-not-be-used"
+        monkeypatch.setenv("OPENAI_API_KEY", ambient_secret)
+        monkeypatch.delenv("PROFILE_OPENAI_KEY", raising=False)
+        Path(".llm_providers.yaml").write_text(
+            """
+default: isolated
+profiles:
+  isolated:
+    name: Isolated OpenAI
+    providers:
+      - name: OpenAI
+        provider: openai
+        model: gpt-test
+        api_key_env: PROFILE_OPENAI_KEY
+"""
+        )
+
+        with patch("testmcpy.server.api.create_llm_provider") as factory:
+            response = client.post(
+                "/api/chat",
+                json={
+                    "message": "hey",
+                    "profiles": ["test:Test MCP"],
+                },
+            )
+
+        assert response.status_code == 409
+        assert "configured API key" in response.json()["detail"]
+        assert ambient_secret not in response.text
+        factory.assert_not_called()
+
+    def test_chat_anthropic_profile_blank_key_expression_never_uses_ambient_key(
+        self, client, monkeypatch
+    ):
+        ambient_secret = "ambient-anthropic-key-must-not-be-used"
+        monkeypatch.setenv("ANTHROPIC_API_KEY", ambient_secret)
+        monkeypatch.delenv("PROFILE_ANTHROPIC_KEY", raising=False)
+        Path(".llm_providers.yaml").write_text(
+            """
+profiles:
+  isolated:
+    name: Isolated Anthropic
+    providers:
+      - name: Anthropic
+        provider: anthropic
+        model: claude-test
+        api_key: ${PROFILE_ANTHROPIC_KEY}
+"""
+        )
+
+        with patch("testmcpy.server.api.create_llm_provider") as factory:
+            response = client.post(
+                "/api/chat",
+                json={
+                    "message": "hey",
+                    "llm_profile": "isolated",
+                    "profiles": ["test:Test MCP"],
+                },
+            )
+
+        assert response.status_code == 409
+        assert "configured API key" in response.json()["detail"]
+        assert ambient_secret not in response.text
+        factory.assert_not_called()
+
+    def test_chat_passes_complete_assistant_profile_runtime_config(self, client):
+        Path(".llm_providers.yaml").write_text(
+            """
+default: assistant-profile
+profiles:
+  assistant-profile:
+    name: Assistant profile
+    providers:
+      - name: Assistant
+        provider: assistant
+        model: assistant-model
+        workspace_hash: workspace-1
+        domain: example.test
+        api_token: token-1
+        api_secret: secret-1
+        api_url: https://example.test/auth
+        conversations_path: /conversations
+        completions_path: /completions
+        default: true
+"""
+        )
+        body = {
+            "message": "hey",
+            "llm_profile": "assistant-profile",
+            "profiles": ["test:Test MCP"],
+        }
+
+        with patch(
+            "testmcpy.server.api.create_llm_provider", return_value=make_fake_provider()
+        ) as factory:
+            response = client.post("/api/chat", json=body)
+
+        assert response.status_code == 200
+        kwargs = factory.call_args.kwargs
+        assert factory.call_args.args == ("assistant", "assistant-model")
+        assert kwargs["workspace_hash"] == "workspace-1"
+        assert kwargs["domain"] == "example.test"
+        assert kwargs["api_token"] == "token-1"
+        assert kwargs["api_secret"] == "secret-1"
+        assert kwargs["api_url"] == "https://example.test/auth"
+
+    def test_chat_and_stream_scrub_profile_key_echoed_by_provider(self, client):
+        secret = "profile-openai-secret-12345"
+        Path(".llm_providers.yaml").write_text(
+            f"""
+default: redaction-profile
+profiles:
+  redaction-profile:
+    name: Redaction profile
+    providers:
+      - name: OpenAI
+        provider: openai
+        model: gpt-test
+        api_key: {secret}
+        default: true
+"""
+        )
+        provider = make_fake_provider()
+        provider.generate_with_tools.return_value = SimpleNamespace(
+            response=f"Error: upstream echoed Bearer {secret}",
+            tool_calls=[],
+            thinking=f"debug {secret}",
+            token_usage=None,
+            cost=0.0,
+            duration=0.1,
+        )
+        body = {
+            "message": "hey",
+            "llm_profile": "redaction-profile",
+            "profiles": ["test:Test MCP"],
+        }
+
+        with patch("testmcpy.server.api.create_llm_provider", return_value=provider):
+            response = client.post("/api/chat", json=body)
+            stream_response = client.post("/api/chat/stream", json=body)
+
+        assert response.status_code == 200
+        assert stream_response.status_code == 200
+        assert secret not in response.text
+        assert secret not in stream_response.text
+        assert "***REDACTED***" in response.text
+        assert "***REDACTED***" in stream_response.text
+
+    def test_chat_and_stream_close_provider_after_generation_error(self, client):
+        regular_provider = make_fake_provider()
+        regular_provider.generate_with_tools.side_effect = RuntimeError("generation failed")
+        stream_provider = make_fake_provider()
+        stream_provider.generate_with_tools.side_effect = RuntimeError("generation failed")
+
+        with patch(
+            "testmcpy.server.api.create_llm_provider",
+            side_effect=[regular_provider, stream_provider],
+        ):
+            regular = client.post("/api/chat", json=CHAT_BODY)
+            streamed = client.post("/api/chat/stream", json=CHAT_BODY)
+
+        assert regular.status_code == 500
+        assert streamed.status_code == 200
+        regular_provider.close.assert_awaited_once()
+        stream_provider.close.assert_awaited_once()
 
 
 class TestChatOAuthLoginFlag:

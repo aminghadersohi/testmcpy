@@ -377,6 +377,12 @@ class TestCodexSDKProvider:
         p = create_llm_provider("codex-sdk", "codex-o3", openai_api_key="sk-test")
         assert isinstance(p, CodexSDKProvider)
 
+    def test_factory_maps_profile_api_key(self) -> None:
+        p = create_llm_provider("codex-sdk", "codex-o3", api_key="profile-key")
+
+        assert isinstance(p, CodexSDKProvider)
+        assert p.openai_api_key == "profile-key"
+
     def test_factory_alias_codex_cli(self) -> None:
         p = create_llm_provider("codex-cli", "codex-o3", openai_api_key="sk-test")
         assert isinstance(p, CodexSDKProvider)
@@ -618,11 +624,20 @@ class TestGeminiSDKProvider:
         class _FakeFunctionCall:
             name = "list_dashboards"
             args = {"page": 1}
+            id = "fc-1"
 
         class _FakeFunctionResponse:
             name = "list_dashboards"
             id = "fc-1"
             response = {"dashboards": ["d1", "d2"]}
+
+        class _FakeIdlessFunctionCall:
+            name = "health_check"
+            args = {}
+
+        class _FakeIdlessFunctionResponse:
+            name = "health_check"
+            response = {"status": "healthy"}
 
         class _FakePart:
             text = "Found 2 dashboards."
@@ -631,7 +646,10 @@ class TestGeminiSDKProvider:
             parts = [_FakePart()]
 
         fc_event = MagicMock()
-        fc_event.get_function_calls.return_value = [_FakeFunctionCall()]
+        fc_event.get_function_calls.return_value = [
+            _FakeFunctionCall(),
+            _FakeIdlessFunctionCall(),
+        ]
         fc_event.get_function_responses.return_value = []
         fc_event.is_final_response.return_value = False
         fc_event.content = None
@@ -639,7 +657,10 @@ class TestGeminiSDKProvider:
 
         fr_event = MagicMock()
         fr_event.get_function_calls.return_value = []
-        fr_event.get_function_responses.return_value = [_FakeFunctionResponse()]
+        fr_event.get_function_responses.return_value = [
+            _FakeFunctionResponse(),
+            _FakeIdlessFunctionResponse(),
+        ]
         fr_event.is_final_response.return_value = False
         fr_event.content = None
         fr_event.usage_metadata = _FakeUsage()
@@ -706,11 +727,17 @@ class TestGeminiSDKProvider:
             result = await p.generate_with_tools("list dashboards", [], timeout=30.0)
 
         # tool_calls populated
-        assert len(result.tool_calls) == 1
+        assert len(result.tool_calls) == 2
         assert result.tool_calls[0]["name"] == "list_dashboards"
+        assert result.tool_calls[0]["id"] == "fc-1"
+        assert result.tool_calls[1]["name"] == "health_check"
+        assert "id" not in result.tool_calls[1]
         # tool_results populated — no second MCP execution needed
-        assert len(result.tool_results) == 1
+        assert len(result.tool_results) == 2
         assert result.tool_results[0].tool_name == "list_dashboards"
+        assert result.tool_results[0].tool_call_id == "fc-1"
+        assert result.tool_results[1].tool_name == "health_check"
+        assert result.tool_results[1].tool_call_id == ""
         # usage summed across two usage-bearing events
         assert result.token_usage is not None
         assert result.token_usage["prompt"] == 20  # 10 + 10

@@ -5,10 +5,12 @@ Provides AI-powered documentation improvement for MCP tools.
 """
 
 import asyncio
+import contextlib
 from dataclasses import dataclass
 from typing import Any
 
 from testmcpy.config import get_config
+from testmcpy.llm_profiles import resolve_llm_provider_selection
 from testmcpy.src.llm_integration import create_llm_provider
 from testmcpy.src.mcp_client import MCPTool
 
@@ -28,30 +30,55 @@ class OptimizationResult:
 class DocsOptimizer:
     """Optimizes MCP tool documentation using LLM."""
 
-    def __init__(self, model: str | None = None, provider: str | None = None):
+    def __init__(
+        self,
+        model: str | None = None,
+        provider: str | None = None,
+        llm_profile: str | None = None,
+    ):
         """
         Initialize docs optimizer.
 
         Args:
             model: LLM model to use (defaults to config)
             provider: LLM provider to use (defaults to config)
+            llm_profile: LLM profile ID (defaults to the configured default profile)
         """
         config = get_config()
-        self.model = model or config.default_model or "claude-haiku-4-5"
-        self.provider = provider or config.default_provider or "anthropic"
+        self.llm_profile = llm_profile
+        self.provider, self.model, self.provider_config = resolve_llm_provider_selection(
+            provider,
+            model,
+            llm_profile,
+            fallback_provider=config.default_provider or "anthropic",
+            fallback_model=config.default_model or "claude-haiku-4-5",
+        )
+        if not self.provider or not self.model:
+            raise ValueError("Model and provider must be configured")
         self.llm = None
 
     async def initialize(self):
         """Initialize the LLM provider."""
         if not self.llm:
-            self.llm = create_llm_provider(self.provider, self.model)
-            await self.llm.initialize()
+            llm = create_llm_provider(
+                self.provider,
+                self.model,
+                **self.provider_config,
+            )
+            self.llm = llm
+            try:
+                await llm.initialize()
+            except BaseException:
+                self.llm = None
+                with contextlib.suppress(Exception, asyncio.CancelledError):
+                    await llm.close()
+                raise
 
     async def close(self):
         """Close the LLM provider."""
-        if self.llm:
-            await self.llm.close()
-            self.llm = None
+        llm, self.llm = self.llm, None
+        if llm:
+            await llm.close()
 
     async def optimize_tool_docs(self, tool: MCPTool) -> OptimizationResult:
         """
@@ -69,7 +96,7 @@ class DocsOptimizer:
         prompt = self._build_optimization_prompt(tool)
 
         # Generate optimization
-        response = await self.llm.generate(prompt)
+        response = await self.llm.generate_with_tools(prompt=prompt, tools=[])
 
         # Parse response
         result = self._parse_optimization_response(
@@ -154,7 +181,7 @@ Keep responses concise and actionable."""
                 parameter_improvements[param_name.strip()] = param_desc.strip()
 
         # Calculate approximate cost (rough estimate)
-        total_tokens = token_usage.get("total_tokens", 0)
+        total_tokens = token_usage.get("total", token_usage.get("total_tokens", 0))
         cost = total_tokens * 0.000001  # Rough estimate
 
         return OptimizationResult(
@@ -187,7 +214,10 @@ Keep responses concise and actionable."""
 
 
 async def optimize_tool(
-    tool: MCPTool, model: str | None = None, provider: str | None = None
+    tool: MCPTool,
+    model: str | None = None,
+    provider: str | None = None,
+    llm_profile: str | None = None,
 ) -> OptimizationResult:
     """
     Optimize documentation for a single tool.
@@ -196,11 +226,12 @@ async def optimize_tool(
         tool: MCPTool to optimize
         model: LLM model to use
         provider: LLM provider to use
+        llm_profile: LLM profile ID to use
 
     Returns:
         OptimizationResult with improvements
     """
-    optimizer = DocsOptimizer(model, provider)
+    optimizer = DocsOptimizer(model, provider, llm_profile)
     try:
         result = await optimizer.optimize_tool_docs(tool)
         return result

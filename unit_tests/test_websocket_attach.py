@@ -110,6 +110,81 @@ async def _wait(event: asyncio.Event, timeout: float = 2.0) -> None:
 
 
 @pytest.mark.asyncio
+async def test_run_test_uses_profile_selection_when_provider_and_model_are_omitted(
+    tmp_path, monkeypatch
+):
+    """A profile-only WS request must not be paired with global LLM defaults."""
+    test_path = tmp_path / "profile-only.yaml"
+    test_path.write_text("name: profile-only\nprompt: hello\n")
+    resolver_calls = []
+    runner_kwargs = {}
+
+    def resolve_selection(provider, model, profile_id, **fallbacks):
+        resolver_calls.append((provider, model, profile_id, fallbacks))
+        return "openai", "profile-model", {"api_key": "profile-secret"}
+
+    class CapturingRunner:
+        def __init__(self, **kwargs):
+            runner_kwargs.update(kwargs)
+
+        async def initialize(self):
+            raise RuntimeError("stop after construction")
+
+        async def cleanup(self):
+            return None
+
+    class FakeMCPClient:
+        def __init__(self, base_url, auth=None):
+            self.base_url = base_url
+            self.auth_config = auth
+
+        async def initialize(self):
+            return None
+
+        async def close(self):
+            return None
+
+    class Config:
+        default_provider = "anthropic"
+        default_model = "global-model"
+
+        @staticmethod
+        def get_mcp_url():
+            return "http://127.0.0.1:8084/mcp"
+
+    import testmcpy.llm_profiles as profile_module
+    import testmcpy.src.mcp_client as mcp_client_module
+
+    monkeypatch.setattr(profile_module, "resolve_llm_provider_selection", resolve_selection)
+    monkeypatch.setattr(mcp_client_module, "MCPClient", FakeMCPClient)
+    monkeypatch.setattr(ws_module, "TestRunner", CapturingRunner)
+    handle = await run_registry.create_run(kind="single", meta={})
+
+    await ws_module._run_test_command(
+        handle,
+        {
+            "test_path": str(test_path),
+            "llm_profile": "profile-only",
+            "mcp_url": "http://127.0.0.1:8084/mcp",
+        },
+        Config(),
+    )
+
+    assert resolver_calls == [
+        (
+            None,
+            None,
+            "profile-only",
+            {"fallback_provider": "anthropic", "fallback_model": "global-model"},
+        )
+    ]
+    assert runner_kwargs["provider"] == "openai"
+    assert runner_kwargs["model"] == "profile-model"
+    assert runner_kwargs["provider_config"] == {"api_key": "profile-secret"}
+    assert runner_kwargs["llm_profile"] == "profile-only"
+
+
+@pytest.mark.asyncio
 async def test_disconnect_does_not_cancel_the_running_task(monkeypatch):
     """Browser reload mid-run must leave the asyncio.Task alive. Before
     the run-registry refactor (SC-108184) the WS dispatcher's

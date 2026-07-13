@@ -27,6 +27,9 @@ def isolated_storage(tmp_path, monkeypatch):
 def client(mock_mcp_client, tmp_workspace, monkeypatch):
     """Create a TestClient with mocked MCP state and workspace directory."""
     monkeypatch.chdir(tmp_workspace)
+    from testmcpy.mcp_profiles import reload_profile_config
+
+    reload_profile_config()
 
     # Patch the module-level globals in api.py before importing app
     with (
@@ -45,6 +48,9 @@ def client(mock_mcp_client, tmp_workspace, monkeypatch):
 def client_no_mcp(tmp_workspace, monkeypatch):
     """Create a TestClient with no MCP client connected."""
     monkeypatch.chdir(tmp_workspace)
+    from testmcpy.mcp_profiles import reload_profile_config
+
+    reload_profile_config()
 
     # Patch get_mcp_url to return None so the lifespan skips MCP init entirely
     with (

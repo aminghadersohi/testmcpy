@@ -9,18 +9,21 @@ import logging
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
 import tempfile
 import time
 import uuid
 from abc import ABC, abstractmethod
+from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import httpx
+from key_value.shared.errors.base import BaseKeyValueError
 
-from testmcpy.scrubber import register_secrets_from_auth
+from testmcpy.scrubber import register_secret, register_secrets_from_auth, scrub_obj, scrub_text
 
 # Import MCP components (we'll handle the import error gracefully)
 try:
@@ -68,6 +71,16 @@ class LLMResult:
     tti_ms: int | None = None  # Time to first token in milliseconds
     raw_response: Any | None = None
     logs: list[str] = field(default_factory=list)  # Provider execution logs
+
+    def __post_init__(self) -> None:
+        """Redact provider-controlled text before any caller can emit or persist it."""
+        self.response = scrub_text(self.response)
+        self.tool_calls = scrub_obj(self.tool_calls)
+        self.tool_results = scrub_obj(self.tool_results)
+        if self.thinking is not None:
+            self.thinking = scrub_text(self.thinking)
+        self.raw_response = scrub_obj(self.raw_response)
+        self.logs = scrub_obj(self.logs)
 
 
 @dataclass
@@ -1488,9 +1501,9 @@ class BaseSDKProvider(LLMProvider, ABC):
        defects (bad SDK kwargs, AttributeError, etc.) surface as a real
        failure instead of being recorded as a silent 0-score result.
     6. **Auth / token resolution** — Bearer/JWT/OAuth/oauth_auto_discover
-       is resolved here so a fix in one place covers every SDK provider
-       (the previous hand-rolled cache paths in Codex/Gemini never matched
-       what ``fastmcp.FileTokenStorage`` actually writes).
+       is resolved here so a fix in one place covers every SDK provider.
+       Interactive OAuth and SDK providers share FastMCP's persistent
+       ``TokenStorageAdapter`` cache.
     """
 
     # Subclasses override (optional) — used as the logger suffix.
@@ -1578,6 +1591,7 @@ class BaseSDKProvider(LLMProvider, ABC):
         await self._validate_credentials()
         token = await self._resolve_mcp_bearer_token()
         if token:
+            register_secret(token)
             self._mcp_headers = {"Authorization": f"Bearer {token}"}
             self._logger.info("MCP server configured with auth token")
         else:
@@ -1789,50 +1803,53 @@ class BaseSDKProvider(LLMProvider, ABC):
     async def _read_cached_oauth_token(self) -> str | None:
         """Reuse the access token that fastmcp's OAuth flow already cached.
 
-        Uses :class:`fastmcp.client.auth.oauth.FileTokenStorage` — the actual
-        public API. The previous hand-rolled cache paths in CodexSDKProvider
-        and GeminiSDKProvider (``~/.fastmcp/oauth-mcp-client-cache/{url-encoded
-        mcp_url}.json``) did NOT match what fastmcp actually writes (it keys
-        storage by server base URL via ``TokenStorageAdapter``). Centralising
-        here fixes that latent bug for both.
+        FastMCP 2.14 accepts an ``AsyncKeyValue`` backend and wraps it in its
+        own ``TokenStorageAdapter``. :class:`MCPOAuth` and this reader use the
+        same persistent backend and full, normalized MCP URL cache key, so
+        tokens for different endpoints on one host remain isolated.
 
         Returns ``None`` when there is no cached token or the cached payload
-        is malformed/expired — callers expecting auth then surface a clear
+        is malformed or expired — callers expecting auth then surface a clear
         re-authentication error instead of silently going un-authenticated.
         """
-        try:
-            from urllib.parse import urlparse  # noqa: PLC0415
+        from .oauth_storage import create_oauth_token_storage  # noqa: PLC0415
 
-            from fastmcp.client.auth.oauth import FileTokenStorage  # noqa: PLC0415
-        except ImportError as e:
-            self._logger.warning("fastmcp not available for cached-token lookup: %s", e)
+        if not self.mcp_url:
+            self._logger.warning("Cannot read cached OAuth token without an MCP URL")
             return None
-        parsed = urlparse(self.mcp_url)
-        server_base_url = f"{parsed.scheme}://{parsed.netloc}"
+        server_url = self.mcp_url.rstrip("/")
         try:
-            storage = FileTokenStorage(server_url=server_base_url)
+            storage = create_oauth_token_storage(server_url)
             oauth_token = await storage.get_tokens()
-        except (OSError, ValueError) as e:
-            self._logger.warning("Failed to read cached OAuth token for %s: %s", server_base_url, e)
+            get_token_expiry = getattr(storage, "get_token_expiry", None)
+            token_expiry = await get_token_expiry() if get_token_expiry else None
+        except (OSError, ValueError, sqlite3.DatabaseError, BaseKeyValueError) as e:
+            self._logger.warning("Failed to read cached OAuth token for %s: %s", server_url, e)
             return None
         if oauth_token is None:
             self._logger.warning(
                 "No cached OAuth token for %s — authenticate the MCP profile "
                 "(MCP Profiles page or smoke test) and re-run.",
-                server_base_url,
+                server_url,
+            )
+            return None
+        if token_expiry is not None and time.time() >= token_expiry - 30:
+            self._logger.warning(
+                "Cached OAuth token for %s is expired — authenticate the MCP profile again.",
+                server_url,
             )
             return None
         access_token = getattr(oauth_token, "access_token", None)
-        if not access_token:
+        if not isinstance(access_token, str) or not access_token:
             self._logger.warning(
                 "Cached OAuth payload for %s is missing access_token — "
                 "authenticate the MCP profile again to refresh it.",
-                server_base_url,
+                server_url,
             )
             return None
         self._logger.info(
             "Reusing cached OAuth token for %s (length: %d)",
-            server_base_url,
+            server_url,
             len(access_token),
         )
         return access_token
@@ -1901,41 +1918,26 @@ def resolve_claude_cli_token(
     token entered through the UI, even paths that have no request body to
     thread it through (CLI chat, docs optimizer, runner tools, websocket chat).
 
-    Searches the named profile — or the default profile when
-    ``llm_profile_id`` is None — for a provider config in the Claude family
-    (:data:`CLAUDE_SDK_PROVIDERS`). Prefers one whose ``model`` matches, else
-    the profile's default/first such provider. Returns the direct ``api_key``
-    or the value of the named ``api_key_env``; ``None`` when nothing is
-    configured (the caller then falls back to the host ``claude`` login).
-
-    This is a best-effort fallback: a malformed/unreadable profile config
-    degrades to ``None`` (host login) rather than breaking every
-    ``ClaudeSDKProvider`` construction.
+    Selection goes through the shared runtime resolver so malformed profiles,
+    missing named profiles, and configured keys that resolve empty fail closed.
+    A keyless matching profile (or no configured default profile) intentionally
+    returns ``None`` so callers can use the host's ``claude`` login. A configured
+    default for another provider remains an isolation boundary and raises.
     """
-    from testmcpy.llm_profiles import get_llm_profile_config
+    from testmcpy.llm_profiles import resolve_llm_provider_selection
 
-    try:
-        profile = get_llm_profile_config().get_profile(llm_profile_id)
-        if not profile:
-            return None
-        candidates = [p for p in profile.providers if p.provider in CLAUDE_SDK_PROVIDERS]
-        if not candidates:
-            return None
-        chosen = None
-        if model:
-            chosen = next((p for p in candidates if p.model == model), None)
-        if chosen is None:
-            chosen = next((p for p in candidates if p.default), None) or candidates[0]
-        if chosen.api_key:
-            return chosen.api_key
-        if chosen.api_key_env:
-            return os.environ.get(chosen.api_key_env)
+    _, _, runtime_config = resolve_llm_provider_selection(
+        "claude-sdk",
+        model,
+        llm_profile_id,
+        fallback_provider="claude-sdk",
+        fallback_model=model,
+    )
+    token = runtime_config.get("api_key")
+    if not isinstance(token, str) or not token:
         return None
-    except (OSError, ValueError, KeyError, AttributeError, TypeError) as e:
-        _claude_sdk_logger.warning(
-            "resolve_claude_cli_token: ignoring bad LLM profile config: %s", e
-        )
-        return None
+    register_secret(token)
+    return token
 
 
 def claude_provider_api_key_kwargs(
@@ -1982,6 +1984,7 @@ class ClaudeSDKProvider(BaseSDKProvider):
         log_callback=None,
         api_key: str | None = None,
         api_key_env: str | None = None,
+        llm_profile_id: str | None = None,
     ):
         super().__init__(model=model, mcp_url=mcp_url, auth=auth)
         self.log_callback = log_callback
@@ -1993,8 +1996,9 @@ class ClaudeSDKProvider(BaseSDKProvider):
         self._cli_token = (
             api_key
             or (os.environ.get(api_key_env) if api_key_env else None)
-            or resolve_claude_cli_token(model)
+            or resolve_claude_cli_token(model, llm_profile_id)
         )
+        register_secret(self._cli_token)
         # The Claude SDK consumes an MCP server config dict shaped like
         # {"type": "http", "url": ..., "headers": {...}} — built in initialize().
         self._mcp_server_config: dict[str, Any] | None = None
@@ -2763,6 +2767,10 @@ class AssistantProvider(LLMProvider):
                 "Set it in .llm_providers.yaml (completions_path key under the provider) "
                 "or pass --assistant-completions-path on the CLI."
             )
+        from testmcpy.llm_profiles import validate_assistant_endpoint_path
+
+        validate_assistant_endpoint_path(self.conversations_path, "conversations_path")
+        validate_assistant_endpoint_path(self.completions_path, "completions_path")
 
         # Auth must come from .llm_providers.yaml or explicit CLI flags.
         # No fallback to MCP config — assistant and MCP are separate concerns.
@@ -2772,6 +2780,8 @@ class AssistantProvider(LLMProvider):
         self.api_token = api_token or ""
         self.api_secret = api_secret or ""
         self.api_url = api_url or ""
+        register_secret(self.api_token)
+        register_secret(self.api_secret)
 
         # Derive base workspace URL. Both workspace_hash and domain are
         # required — environment alone isn't enough since we don't ship
@@ -3229,13 +3239,14 @@ class AssistantProvider(LLMProvider):
             data = resp.json()
             self._session_token = data.get("payload", {}).get("access_token", "")
             if not self._session_token:
-                raise ValueError(f"No access_token in auth response: {data}")
+                raise ValueError("No access_token in auth response")
+            register_secret(self._session_token)
             _assistant_logger.info(
                 "[Assistant] Session token obtained (length: %d)", len(self._session_token)
             )
         except httpx.HTTPStatusError as e:
             raise RuntimeError(
-                f"Auth failed: HTTP {e.response.status_code} - {e.response.text}"
+                f"Auth failed: HTTP {e.response.status_code} - {scrub_text(e.response.text)}"
             ) from e
         except httpx.ConnectError as e:
             raise RuntimeError(f"Auth connection failed: {e}") from e
@@ -3260,7 +3271,8 @@ class AssistantProvider(LLMProvider):
             _assistant_logger.info("[Assistant] Conversation created: %s", self._conversation_id)
         except httpx.HTTPStatusError as e:
             raise RuntimeError(
-                f"Conversation creation failed: HTTP {e.response.status_code} - {e.response.text}"
+                "Conversation creation failed: "
+                f"HTTP {e.response.status_code} - {scrub_text(e.response.text)}"
             ) from e
 
     def _build_headers(self) -> dict[str, str]:
@@ -3848,7 +3860,7 @@ class CodexSDKProvider(BaseSDKProvider):
 
     MCP server auth (bearer / jwt / oauth) is resolved by
     :class:`BaseSDKProvider` — including ``oauth_auto_discover`` via the
-    proper :class:`fastmcp.client.auth.oauth.FileTokenStorage` API.
+    shared FastMCP ``TokenStorageAdapter`` cache.
     """
 
     LOGGER_NAME = "CodexSDKProvider"
@@ -3890,6 +3902,7 @@ class CodexSDKProvider(BaseSDKProvider):
                 "(.llm_providers.yaml) or configure the Codex CLI with an "
                 "API key so it is stored in ~/.codex/auth.json."
             )
+        register_secret(self.openai_api_key)
 
     @classmethod
     def _vendor_expected_errors(cls) -> tuple[type[BaseException], ...]:
@@ -4273,7 +4286,7 @@ class GeminiSDKProvider(BaseSDKProvider):
 
     MCP server auth (bearer / jwt / oauth) is resolved by
     :class:`BaseSDKProvider` — including ``oauth_auto_discover`` via the
-    proper :class:`fastmcp.client.auth.oauth.FileTokenStorage` API.
+    shared FastMCP ``TokenStorageAdapter`` cache.
     """
 
     LOGGER_NAME = "GeminiSDKProvider"
@@ -4395,8 +4408,8 @@ class GeminiSDKProvider(BaseSDKProvider):
             )
 
             tool_calls: list[dict[str, Any]] = []
-            # Indexed by function name for response correlation.
-            func_responses_by_name: dict[str, Any] = {}
+            func_responses_by_id: defaultdict[str, deque[Any]] = defaultdict(deque)
+            idless_func_responses_by_name: defaultdict[str, deque[Any]] = defaultdict(deque)
             response_parts: list[str] = []
             # Accumulate usage across all model-response events (each tool
             # round-trip can produce one; the final synthesis produces
@@ -4413,16 +4426,22 @@ class GeminiSDKProvider(BaseSDKProvider):
             ):
                 # Collect function calls made by the model.
                 for fc in event.get_function_calls():
-                    tool_calls.append(
-                        {
-                            "name": fc.name,
-                            "arguments": dict(fc.args) if fc.args else {},
-                        }
-                    )
+                    tool_call = {
+                        "name": fc.name,
+                        "arguments": dict(fc.args) if fc.args else {},
+                    }
+                    raw_call_id = getattr(fc, "id", None)
+                    if raw_call_id is not None and raw_call_id != "":
+                        tool_call["id"] = str(raw_call_id)
+                    tool_calls.append(tool_call)
                 # Collect function responses (already executed by McpToolset)
                 # so test_runner.py does not re-execute them.
                 for fr in event.get_function_responses():
-                    func_responses_by_name[fr.name] = fr
+                    raw_response_id = getattr(fr, "id", None)
+                    if raw_response_id is not None and raw_response_id != "":
+                        func_responses_by_id[str(raw_response_id)].append(fr)
+                    elif getattr(fr, "name", None):
+                        idless_func_responses_by_name[str(fr.name)].append(fr)
                 # Collect final response text.
                 if event.is_final_response() and event.content:
                     for part in event.content.parts or []:
@@ -4443,11 +4462,17 @@ class GeminiSDKProvider(BaseSDKProvider):
             # test_runner knows these calls are already executed.
             mcp_tool_results: list[MCPToolResult] = []
             for tc in tool_calls:
-                fr = func_responses_by_name.get(tc["name"])
-                if fr is not None:
+                call_id = str(tc["id"]) if tc.get("id") not in (None, "") else None
+                responses = (
+                    func_responses_by_id.get(call_id)
+                    if call_id is not None
+                    else idless_func_responses_by_name.get(tc["name"])
+                )
+                if responses:
+                    fr = responses.popleft()
                     mcp_tool_results.append(
                         MCPToolResult(
-                            tool_call_id=getattr(fr, "id", tc["name"]),
+                            tool_call_id=call_id or "",
                             tool_name=tc["name"],
                             content=getattr(fr, "response", {}),
                             is_error=False,
@@ -4523,6 +4548,15 @@ def create_llm_provider(provider: str, model: str, **kwargs) -> LLMProvider:
         raise ValueError(f"Unknown provider: {provider}. Available: {list(providers.keys())}")
 
     provider_class = providers[provider]
+
+    # Provider responses and errors can echo credentials supplied directly by
+    # library callers, so register every credential-shaped kwarg before use.
+    register_secrets_from_auth(kwargs)
+
+    # Profiles use a common ``api_key`` field; Codex names the same
+    # constructor argument ``openai_api_key``.
+    if provider in {"codex-sdk", "codex-cli", "codex"} and "api_key" in kwargs:
+        kwargs.setdefault("openai_api_key", kwargs.pop("api_key"))
 
     # Filter kwargs to only include parameters the provider accepts
     import inspect

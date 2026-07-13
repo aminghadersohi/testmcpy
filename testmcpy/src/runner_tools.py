@@ -10,11 +10,13 @@ Defines a pluggable interface for different test execution backends:
 """
 
 import asyncio
+import contextlib
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
+from ..llm_profiles import resolve_llm_provider_selection
 from .llm_integration import LLMProvider, create_llm_provider
 from .mcp_client import MCPClient, MCPToolCall
 
@@ -203,15 +205,21 @@ class MCPRunner(BaseRunnerTool):
         self,
         mcp_url: str | None = None,
         mcp_client: MCPClient | None = None,
-        model: str = "claude-sonnet-4-6",
-        provider: str = "anthropic",
+        model: str | None = None,
+        provider: str | None = None,
+        llm_profile: str | None = None,
     ):
         self._name = "mcp-client"
         self.mcp_url = mcp_url
         self.mcp_client = mcp_client
         self._owns_mcp_client = mcp_client is None
-        self.model = model
-        self.provider_name = provider
+        self._model_override = model
+        self._provider_override = provider
+        # Preserve the historical pre-initialize attributes while allowing an
+        # omitted provider/model to be supplied by the selected LLM profile.
+        self.model = model or "claude-sonnet-4-6"
+        self.provider_name = provider or "anthropic"
+        self.llm_profile = llm_profile
         self.llm_provider: LLMProvider | None = None
         self._initialized = False
 
@@ -224,13 +232,37 @@ class MCPRunner(BaseRunnerTool):
         if self._initialized:
             return
 
-        # Initialize MCP client
-        if self.mcp_client is None and self.mcp_url:
-            self.mcp_client = MCPClient(self.mcp_url)
-            await self.mcp_client.connect()
+        # Resolve the profile before opening an MCP connection so an invalid
+        # explicit profile fails without allocating external resources.
+        provider, model, provider_config = resolve_llm_provider_selection(
+            self._provider_override,
+            self._model_override,
+            self.llm_profile,
+            fallback_provider="anthropic",
+            fallback_model="claude-sonnet-4-6",
+        )
+        if not provider or not model:
+            raise ValueError("Model and provider must be configured")
+        self.provider_name = provider
+        self.model = model
 
-        # Initialize LLM provider
-        self.llm_provider = create_llm_provider(self.provider_name, self.model)
+        try:
+            if self.mcp_client is None and self.mcp_url:
+                self.mcp_client = MCPClient(self.mcp_url)
+                await self.mcp_client.initialize()
+
+            provider_kwargs = dict(provider_config)
+            provider_mcp_url = self.mcp_url or getattr(self.mcp_client, "base_url", None)
+            if provider_mcp_url:
+                provider_kwargs.setdefault("mcp_url", provider_mcp_url)
+            provider_auth = getattr(self.mcp_client, "auth_config", None)
+            if provider_auth:
+                provider_kwargs.setdefault("auth", provider_auth)
+            self.llm_provider = create_llm_provider(provider, model, **provider_kwargs)
+            await self.llm_provider.initialize()
+        except BaseException:
+            await self._close_resources()
+            raise
 
         self._initialized = True
 
@@ -273,9 +305,10 @@ class MCPRunner(BaseRunnerTool):
 
             # Call LLM
             result = await asyncio.wait_for(
-                self.llm_provider.call(
+                self.llm_provider.generate_with_tools(
                     prompt=prompt,
                     tools=formatted_tools,
+                    timeout=timeout,
                     messages=messages,
                 ),
                 timeout=timeout,
@@ -295,11 +328,34 @@ class MCPRunner(BaseRunnerTool):
                     )
                 )
 
-            # Execute tool calls if any
+            # SDK-backed providers execute MCP calls themselves. Mirror the
+            # TestRunner contract and never replay those state-changing calls.
             tool_results = []
-            for tc in tool_calls:
-                tr = await self.execute_tool(tc)
-                tool_results.append(tr)
+            if result.tool_results:
+                for index, native_result in enumerate(result.tool_results):
+                    fallback_id = (
+                        tool_calls[index].id if index < len(tool_calls) else f"call_{index}"
+                    )
+                    if isinstance(native_result, dict):
+                        tool_results.append(
+                            ToolResult(
+                                tool_call_id=native_result.get("tool_call_id") or fallback_id,
+                                content=native_result.get("content", native_result.get("result")),
+                                is_error=bool(native_result.get("is_error", False)),
+                            )
+                        )
+                    else:
+                        tool_results.append(
+                            ToolResult(
+                                tool_call_id=getattr(native_result, "tool_call_id", None)
+                                or fallback_id,
+                                content=getattr(native_result, "content", native_result),
+                                is_error=bool(getattr(native_result, "is_error", False)),
+                            )
+                        )
+            else:
+                for tc in tool_calls:
+                    tool_results.append(await self.execute_tool(tc))
 
             duration_ms = int((time.time() - start_time) * 1000)
 
@@ -312,6 +368,7 @@ class MCPRunner(BaseRunnerTool):
                 tti_ms=tti_ms,
                 duration_ms=duration_ms,
                 cost=result.cost,
+                raw_response=result.raw_response,
             )
 
         except asyncio.TimeoutError:
@@ -363,11 +420,21 @@ class MCPRunner(BaseRunnerTool):
 
     async def close(self) -> None:
         """Clean up resources."""
-        if self.llm_provider:
-            await self.llm_provider.close()
+        await self._close_resources()
 
-        if self.mcp_client and self._owns_mcp_client:
-            await self.mcp_client.close()
+    async def _close_resources(self) -> None:
+        """Roll back owned resources without masking the triggering error."""
+        llm_provider, self.llm_provider = self.llm_provider, None
+        owned_mcp_client = self.mcp_client if self._owns_mcp_client else None
+        if self._owns_mcp_client:
+            self.mcp_client = None
+        self._initialized = False
+        if llm_provider:
+            with contextlib.suppress(Exception, asyncio.CancelledError):
+                await llm_provider.close()
+        if owned_mcp_client:
+            with contextlib.suppress(Exception, asyncio.CancelledError):
+                await owned_mcp_client.close()
 
 
 class AnthropicDirectRunner(BaseRunnerTool):

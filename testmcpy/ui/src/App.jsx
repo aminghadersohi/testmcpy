@@ -231,6 +231,7 @@ function AppContent() {
     try {
       const res = await fetch('/api/llm/profiles')
       const data = await res.json()
+      if (!res.ok) throw new Error(data.detail || `Failed to load LLM profiles (${res.status})`)
       console.log('Loaded LLM profiles:', data.profiles)
       setLlmProfiles(data.profiles || [])
 
@@ -246,6 +247,10 @@ function AppContent() {
         setSelectedLlmProfile(data.default)
         localStorage.setItem('selectedLLMProfile', data.default)
         profileToUse = data.profiles.find(p => p.profile_id === data.default)
+      } else {
+        setSelectedLlmProfile('')
+        localStorage.removeItem('selectedLLMProfile')
+        localStorage.removeItem('selectedLLMProvider')
       }
 
       // Always sync the provider to match the profile's default provider

@@ -1217,7 +1217,7 @@ function MCPProfiles({ selectedProfiles = [], onSelectProfiles, hideHeader = fal
         a.download = data.filename
         a.click()
         URL.revokeObjectURL(url)
-        showToast('Profile exported successfully')
+        showToast('Profile exported with credentials redacted')
       } else {
         showToast('Failed to export profile', 'error')
       }

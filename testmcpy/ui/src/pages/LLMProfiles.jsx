@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useRef } from 'react'
 import ConfirmDialog from '../components/ConfirmDialog'
 import { useNotification } from '../components/NotificationProvider'
 import {
@@ -8,6 +8,195 @@ import {
   Eye, EyeOff, Key, Star, Wand2
 } from 'lucide-react'
 import Wizard from '../components/Wizard'
+
+const PROVIDER_OPTIONS = [
+  ['anthropic', 'Anthropic (Claude)'],
+  ['openai', 'OpenAI (GPT)'],
+  ['google', 'Google (Gemini)'],
+  ['ollama', 'Ollama (Local)'],
+  ['claude-code', 'Claude Code CLI'],
+  ['claude-sdk', 'Claude Agent SDK'],
+  ['codex-sdk', 'Codex SDK'],
+  ['gemini-sdk', 'Gemini SDK'],
+  ['assistant', 'Preset Assistant'],
+]
+
+const CLI_AUTH_PROVIDERS = ['claude-code', 'claude-sdk', 'codex-sdk']
+const PROVIDER_SECRET_FIELDS = [
+  'api_key', 'api_key_env', 'base_url', 'workspace_hash', 'domain', 'api_token',
+  'api_secret', 'api_url', 'conversations_path', 'completions_path',
+]
+
+function registryProvider(provider) {
+  return {
+    'claude-code': 'claude-sdk',
+    'codex-sdk': 'codex-cli',
+  }[provider] || provider
+}
+
+export function switchProvider(formData, provider) {
+  const resetFields = Object.fromEntries(PROVIDER_SECRET_FIELDS.map(field => [field, null]))
+  return {
+    ...formData,
+    ...resetFields,
+    provider,
+    model: '',
+    name: '',
+    testResult: null,
+    testLoading: false,
+  }
+}
+
+export function normalizeProviderPayload(provider) {
+  return Object.fromEntries(Object.entries(provider).map(([field, value]) => [
+    field,
+    PROVIDER_SECRET_FIELDS.includes(field) && typeof value === 'string' && !value.trim()
+      ? null
+      : value,
+  ]))
+}
+
+export function normalizeLLMTestResponse(response, data) {
+  if (response.ok) return data
+  const detail = typeof data?.detail === 'string'
+    ? data.detail
+    : data?.detail
+      ? JSON.stringify(data.detail)
+      : `Provider test failed (${response.status})`
+  return { success: false, tested: true, error: detail }
+}
+
+export function apiErrorMessage(data, fallback) {
+  const detail = data?.detail
+  if (typeof detail === 'string' && detail.trim()) return detail
+  if (Array.isArray(detail)) {
+    const messages = detail
+      .map(item => typeof item === 'string' ? item : item?.msg)
+      .filter(Boolean)
+    if (messages.length > 0) return messages.join('; ')
+  }
+  if (detail && typeof detail === 'object') {
+    try {
+      return JSON.stringify(detail)
+    } catch {
+      // Fall through to the stable caller-provided message.
+    }
+  }
+  return fallback
+}
+
+export function assistantConfigError(data) {
+  if (!['assistant', 'chatbot'].includes(data.provider)) return null
+  const requiredFields = [
+    ['workspace_hash', 'Workspace hash'],
+    ['domain', 'Domain'],
+    ['api_url', 'Auth API URL'],
+    ['api_token', 'API token'],
+    ['api_secret', 'API secret'],
+    ['conversations_path', 'Conversations path'],
+    ['completions_path', 'Completions path'],
+  ]
+  const missing = requiredFields.find(([field]) => !data[field]?.trim())
+  if (missing) return `${missing[1]} is required for Assistant`
+
+  try {
+    const url = new URL(data.api_url)
+    if (!['http:', 'https:'].includes(url.protocol)) throw new Error('unsupported protocol')
+  } catch {
+    return 'Auth API URL must be an absolute HTTP(S) URL'
+  }
+  const validPath = value => /^\/(?!\/)[^?#\\\u0000-\u001f]*$/.test(value)
+  if (!validPath(data.conversations_path)) {
+    return 'Conversations path must be a same-origin path starting with one /'
+  }
+  if (!validPath(data.completions_path)) {
+    return 'Completions path must be a same-origin path starting with one /'
+  }
+  return null
+}
+
+export function providerTestKey(profileId, providerIndex, provider) {
+  return `${profileId}:${provider?._config_token || providerIndex}`
+}
+
+export function profileStateFromResponse(data) {
+  const profiles = data.profiles || []
+  return {
+    profiles,
+    defaultProfile: profiles.length > 0 ? (data.default || null) : null,
+    error: data.message && profiles.length === 0 ? data.message : null,
+  }
+}
+
+export async function createDefaultLLMConfig(availableModels, fetcher = fetch) {
+  const defaultModel = availableModels.find(model => model.provider === 'anthropic' && model.is_default)
+    || availableModels.find(model => model.provider === 'anthropic')
+  if (!defaultModel) throw new Error('No Anthropic model is available in the registry')
+
+  const createResponse = await fetcher('/api/llm/profiles/prod', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      name: 'Production',
+      description: 'High-quality models for production use',
+      providers: [{
+        name: defaultModel.name,
+        provider: 'anthropic',
+        model: defaultModel.id,
+        timeout: 60,
+        default: true,
+      }],
+    }),
+  })
+  const createData = await createResponse.json()
+  if (!createResponse.ok || !createData.success) {
+    throw new Error(apiErrorMessage(createData, 'Failed to create configuration'))
+  }
+
+  const defaultResponse = await fetcher('/api/llm/profiles/default/prod', { method: 'PUT' })
+  const defaultData = await defaultResponse.json()
+  if (!defaultResponse.ok || !defaultData.success) {
+    throw new Error(apiErrorMessage(defaultData, 'Configuration created, but could not set it as default'))
+  }
+}
+
+export function LLMTestResult({ result }) {
+  const notTested = result.tested === false
+  const passed = result.success === true
+  const containerClass = notTested
+    ? 'bg-warning/10 border border-warning/30'
+    : passed
+      ? 'bg-success/10 border border-success/30'
+      : 'bg-error/10 border border-error/30'
+  const statusClass = notTested ? 'text-warning' : passed ? 'text-success' : 'text-error'
+  const label = notTested ? 'Live test unavailable' : passed ? 'Test passed' : 'Test failed'
+
+  return (
+    <div className={`mt-2 p-2 rounded text-xs ${containerClass}`}>
+      <div className="flex items-center gap-1.5">
+        {notTested ? (
+          <AlertTriangle size={12} className="text-warning" />
+        ) : passed ? (
+          <CheckCircle size={12} className="text-success" />
+        ) : (
+          <XCircle size={12} className="text-error" />
+        )}
+        <span className={statusClass}>{label}</span>
+        {result.duration != null && (
+          <span className="text-text-tertiary ml-auto">{result.duration.toFixed(2)}s</span>
+        )}
+      </div>
+      {result.response && (
+        <div className="mt-1 text-text-secondary truncate">Response: {result.response}</div>
+      )}
+      {result.error && (
+        <div className={`mt-1 ${statusClass}`}>
+          {notTested ? 'Reason' : 'Error'}: {result.error}
+        </div>
+      )}
+    </div>
+  )
+}
 
 // Provider icon helper
 function getProviderIcon(provider) {
@@ -23,6 +212,13 @@ function getProviderIcon(provider) {
       return <span className="text-purple-500 font-bold text-xs">CC</span>
     case 'claude-sdk':
       return <span className="text-indigo-500 font-bold text-xs">SDK</span>
+    case 'codex-sdk':
+      return <span className="text-green-600 font-bold text-xs">CX</span>
+    case 'gemini-sdk':
+      return <span className="text-blue-600 font-bold text-xs">GS</span>
+    case 'assistant':
+    case 'chatbot':
+      return <span className="text-cyan-600 font-bold text-xs">PA</span>
     case 'ollama':
       return <span className="text-text-tertiary font-bold text-xs">L</span>
     default:
@@ -31,7 +227,7 @@ function getProviderIcon(provider) {
 }
 
 // Profile editor modal
-function ProfileEditorModal({ profile, onSave, onCancel }) {
+export function ProfileEditorModal({ profile, onSave, onCancel }) {
   const [profileId, setProfileId] = useState(profile?.profile_id || '')
   const [name, setName] = useState(profile?.name || '')
   const [description, setDescription] = useState(profile?.description || '')
@@ -40,10 +236,14 @@ function ProfileEditorModal({ profile, onSave, onCancel }) {
 
   const validate = () => {
     const newErrors = {}
-    if (!profileId.trim()) newErrors.profileId = 'Profile ID is required'
-    if (profileId && !/^[a-z0-9-]+$/.test(profileId)) newErrors.profileId = 'Use lowercase letters, numbers, and hyphens only'
+    if (isNew && !profileId.trim()) newErrors.profileId = 'Profile ID is required'
+    if (isNew && profileId && !/^[A-Za-z0-9][A-Za-z0-9._~-]*$/.test(profileId)) {
+      newErrors.profileId = 'Start with a letter or number; then use letters, numbers, dots, underscores, tildes, or hyphens'
+    }
+    if (isNew && profileId.length > 64) newErrors.profileId = 'Profile ID must be 64 characters or fewer'
     if (!name.trim()) newErrors.name = 'Name is required'
-    if (name.length > 50) newErrors.name = 'Name must be less than 50 characters'
+    if (name.length > 255) newErrors.name = 'Name must be 255 characters or fewer'
+    if (description.length > 2000) newErrors.description = 'Description must be 2000 characters or fewer'
     setErrors(newErrors)
     return Object.keys(newErrors).length === 0
   }
@@ -64,13 +264,15 @@ function ProfileEditorModal({ profile, onSave, onCancel }) {
         <form onSubmit={handleSubmit}>
           <div className="space-y-4">
             <div>
-              <label className="block text-sm font-medium mb-1 text-text-secondary">Profile ID</label>
+              <label htmlFor="llm-profile-id" className="block text-sm font-medium mb-1 text-text-secondary">Profile ID</label>
               <input
+                id="llm-profile-id"
                 type="text"
                 value={profileId}
-                onChange={(e) => setProfileId(e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, ''))}
+                onChange={(e) => setProfileId(e.target.value)}
                 className={`input w-full${errors.profileId ? ' border-error/50' : ''}`}
                 placeholder="e.g., prod, dev, budget"
+                maxLength={64}
                 disabled={!isNew}
                 autoFocus={isNew}
               />
@@ -79,13 +281,15 @@ function ProfileEditorModal({ profile, onSave, onCancel }) {
               )}
             </div>
             <div>
-              <label className="block text-sm font-medium mb-1 text-text-secondary">Profile Name</label>
+              <label htmlFor="llm-profile-name" className="block text-sm font-medium mb-1 text-text-secondary">Profile Name</label>
               <input
+                id="llm-profile-name"
                 type="text"
                 value={name}
                 onChange={(e) => setName(e.target.value)}
                 className={`input w-full${errors.name ? ' border-error/50' : ''}`}
                 placeholder="e.g., Production, Development"
+                maxLength={255}
                 autoFocus={!isNew}
               />
               {errors.name && (
@@ -93,14 +297,19 @@ function ProfileEditorModal({ profile, onSave, onCancel }) {
               )}
             </div>
             <div>
-              <label className="block text-sm font-medium mb-1 text-text-secondary">Description</label>
+              <label htmlFor="llm-profile-description" className="block text-sm font-medium mb-1 text-text-secondary">Description</label>
               <textarea
+                id="llm-profile-description"
                 value={description}
                 onChange={(e) => setDescription(e.target.value)}
                 className="input w-full"
                 rows={3}
+                maxLength={2000}
                 placeholder="Describe when to use this profile..."
               />
+              {errors.description && (
+                <p className="text-error text-xs mt-1">{errors.description}</p>
+              )}
             </div>
           </div>
           <div className="flex flex-col-reverse sm:flex-row sm:justify-end gap-3 mt-6">
@@ -119,25 +328,29 @@ function ProfileEditorModal({ profile, onSave, onCancel }) {
 }
 
 // Provider editor modal with model registry
-function ProviderEditorModal({ provider, availableModels, onSave, onCancel }) {
+export function ProviderEditorModal({ provider, availableModels, onSave, onCancel }) {
   const [formData, setFormData] = useState({
+    ...(provider || {}),
     name: provider?.name || '',
     provider: provider?.provider || 'anthropic',
     model: provider?.model || '',
-    api_key: provider?.api_key || '',  // Direct API key
-    api_key_env: provider?.api_key_env || '',  // Or env var name
-    base_url: provider?.base_url || '',
-    timeout: provider?.timeout || 60,
-    default: provider?.default || false,
+    // Keep absent fetched fields as null. Converting them to an empty string
+    // makes a no-op edit look like a credential-destination change to the API.
+    api_key: provider?.api_key ?? null,  // Direct API key
+    api_key_env: provider?.api_key_env ?? null,  // Or env var name
+    base_url: provider?.base_url ?? null,
+    timeout: provider?.timeout ?? 60,
+    default: provider?.default ?? false,
   })
   const [showApiKey, setShowApiKey] = useState(false)  // Toggle visibility
   const [errors, setErrors] = useState({})
   const [filteredModels, setFilteredModels] = useState([])
+  const codexAuth = formData.provider === 'codex-sdk'
 
   useEffect(() => {
     // Filter models based on selected provider
     if (availableModels && formData.provider) {
-      const providerKey = formData.provider.toLowerCase()
+      const providerKey = registryProvider(formData.provider.toLowerCase())
       const filtered = availableModels.filter(m =>
         m.provider === providerKey ||
         (providerKey === 'gemini' && m.provider === 'google')
@@ -158,7 +371,11 @@ function ProviderEditorModal({ provider, availableModels, onSave, onCancel }) {
   const validate = () => {
     const newErrors = {}
     if (!formData.name.trim()) newErrors.name = 'Name is required'
+    if (formData.name.length > 255) newErrors.name = 'Name must be 255 characters or fewer'
     if (!formData.model.trim()) newErrors.model = 'Model is required'
+    if (formData.model.length > 255) newErrors.model = 'Model must be 255 characters or fewer'
+    const assistantError = assistantConfigError(formData)
+    if (assistantError) newErrors.assistant = assistantError
     setErrors(newErrors)
     return Object.keys(newErrors).length === 0
   }
@@ -166,7 +383,7 @@ function ProviderEditorModal({ provider, availableModels, onSave, onCancel }) {
   const handleSubmit = (e) => {
     e.preventDefault()
     if (validate()) {
-      onSave(formData)
+      onSave(normalizeProviderPayload(formData))
     }
   }
 
@@ -198,31 +415,34 @@ function ProviderEditorModal({ provider, availableModels, onSave, onCancel }) {
           <div className="space-y-4 max-h-[60vh] overflow-y-auto pr-2">
             {/* Provider Type */}
             <div>
-              <label className="block text-sm font-medium mb-1 text-text-secondary">Provider</label>
+              <label htmlFor="llm-provider-type" className="block text-sm font-medium mb-1 text-text-secondary">Provider</label>
               <select
+                id="llm-provider-type"
                 value={formData.provider}
-                onChange={(e) => setFormData(prev => ({ ...prev, provider: e.target.value, model: '' }))}
+                onChange={(e) => setFormData(prev => switchProvider(prev, e.target.value))}
                 className="input w-full"
               >
-                <option value="anthropic">Anthropic (Claude)</option>
-                <option value="openai">OpenAI (GPT)</option>
-                <option value="google">Google (Gemini)</option>
-                <option value="claude-code">Claude Code CLI</option>
-                <option value="claude-sdk">Claude Agent SDK</option>
-                <option value="ollama">Ollama (Local)</option>
+                {!PROVIDER_OPTIONS.some(([value]) => value === formData.provider) && (
+                  <option value={formData.provider}>{formData.provider}</option>
+                )}
+                {PROVIDER_OPTIONS.map(([value, label]) => (
+                  <option key={value} value={value}>{label}</option>
+                ))}
               </select>
             </div>
 
             {/* Model Selection — combobox: pick a known model or type any name */}
             <div>
-              <label className="block text-sm font-medium mb-1 text-text-secondary">Model</label>
+              <label htmlFor="llm-provider-model" className="block text-sm font-medium mb-1 text-text-secondary">Model</label>
               <input
+                id="llm-provider-model"
                 type="text"
                 list="provider-model-options"
                 value={formData.model}
                 onChange={(e) => handleModelSelect(e.target.value)}
                 className={`input w-full font-mono text-sm${errors.model ? ' border-error/50' : ''}`}
                 placeholder="Select a model or type any model name"
+                maxLength={255}
                 autoComplete="off"
               />
               <datalist id="provider-model-options">
@@ -274,19 +494,21 @@ function ProviderEditorModal({ provider, availableModels, onSave, onCancel }) {
 
             {/* Display Name */}
             <div>
-              <label className="block text-sm font-medium mb-1 text-text-secondary">Display Name</label>
+              <label htmlFor="llm-provider-name" className="block text-sm font-medium mb-1 text-text-secondary">Display Name</label>
               <input
+                id="llm-provider-name"
                 type="text"
                 value={formData.name}
                 onChange={(e) => updateField('name', e.target.value)}
                 className={`input w-full${errors.name ? ' border-error/50' : ''}`}
                 placeholder="e.g., Claude Sonnet 4.5"
+                maxLength={255}
               />
               {errors.name && <p className="text-error text-xs mt-1">{errors.name}</p>}
             </div>
 
-            {/* API Key Section - hidden for claude-code and claude-sdk */}
-            {!['claude-code', 'claude-sdk'].includes(formData.provider) && (
+            {/* API Key Section - CLI and Assistant providers use their own auth. */}
+            {![...CLI_AUTH_PROVIDERS, 'assistant', 'chatbot'].includes(formData.provider) && (
               <div className="space-y-3 p-3 bg-surface rounded-lg border border-border">
                 <div className="flex items-center gap-2 text-sm font-medium">
                   <Key size={14} />
@@ -295,14 +517,16 @@ function ProviderEditorModal({ provider, availableModels, onSave, onCancel }) {
 
                 {/* Direct API Key */}
                 <div>
-                  <label className="block text-xs font-medium mb-1 text-text-secondary">API Key (direct)</label>
+                  <label htmlFor="llm-provider-api-key" className="block text-xs font-medium mb-1 text-text-secondary">API Key (direct)</label>
                   <div className="relative">
                     <input
+                      id="llm-provider-api-key"
                       type={showApiKey ? 'text' : 'password'}
-                      value={formData.api_key}
+                      value={formData.api_key ?? ''}
                       onChange={(e) => updateField('api_key', e.target.value)}
                       className="input w-full font-mono text-sm pr-10"
                       placeholder="sk-ant-... or sk-..."
+                      autoComplete="new-password"
                     />
                     <button
                       type="button"
@@ -318,10 +542,11 @@ function ProviderEditorModal({ provider, availableModels, onSave, onCancel }) {
 
                 {/* Environment Variable */}
                 <div>
-                  <label className="block text-xs font-medium mb-1 text-text-secondary">Environment Variable</label>
+                  <label htmlFor="llm-provider-api-key-env" className="block text-xs font-medium mb-1 text-text-secondary">Environment Variable</label>
                   <input
+                    id="llm-provider-api-key-env"
                     type="text"
-                    value={formData.api_key_env}
+                    value={formData.api_key_env ?? ''}
                     onChange={(e) => updateField('api_key_env', e.target.value)}
                     className="input w-full font-mono text-sm"
                     placeholder="e.g., ANTHROPIC_API_KEY"
@@ -333,24 +558,26 @@ function ProviderEditorModal({ provider, availableModels, onSave, onCancel }) {
               </div>
             )}
 
-            {/* Optional auth token for Claude Code/SDK */}
-            {['claude-code', 'claude-sdk'].includes(formData.provider) && (
+            {/* Optional auth token for CLI-backed providers. */}
+            {CLI_AUTH_PROVIDERS.includes(formData.provider) && (
               <div className="space-y-3 p-3 bg-surface rounded-lg border border-border">
                 <div className="flex items-center gap-2 text-sm font-medium">
                   <Key size={14} />
-                  Auth token (optional)
+                  {codexAuth ? 'OpenAI API key (optional)' : 'Claude auth token (optional)'}
                 </div>
 
                 {/* Direct token */}
                 <div>
-                  <label className="block text-xs font-medium mb-1 text-text-secondary">Token (direct)</label>
+                  <label htmlFor="llm-provider-cli-token" className="block text-xs font-medium mb-1 text-text-secondary">{codexAuth ? 'OpenAI API key (direct)' : 'Token (direct)'}</label>
                   <div className="relative">
                     <input
+                      id="llm-provider-cli-token"
                       type={showApiKey ? 'text' : 'password'}
-                      value={formData.api_key}
+                      value={formData.api_key ?? ''}
                       onChange={(e) => updateField('api_key', e.target.value)}
                       className="input w-full font-mono text-sm pr-10"
-                      placeholder="sk-ant-oat... (subscription) or sk-ant-api... (API key)"
+                      placeholder={codexAuth ? 'sk-...' : 'sk-ant-oat... or sk-ant-api...'}
+                      autoComplete="new-password"
                     />
                     <button
                       type="button"
@@ -366,29 +593,80 @@ function ProviderEditorModal({ provider, availableModels, onSave, onCancel }) {
 
                 {/* Environment Variable */}
                 <div>
-                  <label className="block text-xs font-medium mb-1 text-text-secondary">Environment Variable</label>
+                  <label htmlFor="llm-provider-cli-token-env" className="block text-xs font-medium mb-1 text-text-secondary">Environment Variable</label>
                   <input
+                    id="llm-provider-cli-token-env"
                     type="text"
-                    value={formData.api_key_env}
+                    value={formData.api_key_env ?? ''}
                     onChange={(e) => updateField('api_key_env', e.target.value)}
                     className="input w-full font-mono text-sm"
-                    placeholder="e.g., CLAUDE_CODE_OAUTH_TOKEN"
+                    placeholder={codexAuth ? 'e.g., OPENAI_API_KEY' : 'e.g., CLAUDE_CODE_OAUTH_TOKEN'}
                   />
                 </div>
 
                 <p className="text-text-secondary text-xs mt-1">
-                  Paste a Claude subscription token (<code className="bg-surface px-1 rounded">claude setup-token</code>, starts with <code className="bg-surface px-1 rounded">sk-ant-oat</code>) or an Anthropic API key. Leave blank to use the host's <code className="bg-surface px-1 rounded">claude</code> login.
+                  {codexAuth ? (
+                    <>Provide an OpenAI API key. Leave blank only if the host's <code className="bg-surface px-1 rounded">~/.codex/auth.json</code> contains <code className="bg-surface px-1 rounded">OPENAI_API_KEY</code>; OAuth-only login is not supported.</>
+                  ) : (
+                    <>Paste a Claude subscription token from <code className="bg-surface px-1 rounded">claude setup-token</code> or an Anthropic API key. Leave blank to use the host's <code className="bg-surface px-1 rounded">claude</code> login.</>
+                  )}
                 </p>
+              </div>
+            )}
+
+            {['assistant', 'chatbot'].includes(formData.provider) && (
+              <div className="space-y-3 p-3 bg-surface rounded-lg border border-border">
+                <div className="flex items-center gap-2 text-sm font-medium">
+                  <Key size={14} /> Assistant connection
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label htmlFor="llm-assistant-workspace" className="block text-xs font-medium mb-1 text-text-secondary">Workspace Hash</label>
+                    <input id="llm-assistant-workspace" type="text" value={formData.workspace_hash || ''} onChange={(e) => updateField('workspace_hash', e.target.value)} className="input w-full font-mono text-sm" />
+                  </div>
+                  <div>
+                    <label htmlFor="llm-assistant-domain" className="block text-xs font-medium mb-1 text-text-secondary">Domain</label>
+                    <input id="llm-assistant-domain" type="text" value={formData.domain || ''} onChange={(e) => updateField('domain', e.target.value)} className="input w-full font-mono text-sm" placeholder="example.com" />
+                  </div>
+                </div>
+                <div>
+                  <label htmlFor="llm-assistant-api-url" className="block text-xs font-medium mb-1 text-text-secondary">Auth API URL</label>
+                  <input id="llm-assistant-api-url" type="url" value={formData.api_url || ''} onChange={(e) => updateField('api_url', e.target.value)} className="input w-full font-mono text-sm" />
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label htmlFor="llm-assistant-api-token" className="block text-xs font-medium mb-1 text-text-secondary">API Token</label>
+                    <input id="llm-assistant-api-token" type="password" value={formData.api_token || ''} onChange={(e) => updateField('api_token', e.target.value)} className="input w-full font-mono text-sm" autoComplete="new-password" />
+                  </div>
+                  <div>
+                    <label htmlFor="llm-assistant-api-secret" className="block text-xs font-medium mb-1 text-text-secondary">API Secret</label>
+                    <input id="llm-assistant-api-secret" type="password" value={formData.api_secret || ''} onChange={(e) => updateField('api_secret', e.target.value)} className="input w-full font-mono text-sm" autoComplete="new-password" />
+                  </div>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label htmlFor="llm-assistant-conversations" className="block text-xs font-medium mb-1 text-text-secondary">Conversations Path</label>
+                    <input id="llm-assistant-conversations" type="text" value={formData.conversations_path || ''} onChange={(e) => updateField('conversations_path', e.target.value)} className="input w-full font-mono text-sm" />
+                  </div>
+                  <div>
+                    <label htmlFor="llm-assistant-completions" className="block text-xs font-medium mb-1 text-text-secondary">Completions Path</label>
+                    <input id="llm-assistant-completions" type="text" value={formData.completions_path || ''} onChange={(e) => updateField('completions_path', e.target.value)} className="input w-full font-mono text-sm" />
+                  </div>
+                </div>
+                {errors.assistant && (
+                  <p className="text-error text-xs mt-1">{errors.assistant}</p>
+                )}
               </div>
             )}
 
             {/* Base URL (for Ollama) */}
             {formData.provider === 'ollama' && (
               <div>
-                <label className="block text-sm font-medium mb-1 text-text-secondary">Base URL</label>
+                <label htmlFor="llm-provider-base-url" className="block text-sm font-medium mb-1 text-text-secondary">Base URL</label>
                 <input
+                  id="llm-provider-base-url"
                   type="text"
-                  value={formData.base_url}
+                  value={formData.base_url ?? ''}
                   onChange={(e) => updateField('base_url', e.target.value)}
                   className="input w-full font-mono text-sm"
                   placeholder="http://localhost:11434"
@@ -398,8 +676,9 @@ function ProviderEditorModal({ provider, availableModels, onSave, onCancel }) {
 
             {/* Timeout */}
             <div>
-              <label className="block text-sm font-medium mb-1 text-text-secondary">Timeout (seconds)</label>
+              <label htmlFor="llm-provider-timeout" className="block text-sm font-medium mb-1 text-text-secondary">Timeout (seconds)</label>
               <input
+                id="llm-provider-timeout"
                 type="number"
                 value={formData.timeout}
                 onChange={(e) => updateField('timeout', parseInt(e.target.value) || 60)}
@@ -441,7 +720,8 @@ function ProviderEditorModal({ provider, availableModels, onSave, onCancel }) {
 }
 
 // LLM Provider Wizard - guided multi-step flow for adding a provider
-function LLMWizard({ profiles, availableModels, onComplete, onCancel }) {
+export function LLMWizard({ profiles, availableModels, onComplete, onCancel }) {
+  const testRequestId = useRef(0)
   const [wizardData, setWizardData] = useState({
     // Step 1: Provider type
     provider: 'anthropic',
@@ -452,6 +732,13 @@ function LLMWizard({ profiles, availableModels, onComplete, onCancel }) {
     api_key: '',
     api_key_env: '',
     base_url: '',
+    workspace_hash: '',
+    domain: '',
+    api_token: '',
+    api_secret: '',
+    api_url: '',
+    conversations_path: '',
+    completions_path: '',
     timeout: 60,
     default: false,
     showApiKey: false,
@@ -469,18 +756,32 @@ function LLMWizard({ profiles, availableModels, onComplete, onCancel }) {
     { value: 'ollama', label: 'Ollama', desc: 'Local models (Llama, Mistral, etc.)', color: 'text-text-tertiary', letter: 'L' },
     { value: 'claude-sdk', label: 'Claude SDK', desc: 'Agent SDK, uses Claude auth', color: 'text-indigo-500', letter: 'SDK' },
     { value: 'claude-code', label: 'Claude Code', desc: 'Claude Code CLI, no API key needed', color: 'text-purple-500', letter: 'CC' },
+    { value: 'codex-sdk', label: 'Codex SDK', desc: 'OpenAI Agents SDK with native MCP', color: 'text-green-600', letter: 'CX' },
+    { value: 'gemini-sdk', label: 'Gemini SDK', desc: 'Google ADK with native MCP', color: 'text-blue-600', letter: 'GS' },
+    { value: 'assistant', label: 'Assistant', desc: 'Preset workspace assistant API', color: 'text-cyan-600', letter: 'PA' },
   ]
 
   // Get filtered models for selected provider
   const getFilteredModels = () => {
     if (!availableModels || !wizardData.provider) return []
-    const key = wizardData.provider.toLowerCase()
+    const key = registryProvider(wizardData.provider.toLowerCase())
     return availableModels.filter(m =>
       m.provider === key || (key === 'gemini' && m.provider === 'google')
     )
   }
 
+  const updateTestConfiguration = (setData, updates) => {
+    testRequestId.current += 1
+    setData(prev => ({
+      ...prev,
+      ...(typeof updates === 'function' ? updates(prev) : updates),
+      testResult: null,
+      testLoading: false,
+    }))
+  }
+
   const handleTestCredentials = async () => {
+    const requestId = ++testRequestId.current
     setWizardData(prev => ({ ...prev, testLoading: true, testResult: null }))
     try {
       const res = await fetch('/api/llm/test', {
@@ -496,12 +797,14 @@ function LLMWizard({ profiles, availableModels, onComplete, onCancel }) {
         })
       })
       const data = await res.json()
+      if (requestId !== testRequestId.current) return
       setWizardData(prev => ({
         ...prev,
         testLoading: false,
-        testResult: data
+        testResult: normalizeLLMTestResponse(res, data)
       }))
     } catch (err) {
+      if (requestId !== testRequestId.current) return
       setWizardData(prev => ({
         ...prev,
         testLoading: false,
@@ -526,7 +829,8 @@ function LLMWizard({ profiles, availableModels, onComplete, onCancel }) {
                 key={p.value}
                 type="button"
                 onClick={() => {
-                  setData(prev => ({ ...prev, provider: p.value, model: '', name: '' }))
+                  testRequestId.current += 1
+                  setData(prev => switchProvider(prev, p.value))
                 }}
                 className={`p-4 rounded-lg border-2 text-left transition-all ${
                   data.provider === p.value
@@ -547,6 +851,7 @@ function LLMWizard({ profiles, availableModels, onComplete, onCancel }) {
       label: 'Model',
       validate: (data) => {
         if (!data.model.trim()) return 'Please select or enter a model'
+        if (data.model.length > 255) return 'Model must be 255 characters or fewer'
         return true
       },
       component: ({ data, setData }) => {
@@ -558,13 +863,13 @@ function LLMWizard({ profiles, availableModels, onComplete, onCancel }) {
             <div>
               <label className="block text-sm font-medium mb-1 text-text-secondary">Model</label>
               <input
+                aria-label="Model"
                 type="text"
                 list="wizard-model-options"
                 value={data.model}
                 onChange={(e) => {
                   const model = availableModels?.find(m => m.id === e.target.value)
-                  setData(prev => ({
-                    ...prev,
+                  updateTestConfiguration(setData, prev => ({
                     model: e.target.value,
                     name: model && !prev.name?.trim() ? model.name : prev.name,
                   }))
@@ -573,6 +878,7 @@ function LLMWizard({ profiles, availableModels, onComplete, onCancel }) {
                 placeholder="Select a model or type any model name"
                 autoComplete="off"
                 autoFocus
+                maxLength={255}
               />
               <datalist id="wizard-model-options">
                 {filtered.map(model => (
@@ -622,6 +928,7 @@ function LLMWizard({ profiles, availableModels, onComplete, onCancel }) {
             <div>
               <label className="block text-sm font-medium mb-1 text-text-secondary">Display Name</label>
               <input
+                aria-label="Display Name"
                 type="text"
                 value={data.name}
                 onChange={(e) => setData(prev => ({ ...prev, name: e.target.value }))}
@@ -635,30 +942,56 @@ function LLMWizard({ profiles, availableModels, onComplete, onCancel }) {
     },
     {
       label: 'Credentials',
-      optional: ['claude-code', 'claude-sdk'].includes(wizardData.provider),
+      optional: CLI_AUTH_PROVIDERS.includes(wizardData.provider),
       validate: (data) => {
         if (!data.name.trim()) return 'Display name is required'
+        if (data.name.length > 255) return 'Display name must be 255 characters or fewer'
+        const assistantError = assistantConfigError(data)
+        if (assistantError) return assistantError
         return true
       },
       component: ({ data, setData }) => {
-        const claudeCli = ['claude-code', 'claude-sdk'].includes(data.provider)
+        const cliAuth = CLI_AUTH_PROVIDERS.includes(data.provider)
+        const assistant = ['assistant', 'chatbot'].includes(data.provider)
+        const codexAuth = data.provider === 'codex-sdk'
 
         return (
           <div className="space-y-4">
-            {claudeCli ? (
+            {assistant ? (
               <div className="space-y-3 p-3 bg-surface rounded-lg border border-border">
                 <div className="flex items-center gap-2 text-sm font-medium">
-                  <Key size={14} /> Auth token (optional)
+                  <Key size={14} /> Assistant connection
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <input aria-label="Workspace Hash" type="text" value={data.workspace_hash || ''} onChange={(e) => updateTestConfiguration(setData, { workspace_hash: e.target.value })} className="input w-full font-mono text-sm" placeholder="Workspace hash" />
+                  <input aria-label="Domain" type="text" value={data.domain || ''} onChange={(e) => updateTestConfiguration(setData, { domain: e.target.value })} className="input w-full font-mono text-sm" placeholder="Workspace domain" />
+                </div>
+                <input aria-label="Auth API URL" type="url" value={data.api_url || ''} onChange={(e) => updateTestConfiguration(setData, { api_url: e.target.value })} className="input w-full font-mono text-sm" placeholder="Auth API URL" />
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <input aria-label="API Token" type="password" value={data.api_token || ''} onChange={(e) => updateTestConfiguration(setData, { api_token: e.target.value })} className="input w-full font-mono text-sm" placeholder="API token" autoComplete="new-password" />
+                  <input aria-label="API Secret" type="password" value={data.api_secret || ''} onChange={(e) => updateTestConfiguration(setData, { api_secret: e.target.value })} className="input w-full font-mono text-sm" placeholder="API secret" autoComplete="new-password" />
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <input aria-label="Conversations Path" type="text" value={data.conversations_path || ''} onChange={(e) => updateTestConfiguration(setData, { conversations_path: e.target.value })} className="input w-full font-mono text-sm" placeholder="/api/v1/copilot/conversations" />
+                  <input aria-label="Completions Path" type="text" value={data.completions_path || ''} onChange={(e) => updateTestConfiguration(setData, { completions_path: e.target.value })} className="input w-full font-mono text-sm" placeholder="/api/v1/copilot/completions" />
+                </div>
+              </div>
+            ) : cliAuth ? (
+              <div className="space-y-3 p-3 bg-surface rounded-lg border border-border">
+                <div className="flex items-center gap-2 text-sm font-medium">
+                  <Key size={14} /> {codexAuth ? 'OpenAI API key (optional)' : 'Claude auth token (optional)'}
                 </div>
                 <div>
-                  <label className="block text-xs font-medium mb-1 text-text-secondary">Token (direct)</label>
+                  <label className="block text-xs font-medium mb-1 text-text-secondary">{codexAuth ? 'OpenAI API key (direct)' : 'Token (direct)'}</label>
                   <div className="relative">
                     <input
+                      aria-label="Token (direct)"
                       type={data.showApiKey ? 'text' : 'password'}
                       value={data.api_key}
-                      onChange={(e) => setData(prev => ({ ...prev, api_key: e.target.value }))}
+                      onChange={(e) => updateTestConfiguration(setData, { api_key: e.target.value })}
                       className="input w-full font-mono text-sm pr-10"
-                      placeholder="sk-ant-oat... (subscription) or sk-ant-api... (API key)"
+                      placeholder={codexAuth ? 'sk-...' : 'sk-ant-oat... or sk-ant-api...'}
+                      autoComplete="new-password"
                     />
                     <button
                       type="button"
@@ -673,15 +1006,20 @@ function LLMWizard({ profiles, availableModels, onComplete, onCancel }) {
                 <div>
                   <label className="block text-xs font-medium mb-1 text-text-secondary">Environment Variable</label>
                   <input
+                    aria-label="Environment Variable"
                     type="text"
                     value={data.api_key_env}
-                    onChange={(e) => setData(prev => ({ ...prev, api_key_env: e.target.value }))}
+                    onChange={(e) => updateTestConfiguration(setData, { api_key_env: e.target.value })}
                     className="input w-full font-mono text-sm"
-                    placeholder="e.g., CLAUDE_CODE_OAUTH_TOKEN"
+                    placeholder={codexAuth ? 'e.g., OPENAI_API_KEY' : 'e.g., CLAUDE_CODE_OAUTH_TOKEN'}
                   />
                 </div>
                 <p className="text-text-secondary text-xs mt-1">
-                  Paste a Claude subscription token (<code className="bg-surface px-1 rounded">claude setup-token</code>, starts with <code className="bg-surface px-1 rounded">sk-ant-oat</code>) or an Anthropic API key. Leave blank to use the host's <code className="bg-surface px-1 rounded">claude</code> login.
+                  {codexAuth ? (
+                    <>Provide an OpenAI API key. Leave blank only if the host's <code className="bg-surface px-1 rounded">~/.codex/auth.json</code> contains <code className="bg-surface px-1 rounded">OPENAI_API_KEY</code>; OAuth-only login is not supported.</>
+                  ) : (
+                    <>Paste a Claude subscription token from <code className="bg-surface px-1 rounded">claude setup-token</code> or an Anthropic API key. Leave blank to use the host's <code className="bg-surface px-1 rounded">claude</code> login.</>
+                  )}
                 </p>
               </div>
             ) : (
@@ -693,11 +1031,14 @@ function LLMWizard({ profiles, availableModels, onComplete, onCancel }) {
                   <label className="block text-xs font-medium mb-1 text-text-secondary">API Key (direct)</label>
                   <div className="relative">
                     <input
+                      aria-label="API Key (direct)"
                       type={data.showApiKey ? 'text' : 'password'}
                       value={data.api_key}
-                      onChange={(e) => setData(prev => ({ ...prev, api_key: e.target.value }))}
+                      onChange={(e) => updateTestConfiguration(setData, { api_key: e.target.value })}
                       className="input w-full font-mono text-sm pr-10"
-                      placeholder="sk-ant-... or sk-..."
+                    placeholder="sk-ant-... or sk-..."
+                    maxLength={4096}
+                      autoComplete="new-password"
                     />
                     <button
                       type="button"
@@ -712,9 +1053,10 @@ function LLMWizard({ profiles, availableModels, onComplete, onCancel }) {
                 <div>
                   <label className="block text-xs font-medium mb-1 text-text-secondary">Environment Variable</label>
                   <input
+                    aria-label="Environment Variable"
                     type="text"
                     value={data.api_key_env}
-                    onChange={(e) => setData(prev => ({ ...prev, api_key_env: e.target.value }))}
+                    onChange={(e) => updateTestConfiguration(setData, { api_key_env: e.target.value })}
                     className="input w-full font-mono text-sm"
                     placeholder="e.g., ANTHROPIC_API_KEY"
                   />
@@ -727,9 +1069,10 @@ function LLMWizard({ profiles, availableModels, onComplete, onCancel }) {
               <div>
                 <label className="block text-sm font-medium mb-1 text-text-secondary">Base URL</label>
                 <input
+                  aria-label="Base URL"
                   type="text"
                   value={data.base_url}
-                  onChange={(e) => setData(prev => ({ ...prev, base_url: e.target.value }))}
+                  onChange={(e) => updateTestConfiguration(setData, { base_url: e.target.value })}
                   className="input w-full font-mono text-sm"
                   placeholder="http://localhost:11434"
                 />
@@ -739,9 +1082,10 @@ function LLMWizard({ profiles, availableModels, onComplete, onCancel }) {
             <div>
               <label className="block text-sm font-medium mb-1 text-text-secondary">Timeout (seconds)</label>
               <input
+                aria-label="Timeout (seconds)"
                 type="number"
                 value={data.timeout}
-                onChange={(e) => setData(prev => ({ ...prev, timeout: parseInt(e.target.value) || 60 }))}
+                onChange={(e) => updateTestConfiguration(setData, { timeout: parseInt(e.target.value) || 60 })}
                 className="input w-full"
                 min="10" max="300"
               />
@@ -771,27 +1115,7 @@ function LLMWizard({ profiles, availableModels, onComplete, onCancel }) {
                 )}
               </button>
               {data.testResult && (
-                <div className={`mt-2 p-2 rounded text-xs ${
-                  data.testResult.success
-                    ? 'bg-success/10 border border-success/30'
-                    : 'bg-error/10 border border-error/30'
-                }`}>
-                  <div className="flex items-center gap-1.5">
-                    {data.testResult.success ? (
-                      <><CheckCircle size={12} className="text-success" />
-                        <span className="text-success">Test passed</span></>
-                    ) : (
-                      <><XCircle size={12} className="text-error" />
-                        <span className="text-error">Test failed</span></>
-                    )}
-                    {data.testResult.duration && (
-                      <span className="text-text-tertiary ml-auto">{data.testResult.duration.toFixed(2)}s</span>
-                    )}
-                  </div>
-                  {data.testResult.error && (
-                    <div className="mt-1 text-error">{data.testResult.error}</div>
-                  )}
-                </div>
+                <LLMTestResult result={data.testResult} />
               )}
             </div>
           </div>
@@ -839,6 +1163,7 @@ function LLMWizard({ profiles, availableModels, onComplete, onCancel }) {
             <div>
               <label className="block text-sm font-medium mb-1 text-text-secondary">Add to Profile</label>
               <select
+                aria-label="Add to Profile"
                 value={data.targetProfileId}
                 onChange={(e) => setData(prev => ({ ...prev, targetProfileId: e.target.value }))}
                 className="input w-full"
@@ -862,10 +1187,17 @@ function LLMWizard({ profiles, availableModels, onComplete, onCancel }) {
       api_key: data.api_key || undefined,
       api_key_env: data.api_key_env || undefined,
       base_url: data.base_url || undefined,
+      workspace_hash: data.workspace_hash || undefined,
+      domain: data.domain || undefined,
+      api_token: data.api_token || undefined,
+      api_secret: data.api_secret || undefined,
+      api_url: data.api_url || undefined,
+      conversations_path: data.conversations_path || undefined,
+      completions_path: data.completions_path || undefined,
       timeout: data.timeout,
       default: data.default,
     }
-    onComplete(data.targetProfileId, providerData)
+    return onComplete(data.targetProfileId, providerData)
   }
 
   return (
@@ -892,6 +1224,7 @@ function LLMProfiles({ selectedProfile, onSelectProfile, onProfilesChange, hideH
   const [providerEditor, setProviderEditor] = useState(null)
   const [testingProvider, setTestingProvider] = useState(null) // "profileId:providerIndex"
   const [testResults, setTestResults] = useState({}) // { "profileId:providerIndex": { success, response, error, duration } }
+  const providerTestRequests = useRef({})
   const [showLLMWizard, setShowLLMWizard] = useState(false)
 
   useEffect(() => {
@@ -910,19 +1243,22 @@ function LLMProfiles({ selectedProfile, onSelectProfile, onProfilesChange, hideH
   const loadProfiles = async (notifyParent = false) => {
     setLoading(true)
     setError(null)
+    providerTestRequests.current = {}
+    setTestingProvider(null)
+    setTestResults({})
     try {
       const res = await fetch('/api/llm/profiles')
       const data = await res.json()
+      if (!res.ok) throw new Error(apiErrorMessage(data, `Failed to load profiles (${res.status})`))
 
-      if (data.message && data.profiles?.length === 0) {
-        setError(data.message)
-      } else {
-        setProfiles(data.profiles || [])
-        setDefaultProfile(data.default)
-        // Notify parent component to refresh its state
-        if (notifyParent && onProfilesChange) {
-          onProfilesChange()
-        }
+      const nextState = profileStateFromResponse(data)
+      setProfiles(nextState.profiles)
+      setDefaultProfile(nextState.defaultProfile)
+      setError(nextState.error)
+      // Notify parent component to refresh its state, including deletion of
+      // the final profile.
+      if (notifyParent && onProfilesChange) {
+        onProfilesChange()
       }
     } catch (error) {
       console.error('Failed to load LLM profiles:', error)
@@ -936,6 +1272,7 @@ function LLMProfiles({ selectedProfile, onSelectProfile, onProfilesChange, hideH
     try {
       const res = await fetch('/api/llm/models')
       const data = await res.json()
+      if (!res.ok) throw new Error(apiErrorMessage(data, `Failed to load models (${res.status})`))
       setAvailableModels(data.models || [])
     } catch (error) {
       console.error('Failed to load available models:', error)
@@ -961,7 +1298,9 @@ function LLMProfiles({ selectedProfile, onSelectProfile, onProfilesChange, hideH
 
   // Test provider connection
   const handleTestProvider = async (profileId, providerIndex, provider) => {
-    const testKey = `${profileId}:${providerIndex}`
+    const testKey = providerTestKey(profileId, providerIndex, provider)
+    const requestId = (providerTestRequests.current[testKey] || 0) + 1
+    providerTestRequests.current[testKey] = requestId
     setTestingProvider(testKey)
     // Clear previous result for this provider
     setTestResults(prev => ({ ...prev, [testKey]: null }))
@@ -977,23 +1316,32 @@ function LLMProfiles({ selectedProfile, onSelectProfile, onProfilesChange, hideH
           api_key_env: provider.api_key_env || null,  // Or env var name
           base_url: provider.base_url || null,
           timeout: provider.timeout || 30,
+          profile_id: profileId,
+          provider_index: providerIndex,
         })
       })
       const data = await res.json()
+      if (providerTestRequests.current[testKey] !== requestId) return
+      const result = normalizeLLMTestResponse(res, data)
 
-      setTestResults(prev => ({ ...prev, [testKey]: data }))
+      setTestResults(prev => ({ ...prev, [testKey]: result }))
 
-      if (data.success) {
-        showToast(`Test passed: ${data.response?.substring(0, 50) || 'OK'}`)
+      if (result.success) {
+        showToast(`Test passed: ${result.response?.substring(0, 50) || 'OK'}`)
+      } else if (result.tested === false) {
+        showToast(result.error || 'A live test is not available for this provider', 'warning')
       } else {
-        showToast(data.error || 'Test failed', 'error')
+        showToast(result.error || 'Test failed', 'error')
       }
     } catch (error) {
+      if (providerTestRequests.current[testKey] !== requestId) return
       const errorResult = { success: false, error: error.message }
       setTestResults(prev => ({ ...prev, [testKey]: errorResult }))
       showToast(`Test failed: ${error.message}`, 'error')
     } finally {
-      setTestingProvider(null)
+      if (providerTestRequests.current[testKey] === requestId) {
+        setTestingProvider(current => current === testKey ? null : current)
+      }
     }
   }
 
@@ -1016,7 +1364,7 @@ function LLMProfiles({ selectedProfile, onSelectProfile, onProfilesChange, hideH
         setProfileEditor(null)
         showToast('Profile created successfully')
       } else {
-        showToast(data.detail || 'Failed to create profile', 'error')
+        showToast(apiErrorMessage(data, 'Failed to create profile'), 'error')
       }
     } catch (error) {
       console.error('Failed to create profile:', error)
@@ -1045,7 +1393,7 @@ function LLMProfiles({ selectedProfile, onSelectProfile, onProfilesChange, hideH
         setProfileEditor(null)
         showToast('Profile updated successfully')
       } else {
-        showToast(data.detail || 'Failed to update profile', 'error')
+        showToast(apiErrorMessage(data, 'Failed to update profile'), 'error')
       }
     } catch (error) {
       console.error('Failed to update profile:', error)
@@ -1065,7 +1413,7 @@ function LLMProfiles({ selectedProfile, onSelectProfile, onProfilesChange, hideH
         setConfirmDialog(null)
         showToast('Profile deleted successfully')
       } else {
-        showToast(data.detail || 'Failed to delete profile', 'error')
+        showToast(apiErrorMessage(data, 'Failed to delete profile'), 'error')
       }
     } catch (error) {
       console.error('Failed to delete profile:', error)
@@ -1087,7 +1435,7 @@ function LLMProfiles({ selectedProfile, onSelectProfile, onProfilesChange, hideH
         }
         showToast('Default profile updated')
       } else {
-        showToast(data.detail || 'Failed to set default profile', 'error')
+        showToast(apiErrorMessage(data, 'Failed to set default profile'), 'error')
       }
     } catch (error) {
       console.error('Failed to set default:', error)
@@ -1123,12 +1471,15 @@ function LLMProfiles({ selectedProfile, onSelectProfile, onProfilesChange, hideH
         await loadProfiles(true)
         setProviderEditor(null)
         showToast('Provider added successfully')
+        return true
       } else {
-        showToast(data.detail || 'Failed to add provider', 'error')
+        showToast(apiErrorMessage(data, 'Failed to add provider'), 'error')
+        return false
       }
     } catch (error) {
       console.error('Failed to add provider:', error)
       showToast('Failed to add provider', 'error')
+      return false
     }
   }
 
@@ -1162,7 +1513,7 @@ function LLMProfiles({ selectedProfile, onSelectProfile, onProfilesChange, hideH
         setProviderEditor(null)
         showToast('Provider updated successfully')
       } else {
-        showToast(data.detail || 'Failed to update provider', 'error')
+        showToast(apiErrorMessage(data, 'Failed to update provider'), 'error')
       }
     } catch (error) {
       console.error('Failed to update provider:', error)
@@ -1195,7 +1546,7 @@ function LLMProfiles({ selectedProfile, onSelectProfile, onProfilesChange, hideH
         await loadProfiles(true)
         showToast(`${currentProfile.providers[providerIndex].name} set as default`)
       } else {
-        showToast(data.detail || 'Failed to set default provider', 'error')
+        showToast(apiErrorMessage(data, 'Failed to set default provider'), 'error')
       }
     } catch (error) {
       console.error('Failed to set default provider:', error)
@@ -1224,7 +1575,7 @@ function LLMProfiles({ selectedProfile, onSelectProfile, onProfilesChange, hideH
         setConfirmDialog(null)
         showToast('Provider removed successfully')
       } else {
-        showToast(data.detail || 'Failed to remove provider', 'error')
+        showToast(apiErrorMessage(data, 'Failed to remove provider'), 'error')
       }
     } catch (error) {
       console.error('Failed to remove provider:', error)
@@ -1234,33 +1585,14 @@ function LLMProfiles({ selectedProfile, onSelectProfile, onProfilesChange, hideH
 
   const createDefaultConfig = async () => {
     try {
-      // Create a default profile with Claude Sonnet
-      const res = await fetch('/api/llm/profiles/prod', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          name: 'Production',
-          description: 'High-quality models for production use',
-          providers: [{
-            name: 'Claude Sonnet 4.5',
-            provider: 'anthropic',
-            model: 'claude-sonnet-4-5-20250514',
-            timeout: 60,
-            default: true
-          }]
-        })
-      })
-      const data = await res.json()
-
-      if (data.success) {
-        await loadProfiles(true)
-        showToast('Default configuration created')
-      } else {
-        showToast(data.detail || 'Failed to create configuration', 'error')
-      }
+      await createDefaultLLMConfig(availableModels)
+      await loadProfiles(true)
+      showToast('Default configuration created')
     } catch (error) {
       console.error('Failed to create configuration:', error)
-      showToast('Failed to create configuration', 'error')
+      // The profile may have been created before setting it as default failed.
+      await loadProfiles(true)
+      showToast(error.message || 'Failed to create configuration', 'error')
     }
   }
 
@@ -1280,31 +1612,33 @@ function LLMProfiles({ selectedProfile, onSelectProfile, onProfilesChange, hideH
       {/* Header */}
       {!hideHeader && (
         <div className="p-4 border-b border-border bg-surface-elevated">
-          <div className="flex items-center justify-between">
+          <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
             <div>
               <h1 className="text-xl md:text-2xl font-semibold text-text-primary">LLM Profiles</h1>
               <p className="text-text-secondary mt-1 text-base">
                 Configure LLM providers for testing and chat
               </p>
             </div>
-            <div className="flex gap-2">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 w-full lg:w-auto">
               <button
                 onClick={loadProfiles}
-                className="btn btn-secondary flex items-center gap-2"
+                className="btn btn-secondary flex items-center justify-center gap-2"
               >
                 <RefreshCw size={16} />
                 Refresh
               </button>
               <button
                 onClick={() => setShowLLMWizard(true)}
-                className="btn btn-primary flex items-center gap-2"
+                disabled={profiles.length === 0}
+                title={profiles.length === 0 ? 'Create a profile before adding a provider' : undefined}
+                className="btn btn-primary flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 <Wand2 size={16} />
                 Add Provider (Wizard)
               </button>
               <button
                 onClick={() => setProfileEditor({ isNew: true })}
-                className="btn btn-secondary flex items-center gap-2"
+                className="btn btn-secondary flex items-center justify-center gap-2"
               >
                 <Plus size={16} />
                 Add Profile
@@ -1367,14 +1701,14 @@ function LLMProfiles({ selectedProfile, onSelectProfile, onProfilesChange, hideH
                 return (
                   <div
                     key={profile.profile_id}
-                    className="border rounded-lg p-4 transition-all border-border bg-surface-elevated"
+                    className="border rounded-lg p-3 sm:p-4 transition-all border-border bg-surface-elevated min-w-0"
                   >
-                    <div className="flex items-start justify-between">
-                      <div className="flex items-start gap-3 flex-1">
-                        <div className="flex-1">
-                          <div className="flex items-center gap-2 mb-1">
-                            <h3 className="font-medium">{profile.name}</h3>
-                            <code className="text-xs text-text-tertiary bg-surface px-1 rounded">{profile.profile_id}</code>
+                    <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between min-w-0">
+                      <div className="flex items-start gap-3 flex-1 min-w-0">
+                        <div className="flex-1 min-w-0">
+                          <div className="flex flex-wrap items-center gap-2 mb-1 min-w-0">
+                            <h3 className="font-medium break-words min-w-0">{profile.name}</h3>
+                            <code className="text-xs text-text-tertiary bg-surface px-1 rounded break-all">{profile.profile_id}</code>
                             {isDefault && (
                               <span className="px-2 py-0.5 text-xs rounded-full bg-primary/20 text-primary">
                                 Default
@@ -1388,13 +1722,13 @@ function LLMProfiles({ selectedProfile, onSelectProfile, onProfilesChange, hideH
                           </div>
 
                           {profile.description && (
-                            <p className="text-sm text-text-secondary mb-2">
+                            <p className="text-sm text-text-secondary mb-2 break-words">
                               {profile.description}
                             </p>
                           )}
 
                           {hasProviders && !isExpanded && defaultProvider && (
-                            <div className="text-xs text-text-tertiary flex items-center gap-2">
+                            <div className="text-xs text-text-tertiary flex flex-wrap items-center gap-2 min-w-0">
                               {getProviderIcon(defaultProvider.provider)}
                               <span>{defaultProvider.name}</span>
                               <span className="text-text-disabled">({defaultProvider.model})</span>
@@ -1403,7 +1737,7 @@ function LLMProfiles({ selectedProfile, onSelectProfile, onProfilesChange, hideH
                         </div>
                       </div>
 
-                      <div className="flex items-center gap-1">
+                      <div className="flex flex-wrap items-center justify-end gap-1 self-end sm:self-start flex-shrink-0">
                         {/* Profile Actions */}
                         {!isDefault && (
                           <button
@@ -1457,6 +1791,7 @@ function LLMProfiles({ selectedProfile, onSelectProfile, onProfilesChange, hideH
                       <div className="mt-4 space-y-2">
                         {providers.map((provider, idx) => {
                           const modelInfo = availableModels.find(m => m.id === provider.model)
+                          const testKey = providerTestKey(profile.profile_id, idx, provider)
 
                           return (
                             <div
@@ -1467,18 +1802,18 @@ function LLMProfiles({ selectedProfile, onSelectProfile, onProfilesChange, hideH
                                   : 'bg-surface border-2 border-transparent'
                               }`}
                             >
-                              <div className="flex items-start justify-between">
-                                <div className="flex items-center gap-2 flex-1">
+                              <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between min-w-0">
+                                <div className="flex flex-wrap items-center gap-2 flex-1 min-w-0">
                                   {provider.default && <Check size={14} className="text-primary flex-shrink-0" />}
                                   {getProviderIcon(provider.provider)}
-                                  <span className="font-medium text-sm">{provider.name}</span>
+                                  <span className="font-medium text-sm break-words min-w-0">{provider.name}</span>
                                   <span className="text-xs text-text-tertiary px-1.5 py-0.5 bg-surface-elevated rounded">
                                     {provider.provider}
                                   </span>
                                 </div>
 
                                 {/* Provider Actions */}
-                                <div className="flex items-center gap-1">
+                                <div className="flex flex-wrap items-center justify-end gap-1 self-end sm:self-start flex-shrink-0">
                                   {/* Set as default button */}
                                   {!provider.default && (
                                     <button
@@ -1497,11 +1832,11 @@ function LLMProfiles({ selectedProfile, onSelectProfile, onProfilesChange, hideH
 
                                   <button
                                     onClick={() => handleTestProvider(profile.profile_id, idx, provider)}
-                                    disabled={testingProvider === `${profile.profile_id}:${idx}`}
+                                    disabled={testingProvider === testKey}
                                     className="p-1 hover:bg-surface-elevated rounded transition-colors disabled:opacity-50"
                                     title="Test provider connection"
                                   >
-                                    {testingProvider === `${profile.profile_id}:${idx}` ? (
+                                    {testingProvider === testKey ? (
                                       <Loader2 size={14} className="text-primary animate-spin" />
                                     ) : (
                                       <Play size={14} className="text-success" />
@@ -1533,13 +1868,13 @@ function LLMProfiles({ selectedProfile, onSelectProfile, onProfilesChange, hideH
                               <div className="space-y-1.5 text-xs">
                                 <div className="flex items-start gap-2">
                                   <span className="text-text-disabled min-w-[60px]">Model:</span>
-                                  <code className="font-mono bg-surface-elevated px-2 py-0.5 rounded flex-1">
+                                  <code className="font-mono bg-surface-elevated px-2 py-0.5 rounded flex-1 min-w-0 break-all">
                                     {provider.model}
                                   </code>
                                 </div>
 
                                 {modelInfo && (
-                                  <div className="flex items-center gap-3 text-text-tertiary">
+                                  <div className="flex flex-wrap items-center gap-3 text-text-tertiary">
                                     <span className="flex items-center gap-1">
                                       <DollarSign size={12} />
                                       ${modelInfo.input_price_per_1m}/1M in
@@ -1562,38 +1897,8 @@ function LLMProfiles({ selectedProfile, onSelectProfile, onProfilesChange, hideH
                                 )}
 
                                 {/* Test Result Display */}
-                                {testResults[`${profile.profile_id}:${idx}`] && (
-                                  <div className={`mt-2 p-2 rounded text-xs ${
-                                    testResults[`${profile.profile_id}:${idx}`].success
-                                      ? 'bg-success/10 border border-success/30'
-                                      : 'bg-error/10 border border-error/30'
-                                  }`}>
-                                    <div className="flex items-center gap-1.5">
-                                      {testResults[`${profile.profile_id}:${idx}`].success ? (
-                                        <CheckCircle size={12} className="text-success" />
-                                      ) : (
-                                        <XCircle size={12} className="text-error" />
-                                      )}
-                                      <span className={testResults[`${profile.profile_id}:${idx}`].success ? 'text-success' : 'text-error'}>
-                                        {testResults[`${profile.profile_id}:${idx}`].success ? 'Test passed' : 'Test failed'}
-                                      </span>
-                                      {testResults[`${profile.profile_id}:${idx}`].duration && (
-                                        <span className="text-text-tertiary ml-auto">
-                                          {testResults[`${profile.profile_id}:${idx}`].duration.toFixed(2)}s
-                                        </span>
-                                      )}
-                                    </div>
-                                    {testResults[`${profile.profile_id}:${idx}`].response && (
-                                      <div className="mt-1 text-text-secondary truncate">
-                                        Response: {testResults[`${profile.profile_id}:${idx}`].response}
-                                      </div>
-                                    )}
-                                    {testResults[`${profile.profile_id}:${idx}`].error && (
-                                      <div className="mt-1 text-error">
-                                        Error: {testResults[`${profile.profile_id}:${idx}`].error}
-                                      </div>
-                                    )}
-                                  </div>
+                                {testResults[testKey] && (
+                                  <LLMTestResult result={testResults[testKey]} />
                                 )}
                               </div>
                             </div>
@@ -1661,9 +1966,10 @@ function LLMProfiles({ selectedProfile, onSelectProfile, onProfilesChange, hideH
         <LLMWizard
           profiles={profiles}
           availableModels={availableModels}
-          onComplete={(profileId, providerData) => {
-            handleAddProvider(profileId, providerData)
-            setShowLLMWizard(false)
+          onComplete={async (profileId, providerData) => {
+            const saved = await handleAddProvider(profileId, providerData)
+            if (saved) setShowLLMWizard(false)
+            return saved
           }}
           onCancel={() => setShowLLMWizard(false)}
         />

@@ -1,5 +1,6 @@
 """Test file management and execution endpoints."""
 
+import contextlib
 import json
 import os
 import re
@@ -14,12 +15,11 @@ from pydantic import BaseModel
 
 from testmcpy.config import get_config
 from testmcpy.evals.base_evaluators import create_evaluator
+from testmcpy.llm_profiles import resolve_llm_provider_selection
+from testmcpy.scrubber import scrub_obj, scrub_text
 from testmcpy.server.routers.generation_logs import save_generation_log
 from testmcpy.server.state import get_or_create_mcp_client
-from testmcpy.src.llm_integration import (
-    claude_provider_api_key_kwargs,
-    create_llm_provider,
-)
+from testmcpy.src.llm_integration import create_llm_provider
 from testmcpy.src.test_runner import TestCase, TestRunner
 
 router = APIRouter(prefix="/api", tags=["tests"])
@@ -314,52 +314,16 @@ async def list_tests():
 @router.post("/tests/run-single")
 async def run_single_test(request: SingleTestRunRequest):
     """Run a single ad-hoc test case from the Prompt Playground."""
-    # Don't fall back to config defaults yet — the LLM profile may supply
-    # model/provider, and the or-check below must see request.model/provider
-    # as None to honour the profile selection.
-    model: str | None = request.model
-    provider: str | None = request.provider
-    provider_config: dict[str, Any] = dict(request.provider_config or {})
-
-    # Resolve model/provider/config from LLM profile if provided
-    if request.llm_profile:
-        from testmcpy.llm_profiles import load_llm_profile
-
-        llm_profile = load_llm_profile(request.llm_profile)
-        if llm_profile:
-            default_prov = llm_profile.get_default_provider()
-            if default_prov:
-                model = model or default_prov.model
-                provider = provider or default_prov.provider
-                # For assistant/chatbot providers, fold profile fields into
-                # provider_config so AssistantProvider.__init__ receives them.
-                # Treat existing None or empty-string values as absent so the
-                # profile's value is applied even when the client serialised
-                # the field as null/"" rather than omitting it entirely.
-                if provider in ("assistant", "chatbot"):
-                    for fname in (
-                        "workspace_hash",
-                        "domain",
-                        "api_token",
-                        "api_secret",
-                        "api_url",
-                        "conversations_path",
-                        "completions_path",
-                    ):
-                        val = getattr(default_prov, fname, None)
-                        if val and not provider_config.get(fname):
-                            provider_config[fname] = val
-                # For Claude Agent SDK providers, fold the profile's auth token
-                # so ClaudeSDKProvider injects it into the CLI subprocess env.
-                elif provider in ("claude-sdk", "claude-cli", "claude-code"):
-                    for fname in ("api_key", "api_key_env"):
-                        val = getattr(default_prov, fname, None)
-                        if val and not provider_config.get(fname):
-                            provider_config[fname] = val
-
-    # Fall back to global config defaults only if still unset after profile resolution
-    model = model or config.default_model
-    provider = provider or config.default_provider
+    provider, model, profile_provider_config = resolve_llm_provider_selection(
+        request.provider,
+        request.model,
+        request.llm_profile,
+        fallback_provider=config.default_provider,
+        fallback_model=config.default_model,
+    )
+    provider_config = {**profile_provider_config, **(request.provider_config or {})}
+    if not provider or not model:
+        raise HTTPException(status_code=400, detail="Model and provider must be configured")
 
     # Build evaluators list
     evaluator_configs = request.evaluators
@@ -395,6 +359,7 @@ async def run_single_test(request: SingleTestRunRequest):
             verbose=True,
             hide_tool_output=False,
             provider_config=provider_config or {},
+            llm_profile=request.llm_profile,
         )
 
         results = await runner.run_tests([test_case])
@@ -408,9 +373,13 @@ async def run_single_test(request: SingleTestRunRequest):
             "result": result.to_dict(),
         }
     except (ConnectionError, TimeoutError) as e:
-        return {"error": f"Connection error: {str(e)}"}
+        from testmcpy.scrubber import scrub_text
+
+        return {"error": f"Connection error: {scrub_text(str(e))}"}
     except (ValueError, RuntimeError) as e:
-        return {"error": str(e)}
+        from testmcpy.scrubber import scrub_text
+
+        return {"error": scrub_text(str(e))}
 
 
 # NOTE: Generate endpoints must be defined BEFORE the catch-all /tests/{filename:path}
@@ -420,15 +389,19 @@ async def run_single_test(request: SingleTestRunRequest):
 @router.post("/tests/generate")
 async def generate_tests(request: GenerateTestsRequest):
     """Generate tests for an MCP tool using LLM."""
-    model = request.model or config.default_model
-    provider = request.provider or config.default_provider
+    provider, model, provider_config = resolve_llm_provider_selection(
+        request.provider,
+        request.model,
+        request.llm_profile,
+        fallback_provider=config.default_provider,
+        fallback_model=config.default_model,
+    )
+    if not provider or not model:
+        raise HTTPException(status_code=400, detail="Model and provider must be configured")
 
+    llm_provider = None
     try:
-        # Inject a UI-entered Claude token for claude-sdk/code providers,
-        # resolved from the request's LLM profile (falls back to the default
-        # profile, then the host `claude` login).
-        kwargs = claude_provider_api_key_kwargs(provider, model, request.llm_profile)
-        llm_provider = create_llm_provider(provider, model, **kwargs)
+        llm_provider = create_llm_provider(provider, model, **provider_config)
         await llm_provider.initialize()
 
         # Step 1: Analyze tool and suggest strategies
@@ -461,7 +434,7 @@ Respond with a structured analysis in JSON format:
         # Parse the analysis
         try:
             # Extract JSON from response
-            analysis_text = analysis_result.response
+            analysis_text = scrub_text(analysis_result.response)
             # Try to find JSON in the response
             json_match = re.search(r"\{[\s\S]*\}", analysis_text)
             if json_match:
@@ -547,7 +520,7 @@ tests:"""
         )
 
         # Extract YAML from response
-        yaml_content = test_gen_result.response
+        yaml_content = scrub_text(test_gen_result.response)
 
         # If response starts with tests (continuing from our prompt), prepend the header
         if yaml_content.strip().startswith("- name:") or yaml_content.strip().startswith(
@@ -576,7 +549,10 @@ tests:"""
         except Exception as e:
             raise HTTPException(
                 status_code=500,
-                detail=f"Generated invalid YAML: {str(e)}\n\nGenerated content:\n{yaml_content}",
+                detail=(
+                    f"Generated invalid YAML: {scrub_text(str(e))}\n\n"
+                    f"Generated content:\n{scrub_text(yaml_content)}"
+                ),
             )
 
         # Generate filename and folder structure
@@ -598,8 +574,6 @@ tests:"""
         with open(file_path, "w") as f:
             f.write(yaml_content)
 
-        await llm_provider.close()
-
         return {
             "success": True,
             "filename": relative_path,
@@ -610,17 +584,29 @@ tests:"""
         }
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=scrub_text(str(e)))
+    finally:
+        if llm_provider is not None:
+            with contextlib.suppress(Exception):
+                await llm_provider.close()
 
 
 @router.post("/tests/generate/stream")
 async def generate_tests_stream(request: GenerateTestsRequest):
     """Generate tests for an MCP tool using LLM with streaming logs."""
-    model = request.model or config.default_model
-    provider = request.provider or config.default_provider
+    provider, model, provider_config = resolve_llm_provider_selection(
+        request.provider,
+        request.model,
+        request.llm_profile,
+        fallback_provider=config.default_provider,
+        fallback_model=config.default_model,
+    )
+    if not provider or not model:
+        raise HTTPException(status_code=400, detail="Model and provider must be configured")
 
     async def generate():
         """Generator that yields SSE events with progress logs."""
+        llm_provider = None
         # Track logs and LLM calls for history
         log_messages = []
         llm_calls = []
@@ -633,19 +619,21 @@ async def generate_tests_stream(request: GenerateTestsRequest):
 
         def send_log(message: str, log_type: str = "log"):
             """Format a log message as SSE event."""
+            message = scrub_text(message)
             log_messages.append(message)
-            data = json.dumps({"type": log_type, "message": message})
+            data = json.dumps(scrub_obj({"type": log_type, "message": message}))
             return f"data: {data}\n\n"
 
         def send_result(result: dict):
             """Format final result as SSE event."""
-            data = json.dumps({"type": "complete", "result": result})
+            data = json.dumps(scrub_obj({"type": "complete", "result": result}))
             return f"data: {data}\n\n"
 
         def send_error(error: str):
             """Format error as SSE event."""
+            error = scrub_text(error)
             log_messages.append(f"ERROR: {error}")
-            data = json.dumps({"type": "error", "message": error})
+            data = json.dumps(scrub_obj({"type": "error", "message": error}))
             return f"data: {data}\n\n"
 
         try:
@@ -653,10 +641,9 @@ async def generate_tests_stream(request: GenerateTestsRequest):
             yield send_log(f"📋 Coverage level: {request.coverage_level}")
             yield send_log(f"🤖 Using {provider}/{model}")
 
-            # Initialize LLM provider (inject UI Claude token when applicable)
+            # Initialize the provider selected from the requested LLM profile.
             yield send_log("🔧 Initializing LLM provider...")
-            kwargs = claude_provider_api_key_kwargs(provider, model, request.llm_profile)
-            llm_provider = create_llm_provider(provider, model, **kwargs)
+            llm_provider = create_llm_provider(provider, model, **provider_config)
             await llm_provider.initialize()
             yield send_log("✓ LLM provider ready")
 
@@ -707,7 +694,7 @@ Respond with a structured analysis in JSON format:
                 {
                     "step": "analysis",
                     "prompt": analysis_prompt,
-                    "response": analysis_result.response,
+                    "response": scrub_text(analysis_result.response),
                     "cost": analysis_result.cost,
                     "tokens": token_usage.get("total", 0),
                     "duration": analysis_duration,
@@ -717,7 +704,7 @@ Respond with a structured analysis in JSON format:
 
             # Parse analysis
             try:
-                analysis_text = analysis_result.response
+                analysis_text = scrub_text(analysis_result.response)
                 json_match = re.search(r"\{[\s\S]*\}", analysis_text)
                 if json_match:
                     analysis = json.loads(json_match.group())
@@ -815,7 +802,7 @@ tests:"""
                 {
                     "step": "generation",
                     "prompt": test_gen_prompt,
-                    "response": test_gen_result.response,
+                    "response": scrub_text(test_gen_result.response),
                     "cost": test_gen_result.cost,
                     "tokens": gen_token_usage.get("total", 0),
                     "duration": gen_duration,
@@ -825,7 +812,7 @@ tests:"""
 
             # Process YAML
             yield send_log("🔍 Processing generated YAML...")
-            yaml_content = test_gen_result.response
+            yaml_content = scrub_text(test_gen_result.response)
 
             if yaml_content.strip().startswith("- name:") or yaml_content.strip().startswith(
                 "  - name:"
@@ -851,7 +838,7 @@ tests:"""
                 test_count = len(parsed_yaml.get("tests", []))
                 yield send_log(f"   ✓ Valid YAML with {test_count} tests")
             except Exception as e:
-                error_msg = f"Generated invalid YAML: {str(e)}"
+                error_msg = f"Generated invalid YAML: {scrub_text(str(e))}"
                 # Save log even on error
                 save_generation_log(
                     {
@@ -898,8 +885,6 @@ tests:"""
 
             yield send_log(f"   ✓ Saved to {relative_path}")
 
-            await llm_provider.close()
-
             total_cost = test_gen_result.cost + analysis_result.cost
             yield send_log(f"✅ Complete! Total cost: ${total_cost:.4f}")
 
@@ -941,7 +926,7 @@ tests:"""
             )
 
         except Exception as e:
-            error_msg = str(e)
+            error_msg = scrub_text(str(e))
             # Save log even on error
             try:
                 save_generation_log(
@@ -968,6 +953,10 @@ tests:"""
             except Exception:
                 pass  # Don't fail if log saving fails
             yield send_error(error_msg)
+        finally:
+            if llm_provider is not None:
+                with contextlib.suppress(Exception):
+                    await llm_provider.close()
 
     return StreamingResponse(
         generate(),

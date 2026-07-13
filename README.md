@@ -400,6 +400,22 @@ pip install 'testmcpy[server]'
 testmcpy serve
 ```
 
+The UI accepts loopback `Host` headers by default. For LAN, container, or
+reverse-proxy access, bind on all interfaces and explicitly list every hostname
+or IP clients will use (the option is repeatable):
+
+```bash
+testmcpy serve --host 0.0.0.0 \
+  --allowed-host testmcpy.example.com \
+  --allowed-host 192.0.2.10 \
+  --no-browser
+```
+
+`TESTMCPY_ALLOWED_HOSTS=testmcpy.example.com,192.0.2.10` provides the same host
+policy for deployments configured through environment variables. Values are
+hostnames or IP addresses only, without a URL scheme or port. A global `*` is
+rejected by `testmcpy serve` because it would disable DNS-rebinding protection.
+
 | Route | Page | Description |
 |-------|------|-------------|
 | `/` | MCP Explorer | Tool discovery, smoke tests, schema viewing |

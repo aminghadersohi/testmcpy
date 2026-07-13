@@ -886,12 +886,21 @@ def get_model(model_id: str) -> ModelInfo | None:
 def get_models_by_provider(provider: str | Provider) -> list[ModelInfo]:
     """Get all models for a provider."""
     if isinstance(provider, str):
-        # Handle gemini alias first (maps to google)
-        if provider.lower() == "gemini":
-            provider = Provider.GOOGLE
+        aliases = {
+            "gemini": Provider.GOOGLE,
+            "claude-cli": Provider.CLAUDE_SDK,
+            "claude-code": Provider.CLAUDE_SDK,
+            "codex": Provider.CODEX_CLI,
+            "codex-sdk": Provider.CODEX_CLI,
+            "grok": Provider.XAI,
+            "aws-bedrock": Provider.BEDROCK,
+        }
+        normalized = provider.lower()
+        if normalized in aliases:
+            provider = aliases[normalized]
         else:
             try:
-                provider = Provider(provider.lower())
+                provider = Provider(normalized)
             except ValueError:
                 return []
     elif provider == Provider.GEMINI:

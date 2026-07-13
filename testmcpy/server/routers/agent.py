@@ -46,30 +46,48 @@ class AgentRunResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-def _resolve_cli_token(llm_profile_id: str | None) -> str | None:
+def _resolve_cli_token(
+    llm_profile_id: str | None,
+    model: str | None = None,
+) -> str | None:
     """Resolve the Claude auth token from an LLM profile's default provider.
 
-    Returns the direct ``api_key`` when set, else the value of the named
-    ``api_key_env`` environment variable. None when no profile/token is found,
-    leaving the agent on the host's ``claude`` login.
+    Returns a compatible Claude SDK credential when configured. An explicit
+    missing or incompatible profile is a configuration error; a compatible
+    profile without a token intentionally uses the host's ``claude`` login.
     """
     if not llm_profile_id:
         return None
-    import os
+    from testmcpy.llm_profiles import (
+        LLMProfileConfigError,
+        LLMProfileNotFoundError,
+        get_llm_profile_config,
+        load_llm_profile,
+        resolve_llm_provider_selection,
+    )
+    from testmcpy.scrubber import register_secret
+    from testmcpy.src.llm_integration import CLAUDE_SDK_PROVIDERS
 
-    from testmcpy.llm_profiles import load_llm_profile
-
+    profile_config = get_llm_profile_config()
+    if profile_config.load_error:
+        raise LLMProfileConfigError(
+            f"Invalid LLM profile configuration: {profile_config.load_error}"
+        )
     profile = load_llm_profile(llm_profile_id)
     if not profile:
+        raise LLMProfileNotFoundError(f"LLM profile '{llm_profile_id}' was not found")
+    if not any(provider.provider in CLAUDE_SDK_PROVIDERS for provider in profile.providers):
+        raise ValueError(f"LLM profile '{llm_profile_id}' has no Claude SDK provider")
+    _, _, provider_config = resolve_llm_provider_selection(
+        provider="claude-sdk",
+        model=model,
+        profile_id=llm_profile_id,
+    )
+    token = provider_config.get("api_key")
+    if not isinstance(token, str):
         return None
-    provider = profile.get_default_provider()
-    if not provider:
-        return None
-    if provider.api_key:
-        return provider.api_key
-    if provider.api_key_env:
-        return os.environ.get(provider.api_key_env)
-    return None
+    register_secret(token)
+    return token
 
 
 def _get_reports_dir() -> Path:
@@ -81,18 +99,23 @@ def _get_reports_dir() -> Path:
 
 def _save_report(run_id: str, report: dict[str, Any]) -> Path:
     """Save an agent report to disk."""
+    from testmcpy.scrubber import scrub_obj
+
     reports_dir = _get_reports_dir()
     report_file = reports_dir / f"{run_id}.json"
-    report_file.write_text(json.dumps(report, indent=2, default=str))
+    report_file.write_text(json.dumps(scrub_obj(report), indent=2, default=str))
     return report_file
 
 
 def _load_report(run_id: str) -> dict[str, Any] | None:
     """Load an agent report from disk."""
+    from testmcpy.scrubber import scrub_obj
+
     reports_dir = _get_reports_dir()
     report_file = reports_dir / f"{run_id}.json"
     if report_file.exists():
-        return json.loads(report_file.read_text())
+        report = scrub_obj(json.loads(report_file.read_text()))
+        return report if isinstance(report, dict) else None
     return None
 
 
@@ -108,6 +131,7 @@ async def run_agent(request: AgentRunRequest):
     The agent processes the prompt synchronously and returns results.
     """
     from testmcpy.agent.orchestrator import TestExecutionAgent
+    from testmcpy.scrubber import scrub_obj, scrub_text
 
     # Build effective prompt
     effective_prompt = request.prompt
@@ -132,11 +156,11 @@ async def run_agent(request: AgentRunRequest):
             models=request.models,
             max_turns=request.max_turns,
             agent_model=request.agent_model,
-            cli_token=_resolve_cli_token(request.llm_profile),
+            cli_token=_resolve_cli_token(request.llm_profile, request.agent_model),
         )
 
         report = await agent.run(effective_prompt)
-        report_dict = report.to_dict()
+        report_dict = scrub_obj(report.to_dict())
 
         # Save report to disk
         _save_report(report.run_id, report_dict)
@@ -150,20 +174,23 @@ async def run_agent(request: AgentRunRequest):
     except ImportError as e:
         raise HTTPException(
             status_code=501,
-            detail=str(e),
+            detail=scrub_text(str(e)),
         ) from e
     except (ConnectionError, TimeoutError, OSError) as e:
         return AgentRunResponse(
             run_id="",
             status="error",
-            error=f"Connection error: {e}",
+            error=f"Connection error: {scrub_text(str(e))}",
         )
     except ValueError as e:
-        return AgentRunResponse(
-            run_id="",
-            status="error",
-            error=f"Configuration error: {e}",
-        )
+        from testmcpy.llm_profiles import LLMProfileNotFoundError
+
+        if isinstance(e, LLMProfileNotFoundError):
+            raise HTTPException(status_code=404, detail=scrub_text(str(e))) from e
+        raise HTTPException(
+            status_code=400,
+            detail=f"Configuration error: {scrub_text(str(e))}",
+        ) from e
 
 
 @router.get("/report/{run_id}")

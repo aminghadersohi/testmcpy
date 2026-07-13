@@ -377,6 +377,12 @@ class TestCodexSDKProvider:
         p = create_llm_provider("codex-sdk", "codex-o3", openai_api_key="sk-test")
         assert isinstance(p, CodexSDKProvider)
 
+    def test_factory_maps_profile_api_key(self) -> None:
+        p = create_llm_provider("codex-sdk", "codex-o3", api_key="profile-key")
+
+        assert isinstance(p, CodexSDKProvider)
+        assert p.openai_api_key == "profile-key"
+
     def test_factory_alias_codex_cli(self) -> None:
         p = create_llm_provider("codex-cli", "codex-o3", openai_api_key="sk-test")
         assert isinstance(p, CodexSDKProvider)

@@ -11,6 +11,7 @@ from cryptography.fernet import Fernet
 from key_value.aio.stores.memory import MemoryStore
 from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 
+from testmcpy.scrubber import REDACTED, reset_cache, scrub_text
 from testmcpy.src.llm_integration import ClaudeSDKProvider
 from testmcpy.src.mcp_client import MCPOAuth
 from testmcpy.src.oauth_storage import (
@@ -51,6 +52,30 @@ async def test_mcp_oauth_persists_tokens_and_client_registration(tmp_path, monke
     )
     assert b"persisted-access-token" not in cache_contents
     assert b"registered-secret" not in cache_contents
+
+
+@pytest.mark.asyncio
+async def test_oauth_storage_registers_tokens_when_written_and_loaded(tmp_path):
+    access_token = "stored-oauth-access-token-12345"
+    refresh_token = "stored-oauth-refresh-token-12345"
+    storage = create_oauth_token_storage("https://mcp.example.com/mcp", tmp_path)
+    reset_cache()
+    try:
+        await storage.set_tokens(OAuthToken(access_token=access_token, refresh_token=refresh_token))
+
+        assert scrub_text(f"echo {access_token}") == f"echo {REDACTED}"
+        assert scrub_text(f"echo {refresh_token}") == f"echo {REDACTED}"
+
+        reset_cache()
+        loaded = await storage.get_tokens()
+
+        assert loaded is not None
+        assert loaded.access_token == access_token
+        assert loaded.refresh_token == refresh_token
+        assert scrub_text(f"echo {access_token}") == f"echo {REDACTED}"
+        assert scrub_text(f"echo {refresh_token}") == f"echo {REDACTED}"
+    finally:
+        reset_cache()
 
 
 @pytest.mark.asyncio

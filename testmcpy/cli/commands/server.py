@@ -1,8 +1,10 @@
 """Server and setup commands: init, setup, serve, config_cmd, config_mcp, doctor."""
 
 import asyncio
+import ipaddress
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Optional
@@ -10,6 +12,7 @@ from typing import Optional
 import typer
 import yaml
 from rich.panel import Panel
+from rich.prompt import Prompt
 from rich.syntax import Syntax
 from rich.table import Table
 
@@ -22,6 +25,125 @@ from testmcpy.cli.app import (
     print_logo,
 )
 from testmcpy.config import get_config
+
+_DEFAULT_SERVE_ALLOWED_HOSTS = ("127.0.0.1", "localhost", "::1", "testserver")
+
+
+def _normalize_allowed_host(value: str) -> str:
+    """Validate one hostname/IP accepted in an HTTP Host header."""
+    host = value.strip().lower().rstrip(".")
+    if not host:
+        raise ValueError("allowed hosts cannot be empty")
+    if host == "*":
+        raise ValueError(
+            "'*' disables DNS-rebinding protection; list each trusted hostname instead"
+        )
+    if "://" in host or "/" in host or any(character.isspace() for character in host):
+        raise ValueError(
+            f"'{value}' must be a hostname or IP address without a scheme, path, or port"
+        )
+
+    wildcard = host.startswith("*.")
+    candidate = host[2:] if wildcard else host
+    if not candidate:
+        raise ValueError(f"'{value}' is not a valid hostname or IP address")
+
+    unbracketed = candidate.strip("[]")
+    try:
+        address = ipaddress.ip_address(unbracketed)
+    except ValueError:
+        if ":" in candidate or "[" in candidate or "]" in candidate:
+            raise ValueError(
+                f"'{value}' must not include a port (use an unbracketed IPv6 address)"
+            ) from None
+        try:
+            candidate = candidate.encode("idna").decode("ascii")
+        except UnicodeError:
+            raise ValueError(f"'{value}' is not a valid hostname") from None
+        labels = candidate.split(".")
+        if len(candidate) > 253 or any(
+            not label
+            or len(label) > 63
+            or label.startswith("-")
+            or label.endswith("-")
+            or re.fullmatch(r"[a-z0-9-]+", label) is None
+            for label in labels
+        ):
+            raise ValueError(f"'{value}' is not a valid hostname")
+        return f"*.{candidate}" if wildcard else candidate
+
+    if wildcard:
+        raise ValueError(f"'{value}' cannot use a wildcard with an IP address")
+    return address.compressed
+
+
+def _bind_host_is_wildcard(host: str) -> bool:
+    """Return whether uvicorn will listen on every address family interface."""
+    try:
+        return ipaddress.ip_address(host.strip("[]")).is_unspecified
+    except ValueError:
+        return False
+
+
+def _configure_serve_allowed_hosts(
+    bind_host: str, allowed_hosts: Optional[list[str]]
+) -> tuple[tuple[str, ...], str]:
+    """Build and export the Host-header policy used by the web application."""
+    configured = os.environ.get("TESTMCPY_ALLOWED_HOSTS")
+    if configured is None:
+        effective = list(_DEFAULT_SERVE_ALLOWED_HOSTS)
+        source = "secure loopback defaults"
+    else:
+        effective = [host.strip().lower() for host in configured.split(",") if host.strip()]
+        source = "TESTMCPY_ALLOWED_HOSTS"
+        if "*" in effective:
+            raise ValueError(
+                "TESTMCPY_ALLOWED_HOSTS='*' disables DNS-rebinding protection; "
+                "list each trusted hostname instead"
+            )
+
+    if allowed_hosts:
+        effective.extend(_normalize_allowed_host(host) for host in allowed_hosts)
+        source = f"{source} + --allowed-host"
+    elif configured is None and not _bind_host_is_wildcard(bind_host):
+        # A concrete bind address is safe to trust exactly. Wildcard socket
+        # addresses are never valid Host headers and must not broaden policy.
+        effective.append(_normalize_allowed_host(bind_host))
+
+    deduplicated = tuple(dict.fromkeys(effective))
+    os.environ["TESTMCPY_ALLOWED_HOSTS"] = ",".join(deduplicated)
+    return deduplicated, source
+
+
+def _frontend_needs_build(ui_dir: Path, ui_dist: Path) -> bool:
+    """Return true when the checked-out UI bundle is missing or older than its sources."""
+    built_index = ui_dist / "index.html"
+    if not built_index.is_file():
+        return True
+
+    try:
+        built_html = built_index.read_text(encoding="utf-8")
+    except OSError:
+        return True
+    for reference in re.findall(r"(?:src|href)=[\"']([^\"']+)", built_html):
+        clean_reference = reference.split("?", 1)[0].split("#", 1)[0]
+        if not clean_reference or clean_reference.startswith(
+            ("data:", "http://", "https://", "//")
+        ):
+            continue
+        referenced_file = ui_dist / clean_reference.lstrip("/")
+        if not referenced_file.is_file():
+            return True
+
+    built_at = built_index.stat().st_mtime_ns
+    source_paths = [
+        ui_dir / "index.html",
+        ui_dir / "package.json",
+        ui_dir / "package-lock.json",
+        ui_dir / "vite.config.js",
+    ]
+    source_paths.extend((ui_dir / "src").rglob("*"))
+    return any(path.is_file() and path.stat().st_mtime_ns > built_at for path in source_paths)
 
 
 @app.command()
@@ -105,7 +227,8 @@ def setup(
     Guides you through configuring MCP service profiles and LLM providers.
     Creates .llm_providers.yaml and .mcp_services.yaml in current directory.
     """
-    from testmcpy.config import get_config
+    from testmcpy.config import reload_config
+    from testmcpy.llm_profiles import LLMProfile, LLMProfileConfig, LLMProviderConfig
 
     console.print(
         Panel.fit(
@@ -116,10 +239,10 @@ def setup(
     )
 
     # Load current config to show existing values and detect env vars
-    current_config = get_config()
+    current_config = reload_config()
 
     # Check for existing files
-    llm_yaml_path = Path.cwd() / ".llm_providers.yaml"
+    llm_yaml_path = LLMProfileConfig().source_path
     mcp_yaml_path = Path.cwd() / ".mcp_services.yaml"
 
     if (llm_yaml_path.exists() or mcp_yaml_path.exists()) and not force:
@@ -146,11 +269,9 @@ def setup(
     if env_anthropic_key or env_openai_key:
         console.print("[green]✓ Detected API keys in environment:[/green]")
         if env_anthropic_key:
-            console.print(
-                f"  • ANTHROPIC_API_KEY: {env_anthropic_key[:8]}...{env_anthropic_key[-4:]}"
-            )
+            console.print("  • ANTHROPIC_API_KEY is set")
         if env_openai_key:
-            console.print(f"  • OPENAI_API_KEY: {env_openai_key[:8]}...{env_openai_key[-4:]}")
+            console.print("  • OPENAI_API_KEY is set")
         console.print()
 
     # Ask which provider to use
@@ -160,36 +281,34 @@ def setup(
     console.print("3. [cyan]Ollama[/cyan] - Local models (free, requires ollama serve)")
 
     provider_choice = console.input("\nChoice [1]: ").strip() or "1"
+    if provider_choice not in {"1", "2", "3"}:
+        console.print("[red]Invalid provider choice. Enter 1, 2, or 3.[/red]")
+        raise typer.Exit(1)
 
     llm_config = {"default": "prod", "profiles": {}}
 
     if provider_choice == "1":
         # Anthropic
         console.print("\n[bold]Anthropic Configuration:[/bold]")
-        console.print("1. [cyan]claude-sonnet-4-5[/cyan] - Latest Sonnet 4.5 (most capable)")
-        console.print("2. [cyan]claude-haiku-4-5[/cyan] - Latest Haiku 4.5 (fast & efficient)")
-        console.print("3. [cyan]claude-opus-4-1[/cyan] - Latest Opus 4.1 (most powerful)")
+        console.print("1. [cyan]claude-sonnet-4-6-20260401[/cyan] - Current default Sonnet")
+        console.print("2. [cyan]claude-3-5-haiku-20241022[/cyan] - Fast and efficient")
+        console.print("3. [cyan]claude-opus-4-7-20260401[/cyan] - Most capable")
 
         model_choice = console.input("\nChoice [1]: ").strip() or "1"
-        model = "claude-sonnet-4-5"
+        model = "claude-sonnet-4-6-20260401"
         if model_choice == "2":
-            model = "claude-haiku-4-5"
+            model = "claude-3-5-haiku-20241022"
         elif model_choice == "3":
-            model = "claude-opus-4-1"
+            model = "claude-opus-4-7-20260401"
 
-        # API Key
-        if env_anthropic_key:
-            console.print(
-                f"\n[green]Using Anthropic API key from environment:[/green] "
-                f"{env_anthropic_key[:8]}...{env_anthropic_key[-4:]}"
-            )
-            use_env = console.input("Save this key to .llm_providers.yaml? [Y/n]: ").strip().lower()
-            if use_env in ["", "y", "yes"]:
-                api_key = env_anthropic_key
-            else:
-                api_key = console.input("Enter different API key: ").strip()
+        env_name = console.input(
+            "\nAPI key environment variable [ANTHROPIC_API_KEY] (enter '-' for a direct key): "
+        ).strip()
+        credential_config = {}
+        if env_name != "-":
+            credential_config["api_key_env"] = env_name or "ANTHROPIC_API_KEY"
         else:
-            api_key = console.input("\nAnthropic API Key: ").strip()
+            credential_config["api_key"] = Prompt.ask("Anthropic API Key", password=True)
 
         llm_config["profiles"]["prod"] = {
             "name": "Production",
@@ -199,7 +318,7 @@ def setup(
                     "name": f"Claude {model}",
                     "provider": "anthropic",
                     "model": model,
-                    "api_key": api_key,
+                    **credential_config,
                     "timeout": 60,
                     "default": True,
                 }
@@ -209,30 +328,25 @@ def setup(
     elif provider_choice == "2":
         # OpenAI
         console.print("\n[bold]OpenAI Configuration:[/bold]")
-        console.print("1. [cyan]gpt-4o[/cyan] - GPT-4 Optimized (recommended)")
-        console.print("2. [cyan]gpt-4-turbo[/cyan] - GPT-4 Turbo")
-        console.print("3. [cyan]gpt-3.5-turbo[/cyan] - GPT-3.5 Turbo (faster, cheaper)")
+        console.print("1. [cyan]gpt-5.4[/cyan] - Current default")
+        console.print("2. [cyan]gpt-4o[/cyan] - GPT-4o")
+        console.print("3. [cyan]o4-mini[/cyan] - Compact reasoning model")
 
         model_choice = console.input("\nChoice [1]: ").strip() or "1"
-        model = "gpt-4o"
+        model = "gpt-5.4"
         if model_choice == "2":
-            model = "gpt-4-turbo"
+            model = "gpt-4o"
         elif model_choice == "3":
-            model = "gpt-3.5-turbo"
+            model = "o4-mini"
 
-        # API Key
-        if env_openai_key:
-            console.print(
-                f"\n[green]Using OpenAI API key from environment:[/green] "
-                f"{env_openai_key[:8]}...{env_openai_key[-4:]}"
-            )
-            use_env = console.input("Save this key to .llm_providers.yaml? [Y/n]: ").strip().lower()
-            if use_env in ["", "y", "yes"]:
-                api_key = env_openai_key
-            else:
-                api_key = console.input("Enter different API key: ").strip()
+        env_name = console.input(
+            "\nAPI key environment variable [OPENAI_API_KEY] (enter '-' for a direct key): "
+        ).strip()
+        credential_config = {}
+        if env_name != "-":
+            credential_config["api_key_env"] = env_name or "OPENAI_API_KEY"
         else:
-            api_key = console.input("\nOpenAI API Key: ").strip()
+            credential_config["api_key"] = Prompt.ask("OpenAI API Key", password=True)
 
         llm_config["profiles"]["prod"] = {
             "name": "Production",
@@ -242,7 +356,7 @@ def setup(
                     "name": f"OpenAI {model}",
                     "provider": "openai",
                     "model": model,
-                    "api_key": api_key,
+                    **credential_config,
                     "timeout": 60,
                     "default": True,
                 }
@@ -283,9 +397,21 @@ def setup(
             ],
         }
 
-    # Save LLM config
-    llm_yaml_path.write_text(yaml.dump(llm_config, default_flow_style=False, sort_keys=False))
-    console.print(f"\n[green]✓ LLM configuration saved to:[/green] {llm_yaml_path}")
+    # Save through the profile layer so credentials are mode-0600 and writes are atomic.
+    profile_config = LLMProfileConfig()
+    profile_config.profiles = {}
+    profile_config.default_profile_id = llm_config["default"]
+    profile_data = llm_config["profiles"]["prod"]
+    profile_config.add_profile(
+        LLMProfile(
+            profile_id="prod",
+            name=profile_data["name"],
+            description=profile_data["description"],
+            providers=[LLMProviderConfig(**provider) for provider in profile_data["providers"]],
+        )
+    )
+    profile_config.save(force=True)
+    console.print(f"\n[green]✓ LLM configuration saved to:[/green] {profile_config.source_path}")
 
     # ============================================================
     # MCP Service Configuration
@@ -294,7 +420,7 @@ def setup(
 
     # Show current MCP URL if set
     current_mcp_url = current_config.get_mcp_url()
-    if current_mcp_url and current_mcp_url != "http://localhost:5008/mcp/":
+    if current_mcp_url and current_mcp_url.rstrip("/") != "http://localhost:5008/mcp":
         source = current_config.get_source("MCP_URL")
         console.print(f"[green]✓ MCP Service URL detected[/green] ({source})")
         console.print(f"[dim]  Current: {current_mcp_url}[/dim]")
@@ -439,7 +565,7 @@ def setup(
     console.print("1. Run: [cyan]testmcpy config-cmd[/cyan]  # Verify configuration")
     if mcp_yaml_path.exists():
         console.print("2. Run: [cyan]testmcpy tools[/cyan]  # List available MCP tools")
-        console.print("3. Run: [cyan]testmcpy interact[/cyan]  # Start interactive session")
+        console.print("3. Run: [cyan]testmcpy chat[/cyan]  # Start interactive session")
     console.print(
         "\n[dim]Note: You can edit these files manually or run setup again with --force[/dim]"
     )
@@ -449,6 +575,14 @@ def setup(
 def serve(
     port: int = typer.Option(8000, "--port", "-p", help="Port to run server on"),
     host: str = typer.Option("127.0.0.1", "--host", help="Host to bind to"),
+    allowed_host: Optional[list[str]] = typer.Option(
+        None,
+        "--allowed-host",
+        help=(
+            "Additional trusted HTTP Host hostname or IP (repeatable; no scheme or port). "
+            "Required for remote access through --host 0.0.0.0/:: or a reverse proxy."
+        ),
+    ),
     dev: bool = typer.Option(False, "--dev", help="Run in development mode (don't build frontend)"),
     no_browser: bool = typer.Option(False, "--no-browser", help="Don't open browser automatically"),
 ):
@@ -458,8 +592,26 @@ def serve(
     This command starts a FastAPI server that serves a beautiful React-based UI
     for inspecting MCP tools, interactive chat, and test management.
     """
+    try:
+        effective_allowed_hosts, host_policy_source = _configure_serve_allowed_hosts(
+            host, allowed_host
+        )
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--allowed-host") from exc
+
     # Show logo
     print_logo()
+
+    if (
+        _bind_host_is_wildcard(host)
+        and not allowed_host
+        and host_policy_source.startswith("secure loopback defaults")
+    ):
+        console.print(
+            "[yellow]Host policy:[/yellow] listening on all interfaces, but remote Host headers "
+            "remain blocked. Add [cyan]--allowed-host your.domain[/cyan] for each trusted name."
+        )
+    console.print("[dim]Accepted Host headers: " + ", ".join(effective_allowed_hosts) + "[/dim]")
 
     # Show authentication steps
     console.print("\n[bold cyan]Authentication Setup[/bold cyan]")
@@ -558,9 +710,10 @@ def serve(
         console.print("Install with: pip install 'testmcpy[server]'", markup=False)
         return
 
-    # Build frontend if not in dev mode and dist doesn't exist
-    if not dev and not ui_dist.exists():
-        console.print("\n[yellow]Frontend not built. Building now...[/yellow]")
+    # Source checkouts often retain an old dist directory across branch changes.
+    # Rebuild it before serving so index.html never references missing JS chunks.
+    if not dev and _frontend_needs_build(ui_dir, ui_dist):
+        console.print("\n[yellow]Frontend bundle is missing or stale. Building now...[/yellow]")
 
         # Check if npm is available
         try:

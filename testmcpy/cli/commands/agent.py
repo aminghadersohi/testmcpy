@@ -122,16 +122,44 @@ def agent_run(
     # named LLM profile's default provider (api_key / api_key_env).
     effective_cli_token = cli_token
     if not effective_cli_token and llm_profile:
-        import os
+        from testmcpy.llm_profiles import (
+            LLMProfileConfigError,
+            get_llm_profile_config,
+            load_llm_profile,
+            resolve_llm_provider_selection,
+        )
+        from testmcpy.src.llm_integration import CLAUDE_SDK_PROVIDERS
 
-        from testmcpy.llm_profiles import load_llm_profile
-
-        prof = load_llm_profile(llm_profile)
-        provider = prof.get_default_provider() if prof else None
-        if provider:
-            effective_cli_token = provider.api_key or (
-                os.environ.get(provider.api_key_env) if provider.api_key_env else None
+        profile_config = get_llm_profile_config()
+        if profile_config.load_error:
+            console.print(
+                f"[red]Error:[/red] Invalid LLM profile configuration: {profile_config.load_error}"
             )
+            raise typer.Exit(1)
+        prof = load_llm_profile(llm_profile)
+        if not prof:
+            console.print(f"[red]Error:[/red] LLM profile '{llm_profile}' was not found")
+            raise typer.Exit(1)
+        if not any(provider.provider in CLAUDE_SDK_PROVIDERS for provider in prof.providers):
+            console.print(
+                f"[red]Error:[/red] LLM profile '{llm_profile}' has no Claude SDK provider"
+            )
+            raise typer.Exit(1)
+        try:
+            _, _, provider_config = resolve_llm_provider_selection(
+                provider="claude-sdk",
+                model=agent_model,
+                profile_id=llm_profile,
+            )
+        except LLMProfileConfigError as exc:
+            console.print(f"[red]Error:[/red] {exc}")
+            raise typer.Exit(1) from exc
+        token = provider_config.get("api_key")
+        effective_cli_token = token if isinstance(token, str) else None
+
+    from testmcpy.scrubber import register_secret, scrub_obj, scrub_text
+
+    register_secret(effective_cli_token)
 
     console.print(
         Panel.fit(
@@ -159,7 +187,7 @@ def agent_run(
                 cli_token=effective_cli_token,
             )
         except ImportError as exc:
-            console.print(f"[red]Error:[/red] {exc}")
+            console.print(f"[red]Error:[/red] {scrub_text(str(exc))}")
             raise typer.Exit(1) from exc
 
         with console.status("[cyan]Agent is working...[/cyan]"):
@@ -171,7 +199,7 @@ def agent_run(
 
         # Save report if requested
         if output:
-            output.write_text(json.dumps(report.to_dict(), indent=2, default=str))
+            output.write_text(json.dumps(scrub_obj(report.to_dict()), indent=2, default=str))
             console.print(f"\n[green]Report saved to {output}[/green]")
 
     asyncio.run(_run_agent())
@@ -179,6 +207,8 @@ def agent_run(
 
 def _display_report(report, verbose: bool = False):
     """Display the agent run report with Rich formatting."""
+    from testmcpy.scrubber import scrub_text
+
     # Test Results Summary
     if report.tests_run > 0:
         status_color = "green" if report.tests_failed == 0 else "red"
@@ -233,14 +263,14 @@ def _display_report(report, verbose: bool = False):
     if report.errors:
         console.print(f"\n[bold red]Errors ({len(report.errors)}):[/bold red]")
         for error in report.errors[:5]:
-            console.print(f"  [red]{error}[/red]")
+            console.print(f"  [red]{scrub_text(error)}[/red]")
         if len(report.errors) > 5:
             console.print(f"  [dim]... and {len(report.errors) - 5} more[/dim]")
 
     # Agent's analysis
     if report.analysis and verbose:
         console.print("\n[bold]Agent Analysis:[/bold]")
-        console.print(Panel(report.analysis[:2000], border_style="dim"))
+        console.print(Panel(scrub_text(report.analysis[:2000]), border_style="dim"))
 
     # Verbose: tool call history
     if verbose and report.tool_call_history:

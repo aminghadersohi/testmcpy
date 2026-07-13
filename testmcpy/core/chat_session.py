@@ -5,11 +5,14 @@ Handles chat interactions with LLMs including tool calling, history management,
 and test generation. Provides core business logic independent of UI layer.
 """
 
+import asyncio
+import contextlib
 import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from testmcpy.config import get_config
+from testmcpy.config import Config, get_config
+from testmcpy.llm_profiles import resolve_llm_provider_selection
 from testmcpy.src.llm_integration import LLMProvider, LLMResult, create_llm_provider
 from testmcpy.src.mcp_client import MCPClient, MCPToolCall
 
@@ -71,6 +74,7 @@ class ChatSession:
         provider: str | None = None,
         model: str | None = None,
         mcp_url: str | None = None,
+        llm_profile: str | None = None,
     ):
         """
         Initialize chat session.
@@ -80,22 +84,35 @@ class ChatSession:
             provider: LLM provider (anthropic, openai, ollama, etc.)
             model: Model name
             mcp_url: MCP service URL
+            llm_profile: LLM profile ID (defaults to the configured default profile)
         """
-        self.config = get_config()
+        self.config = Config(profile=profile) if profile else get_config()
         self.profile = profile
+        self.llm_profile = llm_profile
         self.messages: list[ChatMessage] = []
         self.total_cost = 0.0
         self.total_tokens = 0
 
         # LLM provider setup
-        self.provider_name = provider or self.config.default_provider or "anthropic"
-        self.model = model or self.config.default_model or "claude-haiku-4-5"
-        # Get MCP URL from profile if available
-        if not mcp_url:
-            default_mcp = self.config.get_default_mcp_server()
-            if default_mcp:
-                mcp_url = default_mcp.mcp_url
+        (
+            self.provider_name,
+            self.model,
+            self.provider_config,
+        ) = resolve_llm_provider_selection(
+            provider,
+            model,
+            llm_profile,
+            fallback_provider=self.config.default_provider or "anthropic",
+            fallback_model=self.config.default_model or "claude-haiku-4-5",
+        )
+        if not self.provider_name or not self.model:
+            raise ValueError("Model and provider must be configured")
+        # Resolve the selected profile's endpoint and credentials together.
+        default_mcp = self.config.get_default_mcp_server()
+        if not mcp_url and default_mcp:
+            mcp_url = default_mcp.mcp_url
         self.mcp_url = mcp_url
+        self.mcp_auth = default_mcp.auth.to_dict() if default_mcp and default_mcp.auth else None
 
         # Initialize clients (will be done in async initialize)
         self.llm_provider: LLMProvider | None = None
@@ -108,18 +125,22 @@ class ChatSession:
         if self._initialized:
             return
 
-        # Initialize LLM provider
-        self.llm_provider = create_llm_provider(
-            self.provider_name, self.model, mcp_url=self.mcp_url
-        )
-        await self.llm_provider.initialize()
+        try:
+            self.llm_provider = create_llm_provider(
+                self.provider_name,
+                self.model,
+                mcp_url=self.mcp_url,
+                auth=self.mcp_auth,
+                **self.provider_config,
+            )
+            await self.llm_provider.initialize()
 
-        # Initialize MCP client
-        self.mcp_client = MCPClient(self.mcp_url)
-        await self.mcp_client.initialize()
-
-        # Discover available tools
-        mcp_tools = await self.mcp_client.list_tools()
+            self.mcp_client = MCPClient(self.mcp_url, auth=self.mcp_auth)
+            await self.mcp_client.initialize()
+            mcp_tools = await self.mcp_client.list_tools()
+        except BaseException:
+            await self._close_resources()
+            raise
 
         # Convert to LLM tool format
         self._tools = []
@@ -317,10 +338,20 @@ class ChatSession:
 
     async def close(self):
         """Clean up resources."""
-        if self.llm_provider:
-            await self.llm_provider.close()
-        if self.mcp_client:
-            await self.mcp_client.close()
+        await self._close_resources()
+
+    async def _close_resources(self):
+        """Independently close every partially initialized client."""
+        llm_provider, self.llm_provider = self.llm_provider, None
+        mcp_client, self.mcp_client = self.mcp_client, None
+        self._initialized = False
+        self._tools = []
+        if llm_provider:
+            with contextlib.suppress(Exception, asyncio.CancelledError):
+                await llm_provider.close()
+        if mcp_client:
+            with contextlib.suppress(Exception, asyncio.CancelledError):
+                await mcp_client.close()
 
     def get_message_count(self) -> int:
         """Get total message count."""

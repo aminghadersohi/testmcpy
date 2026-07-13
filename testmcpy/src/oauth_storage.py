@@ -10,6 +10,8 @@ from fastmcp.client.auth.oauth import TokenStorageAdapter
 from key_value.aio.protocols import AsyncKeyValue
 from mcp.shared.auth import OAuthToken
 
+from testmcpy.scrubber import register_secret
+
 _KEY_FILE_NAME = "oauth.key"
 _TOKEN_METADATA_COLLECTION = "testmcpy-oauth-token-metadata"
 
@@ -21,6 +23,8 @@ class PersistentTokenStorageAdapter(TokenStorageAdapter):
         return f"{self._server_url}/token_metadata"
 
     async def set_tokens(self, tokens: OAuthToken) -> None:
+        register_secret(tokens.access_token)
+        register_secret(tokens.refresh_token)
         await super().set_tokens(tokens)
         await self._key_value_store.put(
             key=self._metadata_key(),
@@ -28,6 +32,13 @@ class PersistentTokenStorageAdapter(TokenStorageAdapter):
             value={"stored_at": time.time()},
             ttl=60 * 60 * 24 * 365,
         )
+
+    async def get_tokens(self) -> OAuthToken | None:
+        tokens = await super().get_tokens()
+        if tokens is not None:
+            register_secret(tokens.access_token)
+            register_secret(tokens.refresh_token)
+        return tokens
 
     async def clear(self) -> None:
         await super().clear()

@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import os
 import re
+from dataclasses import fields, is_dataclass, replace
 from typing import Any
 
 REDACTED = "***REDACTED***"
@@ -151,10 +152,29 @@ def scrub_text(text: str) -> str:
 
 
 def scrub_obj(obj: Any) -> Any:
-    """Recursively scrub strings in dicts/lists/tuples. Non-string scalars
-    pass through untouched. Returns a new object; the input is not mutated."""
+    """Recursively scrub strings in containers and dataclass instances.
+
+    Dataclasses are reconstructed with :func:`dataclasses.replace`, preserving
+    native result types such as ``MCPToolResult``. Non-string scalars pass
+    through untouched. Returns a new object; the input is not mutated.
+    """
     if isinstance(obj, str):
         return scrub_text(obj)
+    if is_dataclass(obj) and not isinstance(obj, type):
+        updates = {}
+        for data_field in fields(obj):
+            if not data_field.init:
+                continue
+            value = getattr(obj, data_field.name)
+            if (
+                data_field.name.lower() in _SENSITIVE_FIELD_NAMES
+                and isinstance(value, str)
+                and value
+            ):
+                updates[data_field.name] = _mask(value)
+            else:
+                updates[data_field.name] = scrub_obj(value)
+        return replace(obj, **updates)
     if isinstance(obj, dict):
         out = {}
         for key, value in obj.items():

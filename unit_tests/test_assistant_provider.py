@@ -7,8 +7,10 @@ SSE event parsing without making real API calls.
 
 from unittest.mock import patch
 
+import httpx
 import pytest
 
+from testmcpy.scrubber import reset_cache, scrub_text
 from testmcpy.src.llm_integration import AssistantProvider, create_llm_provider
 
 # Required paths — no hardcoded defaults in AssistantProvider any more.
@@ -104,6 +106,17 @@ class TestAssistantProviderConstruction:
         with pytest.raises(ValueError, match="completions_path"):
             AssistantProvider(conversations_path="/api/v1/copilot/conversations")
 
+    @pytest.mark.parametrize(
+        "path",
+        ["//attacker.example/collect", "https://attacker.example/collect", "/path?redirect=x"],
+    )
+    def test_rejects_cross_origin_or_ambiguous_endpoint_paths(self, path):
+        with pytest.raises(ValueError, match="same-origin path"):
+            AssistantProvider(
+                conversations_path=path,
+                completions_path="/completions",
+            )
+
 
 class TestAssistantProviderValidation:
     """Test initialize() validation errors."""
@@ -129,6 +142,64 @@ class TestAssistantProviderValidation:
         provider.api_secret = ""
         with pytest.raises(ValueError, match="api_token"):
             await provider.initialize()
+
+    @pytest.mark.asyncio
+    async def test_auth_error_scrubs_echoed_credentials(self):
+        token = "assistant-token-echoed"
+        secret = "assistant-secret-echoed"
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                401,
+                text=f"invalid {token} / {secret}",
+                request=request,
+            )
+
+        provider = AssistantProvider(
+            workspace_hash="ws-abc",
+            domain="test.com",
+            api_url="https://auth.test/token",
+            api_token=token,
+            api_secret=secret,
+            **_P,
+        )
+        provider._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        try:
+            with pytest.raises(RuntimeError) as exc_info:
+                await provider._authenticate()
+        finally:
+            await provider.close()
+            reset_cache()
+
+        assert token not in str(exc_info.value)
+        assert secret not in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_auth_registers_returned_session_token(self):
+        session_token = "returned-session-token-value"
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={"payload": {"access_token": session_token}},
+                request=request,
+            )
+
+        provider = AssistantProvider(
+            workspace_hash="ws-abc",
+            domain="test.com",
+            api_url="https://auth.test/token",
+            api_token="assistant-token-value",
+            api_secret="assistant-secret-value",
+            **_P,
+        )
+        provider._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        try:
+            await provider._authenticate()
+            assert session_token not in scrub_text(f"echoed {session_token}")
+        finally:
+            await provider.close()
+            reset_cache()
 
 
 class TestAssistantProviderHeaders:

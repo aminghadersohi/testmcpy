@@ -18,15 +18,24 @@ from datetime import datetime  # noqa: E402
 from enum import Enum  # noqa: E402
 from pathlib import Path  # noqa: E402
 from typing import Any  # noqa: E402
+from urllib.parse import urlsplit  # noqa: E402
 
 from fastapi import FastAPI, HTTPException, Query, WebSocket  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
-from fastapi.responses import FileResponse, StreamingResponse  # noqa: E402
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse  # noqa: E402
 from pydantic import BaseModel, Field  # noqa: E402
 from sqlalchemy.exc import SQLAlchemyError  # noqa: E402
+from starlette.responses import PlainTextResponse  # noqa: E402
+from starlette.websockets import WebSocketClose  # noqa: E402
 
 from testmcpy.config import get_config  # noqa: E402
+from testmcpy.llm_profiles import (  # noqa: E402
+    LLMProfileConfigError,
+    LLMProfileNotFoundError,
+    resolve_llm_provider_selection,
+)
 from testmcpy.mcp_profiles import load_profile  # noqa: E402
+from testmcpy.scrubber import scrub_obj, scrub_text  # noqa: E402
 from testmcpy.server.routers import agent as agent_router  # noqa: E402
 from testmcpy.server.routers import analytics as analytics_router  # noqa: E402
 from testmcpy.server.routers import auth as auth_router  # noqa: E402
@@ -54,12 +63,25 @@ from testmcpy.src.mcp_client import MCPClient, MCPConnectionError, MCPToolCall  
 class LLMProvider(str, Enum):
     OLLAMA = "ollama"
     OPENAI = "openai"
+    OPENROUTER = "openrouter"
     LOCAL = "local"
     ANTHROPIC = "anthropic"
+    BEDROCK = "bedrock"
+    AWS_BEDROCK = "aws-bedrock"
+    GEMINI = "gemini"
+    GOOGLE = "google"
     CLAUDE_SDK = "claude-sdk"
     CLAUDE_CLI = "claude-cli"  # Alias → claude-sdk
     CLAUDE_CODE = "claude-code"  # Alias → claude-sdk
+    ASSISTANT = "assistant"
+    CHATBOT = "chatbot"
+    CODEX_SDK = "codex-sdk"
     CODEX_CLI = "codex-cli"
+    CODEX = "codex"
+    GEMINI_CLI = "gemini-cli"
+    GEMINI_SDK = "gemini-sdk"
+    XAI = "xai"
+    GROK = "grok"
 
 
 class AuthType(str, Enum):
@@ -542,14 +564,48 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Enable CORS (configurable via TESTMCPY_CORS_ORIGINS env var)
-_cors_origins_env = os.environ.get("TESTMCPY_CORS_ORIGINS", "*")
-_cors_origins = [o.strip() for o in _cors_origins_env.split(",") if o.strip()]
+
+@app.exception_handler(LLMProfileNotFoundError)
+async def llm_profile_not_found_handler(_request, exc: LLMProfileNotFoundError):
+    return JSONResponse(status_code=404, content={"detail": scrub_text(str(exc))})
+
+
+@app.exception_handler(LLMProfileConfigError)
+async def llm_profile_config_error_handler(_request, exc: LLMProfileConfigError):
+    return JSONResponse(status_code=409, content={"detail": scrub_text(str(exc))})
+
+
+# The production UI is same-origin. These entries support the local Vite UI
+# when it accesses the API directly instead of using Vite's proxy.
+_DEFAULT_CORS_ORIGINS = (
+    "http://127.0.0.1:3000",
+    "http://localhost:3000",
+    "http://[::1]:3000",
+)
+
+
+def _get_cors_settings() -> tuple[list[str], bool]:
+    """Return configured origins and whether credentialed CORS is safe."""
+    configured = os.environ.get("TESTMCPY_CORS_ORIGINS")
+    if configured is None:
+        return list(_DEFAULT_CORS_ORIGINS), True
+
+    origins = list(
+        dict.fromkeys(origin.strip() for origin in configured.split(",") if origin.strip())
+    )
+    if "*" in origins:
+        # Preserve an explicitly requested wildcard without reflecting origins
+        # while also permitting credentialed cross-origin requests.
+        return ["*"], False
+    return origins, True
+
+
+_cors_origins, _cors_allow_credentials = _get_cors_settings()
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins,
-    allow_credentials=True,
+    allow_credentials=_cors_allow_credentials,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -585,6 +641,74 @@ class CSPMiddleware(BaseHTTPMiddleware):
 app.add_middleware(CSPMiddleware)
 
 
+_DEFAULT_ALLOWED_HOSTS = ("127.0.0.1", "localhost", "::1", "testserver")
+
+
+def _allowed_request_hosts() -> tuple[str, ...]:
+    """Return hostnames accepted by the local UI server."""
+    configured = os.environ.get("TESTMCPY_ALLOWED_HOSTS")
+    if configured is None:
+        return _DEFAULT_ALLOWED_HOSTS
+    return tuple(host.strip().lower() for host in configured.split(",") if host.strip())
+
+
+def _request_host_is_allowed(raw_host: str, allowed_hosts: tuple[str, ...]) -> bool:
+    """Match an HTTP Host header without trusting its port or IPv6 brackets."""
+    if "*" in allowed_hosts:
+        return True
+    try:
+        hostname = urlsplit(f"//{raw_host}").hostname
+    except ValueError:
+        return False
+    if not hostname:
+        return False
+    hostname = hostname.lower().rstrip(".")
+    for pattern in allowed_hosts:
+        normalized = pattern.strip("[]").rstrip(".")
+        if normalized.startswith("*."):
+            if hostname.endswith(f".{normalized[2:]}"):
+                return True
+        elif hostname == normalized:
+            return True
+    return False
+
+
+class AllowedHostsMiddleware:
+    """Reject DNS-rebinding hosts before any HTTP or WebSocket route runs."""
+
+    def __init__(self, asgi_app):
+        self.app = asgi_app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] not in {"http", "websocket"}:
+            await self.app(scope, receive, send)
+            return
+        raw_host = next(
+            (
+                value.decode("latin-1")
+                for key, value in scope.get("headers", [])
+                if key.lower() == b"host"
+            ),
+            "",
+        )
+        allowed_hosts = _allowed_request_hosts()
+        if _request_host_is_allowed(raw_host, allowed_hosts):
+            # Origin-sensitive routes may trust request.base_url only after this
+            # middleware validates an explicit host. A wildcard host policy does
+            # not confer that trust.
+            if "*" not in allowed_hosts:
+                scope.setdefault("state", {})["testmcpy_trusted_host"] = True
+            await self.app(scope, receive, send)
+            return
+        if scope["type"] == "websocket":
+            await WebSocketClose(code=1008, reason="Invalid host header")(scope, receive, send)
+            return
+        await PlainTextResponse("Invalid host header", status_code=400)(scope, receive, send)
+
+
+app.add_middleware(AllowedHostsMiddleware)
+
+
 # Global Exception Handlers - Never let the server crash
 
 from testmcpy.error_handlers import global_exception_handler  # noqa: E402
@@ -614,14 +738,36 @@ app.include_router(search_router.router)
 
 # API Routes
 
+_UI_DIST_DIR = Path(__file__).parent.parent / "ui" / "dist"
+_INDEX_CACHE_CONTROL = "no-cache"
+_HASHED_ASSET_CACHE_CONTROL = "public, max-age=31536000, immutable"
+
+
+def _serve_ui_index() -> FileResponse | None:
+    """Serve the SPA entry point with mandatory revalidation."""
+    index_file = _UI_DIST_DIR / "index.html"
+    if not index_file.exists():
+        return None
+    return FileResponse(index_file, headers={"Cache-Control": _INDEX_CACHE_CONTROL})
+
+
+def _ui_static_path(full_path: str) -> Path | None:
+    """Resolve a UI path without allowing encoded or direct parent traversal."""
+    root = _UI_DIST_DIR.resolve()
+    candidate = (root / full_path).resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError:
+        return None
+    return candidate
+
 
 @app.get("/")
 async def root():
     """Root endpoint - serves the React app."""
-    ui_dir = Path(__file__).parent.parent / "ui" / "dist"
-    index_file = ui_dir / "index.html"
-    if index_file.exists():
-        return FileResponse(index_file)
+    index_response = _serve_ui_index()
+    if index_response is not None:
+        return index_response
     return {"message": "testmcpy Web UI - Build the React app first"}
 
 
@@ -786,7 +932,7 @@ async def list_mcp_tools(profiles: list[str] = Query(default=None)):
     except HTTPException:
         raise
     except Exception as e:
-        error_msg = str(e)
+        error_msg = scrub_text(str(e))
         # Always evict cached clients on any error — a failed list_tools() call
         # leaves the cached client in a broken state that will repeat the error
         # on every subsequent request until evicted.
@@ -915,40 +1061,13 @@ def _serialize_tool_content(content):
 @app.post("/api/chat")
 async def chat(request: ChatRequest) -> ChatResponse:
     """Send a message to the LLM with MCP tools."""
-    # Get model, provider, and api_key from LLM profile if specified
-    api_key = None
-    if request.llm_profile:
-        from testmcpy.llm_profiles import load_llm_profile
-
-        llm_profile = load_llm_profile(request.llm_profile)
-        if llm_profile:
-            # If specific model/provider requested, find matching config
-            if request.model and request.provider:
-                # Find provider config matching the request
-                for provider_config in llm_profile.providers:
-                    if provider_config.model == request.model and provider_config.provider == str(
-                        request.provider.value
-                    ):
-                        api_key = provider_config.api_key
-                        break
-                model = request.model
-                provider = request.provider
-            else:
-                # Use default provider
-                default_provider_config = llm_profile.get_default_provider()
-                if default_provider_config:
-                    model = request.model or default_provider_config.model
-                    provider = request.provider or default_provider_config.provider
-                    api_key = default_provider_config.api_key
-                else:
-                    model = request.model or config.default_model
-                    provider = request.provider or config.default_provider
-        else:
-            model = request.model or config.default_model
-            provider = request.provider or config.default_provider
-    else:
-        model = request.model or config.default_model
-        provider = request.provider or config.default_provider
+    provider, model, profile_provider_config = resolve_llm_provider_selection(
+        request.provider,
+        request.model,
+        request.llm_profile,
+        fallback_provider=config.default_provider,
+        fallback_model=config.default_model,
+    )
 
     if not model or not provider:
         raise HTTPException(
@@ -959,6 +1078,7 @@ async def chat(request: ChatRequest) -> ChatResponse:
     print(f"[Chat] Using provider={provider}, model={model}")
 
     accessed_servers = []  # Track servers accessed for cache invalidation on error
+    llm_provider = None
     try:
         # Determine which MCP clients to use
         clients_to_use = []  # List of (profile_id, mcp_name, client) tuples
@@ -1016,9 +1136,7 @@ async def chat(request: ChatRequest) -> ChatResponse:
 
         # Initialize LLM provider
         print(f"[Chat] Creating LLM provider: {provider}")
-        provider_kwargs = {}
-        if api_key:
-            provider_kwargs["api_key"] = api_key
+        provider_kwargs = dict(profile_provider_config)
         provider_kwargs.update(_primary_mcp_provider_kwargs(clients_to_use))
         print("[Chat] Initializing LLM provider...")
         try:
@@ -1027,6 +1145,10 @@ async def chat(request: ChatRequest) -> ChatResponse:
         except ValueError as e:
             if not (_chat_oauth_login_enabled() and _OAUTH_TOKEN_ERROR in str(e)):
                 raise
+            if llm_provider is not None:
+                with contextlib.suppress(Exception):
+                    await llm_provider.close()
+                llm_provider = None
             print("[Chat] No cached OAuth token; triggering interactive OAuth login...")
             new_clients = await _relogin_oauth_servers(accessed_servers)
             # The old client objects are closed now — swap in the replacements
@@ -1049,10 +1171,54 @@ async def chat(request: ChatRequest) -> ChatResponse:
         )
         print(f"[Chat] Response generated. Tool calls: {len(result.tool_calls)}")
 
-        # Execute tool calls if any
+        # Execute tool calls if any. SDK-backed providers may have already
+        # executed the entire turn; never replay those state-changing calls.
         tool_calls_with_results = []
+        native_tool_results = getattr(result, "tool_results", None) or []
         if result.tool_calls:
-            for tool_call in result.tool_calls:
+            for index, tool_call in enumerate(result.tool_calls):
+                if native_tool_results:
+                    if index >= len(native_tool_results):
+                        tool_calls_with_results.append(
+                            {
+                                "name": tool_call["name"],
+                                "arguments": tool_call.get("arguments", {}),
+                                "id": tool_call.get("id", "unknown"),
+                                "result": None,
+                                "error": "Provider did not return a result for this tool call",
+                                "is_error": True,
+                            }
+                        )
+                        continue
+
+                    native_result = native_tool_results[index]
+                    if isinstance(native_result, dict):
+                        native_content = native_result.get("content", native_result.get("result"))
+                        native_is_error = bool(native_result.get("is_error", False))
+                        native_error = native_result.get("error_message") or native_result.get(
+                            "error"
+                        )
+                    else:
+                        native_content = getattr(native_result, "content", native_result)
+                        native_is_error = bool(getattr(native_result, "is_error", False))
+                        native_error = getattr(native_result, "error_message", None)
+
+                    tool_calls_with_results.append(
+                        {
+                            "name": tool_call["name"],
+                            "arguments": tool_call.get("arguments", {}),
+                            "id": tool_call.get("id", "unknown"),
+                            "result": (
+                                _serialize_tool_content(native_content)
+                                if not native_is_error
+                                else None
+                            ),
+                            "error": native_error if native_is_error else None,
+                            "is_error": native_is_error,
+                        }
+                    )
+                    continue
+
                 # Strip MCP prefix from tool name if present (e.g., mcp__testmcpy__list_charts -> list_charts)
                 actual_tool_name = strip_mcp_prefix(tool_call["name"])
                 mcp_tool_call = MCPToolCall(
@@ -1095,8 +1261,6 @@ async def chat(request: ChatRequest) -> ChatResponse:
                 }
                 tool_calls_with_results.append(tool_call_with_result)
 
-        await llm_provider.close()
-
         # Clean up response - remove tool execution messages since we show them separately
         clean_response = result.response
         if tool_calls_with_results:
@@ -1120,19 +1284,22 @@ async def chat(request: ChatRequest) -> ChatResponse:
 
             clean_response = "\n".join(filtered_lines).strip()
 
-        return ChatResponse(
-            response=clean_response,
-            tool_calls=tool_calls_with_results,
-            thinking=result.thinking,
-            token_usage=result.token_usage,
-            cost=result.cost,
-            duration=result.duration,
-            model=model,
-            provider=str(provider.value) if hasattr(provider, "value") else str(provider),
+        public_result = scrub_obj(
+            {
+                "response": clean_response,
+                "tool_calls": tool_calls_with_results,
+                "thinking": result.thinking,
+                "token_usage": result.token_usage,
+                "cost": result.cost,
+                "duration": result.duration,
+                "model": model,
+                "provider": str(provider.value) if hasattr(provider, "value") else str(provider),
+            }
         )
+        return ChatResponse(**public_result)
 
     except Exception as e:
-        error_msg = str(e)
+        error_msg = scrub_text(str(e))
         if is_connection_error(error_msg):
             # Clear stale cached clients so retry can get fresh connection
             for cache_key in accessed_servers:
@@ -1142,6 +1309,10 @@ async def chat(request: ChatRequest) -> ChatResponse:
                 detail=f"Service unavailable: Unable to connect to MCP server. {error_msg}",
             )
         raise HTTPException(status_code=500, detail=error_msg)
+    finally:
+        if llm_provider is not None:
+            with contextlib.suppress(Exception):
+                await llm_provider.close()
 
 
 @app.post("/api/chat/stream")
@@ -1207,47 +1378,24 @@ async def chat_stream(request: ChatRequest):
 
     async def generate():
         start_time = time.time()
+        llm_provider = None
 
         def send_event(event_type: str, data):
-            payload = json.dumps({"type": event_type, "data": data})
+            payload = json.dumps(scrub_obj({"type": event_type, "data": data}))
             return f"data: {payload}\n\n"
 
-        # --- Setup: resolve model/provider/api_key ---
-        api_key = None
+        # --- Setup: resolve model/provider/profile runtime configuration ---
         accessed_servers: list[str] = []
         try:
             yield send_event("status", "Resolving LLM configuration...")
 
-            if request.llm_profile:
-                from testmcpy.llm_profiles import load_llm_profile
-
-                llm_profile = load_llm_profile(request.llm_profile)
-                if llm_profile:
-                    if request.model and request.provider:
-                        for provider_config in llm_profile.providers:
-                            if (
-                                provider_config.model == request.model
-                                and provider_config.provider == str(request.provider.value)
-                            ):
-                                api_key = provider_config.api_key
-                                break
-                        model = request.model
-                        provider = request.provider
-                    else:
-                        default_provider_config = llm_profile.get_default_provider()
-                        if default_provider_config:
-                            model = request.model or default_provider_config.model
-                            provider = request.provider or default_provider_config.provider
-                            api_key = default_provider_config.api_key
-                        else:
-                            model = request.model or config.default_model
-                            provider = request.provider or config.default_provider
-                else:
-                    model = request.model or config.default_model
-                    provider = request.provider or config.default_provider
-            else:
-                model = request.model or config.default_model
-                provider = request.provider or config.default_provider
+            provider, model, profile_provider_config = resolve_llm_provider_selection(
+                request.provider,
+                request.model,
+                request.llm_profile,
+                fallback_provider=config.default_provider,
+                fallback_model=config.default_model,
+            )
 
             if not model or not provider:
                 yield send_event(
@@ -1305,9 +1453,7 @@ async def chat_stream(request: ChatRequest):
             )
 
             # --- Initialize LLM provider ---
-            provider_kwargs: dict = {}
-            if api_key:
-                provider_kwargs["api_key"] = api_key
+            provider_kwargs: dict = dict(profile_provider_config)
             provider_kwargs.update(_primary_mcp_provider_kwargs(clients_to_use))
             try:
                 llm_provider = create_llm_provider(provider, model, **provider_kwargs)
@@ -1315,6 +1461,10 @@ async def chat_stream(request: ChatRequest):
             except ValueError as e:
                 if not (_chat_oauth_login_enabled() and _OAUTH_TOKEN_ERROR in str(e)):
                     raise
+                if llm_provider is not None:
+                    with contextlib.suppress(Exception):
+                        await llm_provider.close()
+                    llm_provider = None
                 yield send_event("status", "Waiting for OAuth login in browser...")
                 new_clients = await _relogin_oauth_servers(accessed_servers)
                 # The old client objects are closed now — swap in the replacements
@@ -1561,8 +1711,6 @@ async def chat_stream(request: ChatRequest):
                     {"turn": sdk_turn, "tool_count": turn_tool_count},
                 )
 
-                await llm_provider.close()
-
                 duration = time.time() - start_time
                 yield send_event(
                     "complete",
@@ -1704,8 +1852,6 @@ async def chat_stream(request: ChatRequest):
                     conversation.append({"role": "assistant", "content": result.response})
                     current_prompt = _build_continuation_prompt(turn_tool_calls, turn_tool_results)
 
-                await llm_provider.close()
-
                 duration = time.time() - start_time
                 yield send_event(
                     "complete",
@@ -1720,19 +1866,25 @@ async def chat_stream(request: ChatRequest):
                 )
 
         except (ConnectionError, TimeoutError, OSError) as e:
-            error_msg = str(e)
+            error_msg = scrub_text(str(e))
             for cache_key in accessed_servers:
                 await clear_cached_client(cache_key)
             yield send_event("error", f"Connection error: {error_msg}")
+        except LLMProfileConfigError as e:
+            yield send_event("error", scrub_text(str(e)))
         except ValueError as e:
-            yield send_event("error", str(e))
+            yield send_event("error", scrub_text(str(e)))
         except (RuntimeError, AttributeError, KeyError, TypeError, ImportError) as e:
             # Log full error server-side, send sanitized message to client
             import traceback
 
-            print(f"Chat stream error: {type(e).__name__}: {e}")
+            print(f"Chat stream error: {type(e).__name__}: {scrub_text(str(e))}")
             traceback.print_exc()
             yield send_event("error", f"Internal error: {type(e).__name__}")
+        finally:
+            if llm_provider is not None:
+                with contextlib.suppress(Exception):
+                    await llm_provider.close()
 
     return StreamingResponse(
         generate(),
@@ -1755,25 +1907,32 @@ async def websocket_tests(websocket: WebSocket):
     await handle_test_websocket(websocket)
 
 
-# Catch-all route for React Router (must be before static files)
+# Catch-all route for React Router and built UI assets.
 @app.get("/{full_path:path}")
 async def serve_react_app(full_path: str):
     """Serve React app for all non-API routes (SPA support)."""
     # Don't intercept API routes
-    if full_path.startswith("api/"):
+    if full_path == "api" or full_path.startswith("api/"):
         raise HTTPException(status_code=404, detail="API endpoint not found")
 
-    # Serve index.html for all other routes (client-side routing)
-    ui_dir = Path(__file__).parent.parent / "ui" / "dist"
-    index_file = ui_dir / "index.html"
-
     # Check if it's a static file request
-    static_file = ui_dir / full_path
+    static_file = _ui_static_path(full_path)
+    if static_file is None:
+        raise HTTPException(status_code=404, detail="Static asset not found")
     if static_file.exists() and static_file.is_file():
-        return FileResponse(static_file)
+        cache_control = (
+            _HASHED_ASSET_CACHE_CONTROL if full_path.startswith("assets/") else _INDEX_CACHE_CONTROL
+        )
+        return FileResponse(static_file, headers={"Cache-Control": cache_control})
 
-    # Otherwise serve index.html for React Router
-    if index_file.exists():
-        return FileResponse(index_file)
+    # Never return HTML for a missing module, stylesheet, image, or other
+    # static file. Browsers reject that response as a MIME type mismatch.
+    if full_path.startswith("assets/") or Path(full_path).suffix:
+        raise HTTPException(status_code=404, detail="Static asset not found")
+
+    # Extensionless paths are client-side routes.
+    index_response = _serve_ui_index()
+    if index_response is not None:
+        return index_response
 
     return {"message": "testmcpy Web UI - Build the React app first"}

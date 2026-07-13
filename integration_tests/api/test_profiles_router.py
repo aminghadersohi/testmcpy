@@ -58,6 +58,27 @@ class TestListMCPProfiles:
         assert "default_selection" in data
 
 
+class TestProfileAuth:
+    """Sensitive auth configuration is only available through POST."""
+
+    def test_profile_auth_post(self, client):
+        resp = client.post("/api/mcp/profiles/test/auth")
+        assert resp.status_code == 200
+        assert resp.headers["cache-control"] == "no-store"
+        assert resp.json()["type"] == "none"
+
+    def test_profile_auth_get_is_not_allowed(self, client):
+        resp = client.get("/api/mcp/profiles/test/auth")
+        assert resp.status_code in (404, 405)
+
+    def test_profile_auth_rejects_cross_origin_browser_request(self, client):
+        resp = client.post(
+            "/api/mcp/profiles/test/auth",
+            headers={"Origin": "https://attacker.example"},
+        )
+        assert resp.status_code == 403
+
+
 class TestCreateMCPProfile:
     """Tests for POST /api/mcp/profiles."""
 
@@ -264,6 +285,16 @@ class TestExportProfile:
     def test_export_nonexistent_profile(self, client):
         resp = client.get("/api/mcp/profiles/nonexistent/export")
         assert resp.status_code == 404
+
+    def test_get_export_redacts_literal_secrets(self, client):
+        client.put(
+            "/api/mcp/profiles/test/mcps/0",
+            json={"auth": {"type": "bearer", "token": "literal-secret"}},
+        )
+        resp = client.get("/api/mcp/profiles/test/export")
+        assert resp.status_code == 200
+        assert "literal-secret" not in resp.json()["yaml"]
+        assert "<redacted>" in resp.json()["yaml"]
 
 
 class TestLLMProfiles:

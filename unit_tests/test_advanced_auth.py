@@ -168,6 +168,28 @@ class TestTokenManager:
         assert tm.is_expired() is False
 
     @pytest.mark.asyncio
+    async def test_forced_refresh_ignores_missing_expiry(self):
+        """A server-side 401 must refresh even without local expiry metadata."""
+        tm = TokenManager(
+            access_token="server-rejected-token",
+            refresh_token="my_refresh",
+            token_url="https://auth.example.com/token",
+        )
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"access_token": "new_token", "expires_in": 3600}
+        mock_response.raise_for_status = MagicMock()
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(return_value=mock_response)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+
+        with patch("testmcpy.src.token_manager.httpx.AsyncClient", return_value=mock_client):
+            await tm.refresh(force=True)
+
+        assert tm.access_token == "new_token"
+        assert tm.refresh_count == 1
+
+    @pytest.mark.asyncio
     async def test_refresh_http_error(self):
         """refresh raises TokenRefreshError on HTTP error."""
         import httpx

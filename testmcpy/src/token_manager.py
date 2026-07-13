@@ -135,13 +135,15 @@ class TokenManager:
         logger.warning("Token is expired but no refresh_token/token_url configured")
         return self._token_data.access_token
 
-    async def refresh(self) -> TokenData:
+    async def refresh(self, *, force: bool = False) -> TokenData:
         """Refresh the access token using the refresh_token grant.
 
         Thread-safe: only one refresh runs at a time.
 
         Returns:
-            Updated TokenData with new access token.
+            Updated TokenData with new access token. Set ``force`` after a
+            server-side rejection, where local expiry metadata is stale or
+            unavailable.
 
         Raises:
             TokenRefreshError: If refresh fails (no refresh_token, no token_url,
@@ -149,7 +151,7 @@ class TokenManager:
         """
         async with self._lock:
             # Double-check: another coroutine may have refreshed while we waited
-            if not self.is_expired():
+            if not force and not self.is_expired():
                 return self._token_data
 
             if not self._token_data.refresh_token:

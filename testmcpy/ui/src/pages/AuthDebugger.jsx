@@ -716,13 +716,13 @@ function decodeJwtPayload(token) {
   }
 }
 
-// Deep-scrub token-bearing fields before persisting a debug trace.
-// The backend sanitizer redacts some keys (client_secret, token, access_token)
-// but misses refresh_token/id_token, skips lists, and leaves tokens embedded
-// in raw response strings — so never trust the trace for persistence.
+// Deep-scrub token-bearing fields again before persisting a debug trace.
+// The backend applies the primary redaction; this is defense in depth for
+// traces produced by older or independently deployed backends.
 const SECRET_KEYS = new Set([
   'access_token', 'refresh_token', 'id_token', 'token',
-  'client_secret', 'api_secret', 'authorization', 'bearer', 'password',
+  'client_secret', 'api_secret', 'api_key', 'api_token', 'authorization',
+  'proxy_authorization', 'cookie', 'set_cookie', 'x_api_key', 'bearer', 'password',
 ])
 const JWT_RE = /eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]*/g
 function scrubSecrets(value) {
@@ -753,6 +753,7 @@ function AuthDebugger() {
   const [isRetrying, setIsRetrying] = useState(false)
   const [authError, setAuthError] = useState(null)
   const [progressMessage, setProgressMessage] = useState('')
+  const [pendingAuthorizationUrl, setPendingAuthorizationUrl] = useState('')
 
   // Saved sessions — persisted to localStorage
   const [savedSessions, setSavedSessions] = useState(() => {
@@ -799,7 +800,9 @@ function AuthDebugger() {
 
     try {
       // Fetch unmasked auth config
-      const res = await fetch(`/api/mcp/profiles/${profileId}/auth`)
+      const res = await fetch(`/api/mcp/profiles/${profileId}/auth`, {
+        method: 'POST',
+      })
       if (!res.ok) {
         console.error('Failed to load profile auth')
         return
@@ -842,6 +845,7 @@ function AuthDebugger() {
     setBearerToken('')
     setMcpUrl('')
     setDebugResult(null)
+    setPendingAuthorizationUrl('')
   }
 
   const handleProfileChange = (profileId) => {
@@ -908,6 +912,48 @@ function AuthDebugger() {
     localStorage.setItem('testmcpy-auth-sessions', JSON.stringify(updated))
   }
 
+  const waitForOAuthTransaction = async (initialData, oauthPopup) => {
+    let data = initialData
+    setPendingAuthorizationUrl(data.authorization_url)
+    setDebugResult(data)
+    setExpandedSteps(new Set(data.steps.map((_, i) => i)))
+    setProgressMessage('Waiting for OAuth authorization in the browser...')
+
+    if (oauthPopup && !oauthPopup.closed) {
+      try {
+        oauthPopup.opener = null
+        oauthPopup.location.replace(data.authorization_url)
+      } catch (error) {
+        // Keep polling and expose the manual authorization link below.
+        console.warn('OAuth popup is unavailable; use the authorization link', error)
+        try { oauthPopup.close() } catch { /* The handle is already inaccessible. */ }
+      }
+    }
+
+    let deadline = Date.now() + (5 * 60 * 1000)
+    while (Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 1000))
+      const pollResponse = await fetch(
+        `/api/oauth-debugger/transactions/${encodeURIComponent(data.transaction_id)}`
+      )
+      if (!pollResponse.ok) {
+        const pollError = await pollResponse.json().catch(() => ({}))
+        throw new Error(pollError.detail || 'OAuth authorization transaction expired')
+      }
+      const pollData = await pollResponse.json()
+      setDebugResult(pollData)
+      setExpandedSteps(new Set(pollData.steps.map((_, i) => i)))
+      if (pollData.status === 'processing') {
+        deadline = Math.max(deadline, Date.now() + 60_000)
+      }
+      if (!['authorization_required', 'processing'].includes(pollData.status)) {
+        setPendingAuthorizationUrl('')
+        return pollData
+      }
+    }
+    throw new Error('OAuth authorization timed out after 5 minutes')
+  }
+
   const handleDebugAuth = async (isRetry = false) => {
     setLoading(true)
     setDebugResult(null)
@@ -915,6 +961,18 @@ function AuthDebugger() {
     setCurrentStep(-1)
     setAuthError(null)
     setProgressMessage('Initializing authentication flow...')
+    setPendingAuthorizationUrl('')
+
+    // Open synchronously from the click event so browser popup blockers do not
+    // suppress the authorization page after discovery and DCR finish.
+    let oauthPopup = null
+    if (authType === 'oauth' && oauthAutoDiscover) {
+      oauthPopup = window.open(
+        'about:blank',
+        'testmcpy-oauth-debugger',
+        'popup,width=720,height=760'
+      )
+    }
 
     if (isRetry) {
       setIsRetrying(true)
@@ -961,7 +1019,17 @@ function AuthDebugger() {
       setProgressMessage('Processing authentication response...')
       setCurrentStep(1)
 
-      const data = await res.json()
+      if (!res.ok) {
+        const errorBody = await res.json().catch(() => ({}))
+        throw new Error(errorBody.detail || `Authentication request failed (${res.status})`)
+      }
+      let data = await res.json()
+
+      if (data.status === 'authorization_required' && data.transaction_id) {
+        data = await waitForOAuthTransaction(data, oauthPopup)
+      } else if (oauthPopup) {
+        oauthPopup.close()
+      }
 
       setProgressMessage('Validating token...')
       setCurrentStep(2)
@@ -977,19 +1045,12 @@ function AuthDebugger() {
       // Auto-expand all steps
       setExpandedSteps(new Set(data.steps.map((_, i) => i)))
 
-      // For JWT/OAuth success, populate bearer token field with the obtained token
-      if (data.success && (authType === 'jwt' || authType === 'oauth')) {
-        // Find access_token from the "Token Extracted" step
-        const tokenStep = data.steps.find(s => s.step.includes('Token Extracted'))
-        if (tokenStep?.data?.access_token) {
-          setBearerToken(tokenStep.data.access_token)
-        }
-      }
-
       if (!data.success) {
         setAuthError(data.error)
       }
     } catch (error) {
+      if (oauthPopup) oauthPopup.close()
+      setPendingAuthorizationUrl('')
       console.error('Failed to debug auth:', error)
       const errorMessage = error.message || 'Failed to debug authentication'
       setAuthError(errorMessage)
@@ -1022,6 +1083,16 @@ function AuthDebugger() {
     setCurrentStep(-1)
     setAuthError(null)
     setProgressMessage('Loading profile configuration...')
+    setPendingAuthorizationUrl('')
+
+    let oauthPopup = null
+    if (authType === 'oauth' && oauthAutoDiscover) {
+      oauthPopup = window.open(
+        'about:blank',
+        'testmcpy-oauth-debugger',
+        'popup,width=720,height=760'
+      )
+    }
 
     try {
       setProgressMessage('Authenticating with profile...')
@@ -1034,7 +1105,16 @@ function AuthDebugger() {
       setProgressMessage('Processing authentication...')
       setCurrentStep(1)
 
-      const data = await res.json()
+      if (!res.ok) {
+        const errorBody = await res.json().catch(() => ({}))
+        throw new Error(errorBody.detail || `Profile authentication failed (${res.status})`)
+      }
+      let data = await res.json()
+      if (data.status === 'authorization_required' && data.transaction_id) {
+        data = await waitForOAuthTransaction(data, oauthPopup)
+      } else if (oauthPopup) {
+        oauthPopup.close()
+      }
 
       setProgressMessage('Validating credentials...')
       setCurrentStep(2)
@@ -1049,18 +1129,12 @@ function AuthDebugger() {
       // Auto-expand all steps
       setExpandedSteps(new Set(data.steps.map((_, i) => i)))
 
-      // For JWT/OAuth success, populate bearer token field with the obtained token
-      if (data.success) {
-        const tokenStep = data.steps.find(s => s.step.includes('Token Extracted'))
-        if (tokenStep?.data?.access_token) {
-          setBearerToken(tokenStep.data.access_token)
-        }
-      }
-
       if (!data.success) {
         setAuthError(data.error)
       }
     } catch (error) {
+      if (oauthPopup) oauthPopup.close()
+      setPendingAuthorizationUrl('')
       console.error('Failed to debug profile auth:', error)
       const errorMessage = error.message || 'Failed to debug profile authentication'
       setAuthError(errorMessage)
@@ -1335,7 +1409,7 @@ function AuthDebugger() {
                           className="w-full px-3 py-2 bg-surface border border-border rounded-lg text-text-primary placeholder-text-disabled focus:outline-none focus:ring-2 focus:ring-primary"
                         />
                         <p className="text-xs text-text-tertiary mt-1">
-                          OAuth endpoints will be discovered from /.well-known/oauth-authorization-server
+                          Uses the MCP challenge, RFC 9728 protected-resource metadata, and RFC 8414 authorization-server metadata
                         </p>
                       </div>
                     )}
@@ -1521,6 +1595,16 @@ function AuthDebugger() {
                     <p className="text-sm text-text-secondary mt-1">
                       {progressMessage}
                     </p>
+                    {pendingAuthorizationUrl && (
+                      <a
+                        href={pendingAuthorizationUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="inline-flex items-center gap-1 text-sm text-primary hover:underline mt-2"
+                      >
+                        Open OAuth authorization <ExternalLink size={14} />
+                      </a>
+                    )}
                   </div>
                 </div>
 
@@ -1542,7 +1626,7 @@ function AuthDebugger() {
               </div>
             )}
 
-            {debugResult && (
+            {debugResult && !['authorization_required', 'processing'].includes(debugResult.status) && (
               <>
                 {/* Sequence Diagram */}
                 {authType === 'oauth' && (
@@ -1569,17 +1653,30 @@ function AuthDebugger() {
                           Understanding OAuth Flow
                         </h4>
                         <p className="text-sm text-text-secondary mb-3">
-                          OAuth 2.0 Client Credentials flow involves these key steps:
+                          {oauthAutoDiscover
+                            ? 'OAuth 2.0 Authorization Code with PKCE involves these key steps:'
+                            : 'OAuth 2.0 Client Credentials involves these key steps:'}
                         </p>
-                        <ol className="text-sm text-text-secondary space-y-2 ml-4">
-                          <li><strong className="text-green-500">1. Client Prepares:</strong> Your app gathers client_id, client_secret, and token_url</li>
-                          <li><strong className="text-orange-500">2. Token Request:</strong> MCP server requests an access token from the auth server</li>
-                          <li><strong className="text-blue-500">3. Token Response:</strong> Auth server validates credentials and returns a token</li>
-                          <li><strong className="text-green-500">4. Token Validated:</strong> Token is parsed and ready for API calls</li>
-                        </ol>
+                        {oauthAutoDiscover ? (
+                          <ol className="text-sm text-text-secondary space-y-2 ml-4">
+                            <li><strong className="text-green-500">1. Discovery:</strong> Probe the MCP challenge, protected-resource metadata, and authorization-server metadata</li>
+                            <li><strong className="text-orange-500">2. Authorization:</strong> Open the browser with PKCE, state, scope, and the full MCP resource indicator</li>
+                            <li><strong className="text-blue-500">3. Token Exchange:</strong> Validate state and exchange the authorization code using the PKCE verifier</li>
+                            <li><strong className="text-green-500">4. MCP Validation:</strong> Send an authenticated initialize request to confirm the token is accepted</li>
+                          </ol>
+                        ) : (
+                          <ol className="text-sm text-text-secondary space-y-2 ml-4">
+                            <li><strong className="text-green-500">1. Client Prepares:</strong> Gather the client ID, client secret, token endpoint, and scopes</li>
+                            <li><strong className="text-orange-500">2. Token Request:</strong> Send the client credentials to the authorization server</li>
+                            <li><strong className="text-blue-500">3. Token Response:</strong> Validate the response and extract the access token</li>
+                            <li><strong className="text-green-500">4. Token Ready:</strong> Confirm the token metadata is usable for API calls</li>
+                          </ol>
+                        )}
                         <div className="mt-3 p-2 bg-yellow-500/10 border border-yellow-500/30 rounded">
                           <p className="text-xs text-text-secondary">
-                            <strong>Note:</strong> A 401 error on the first request is often normal - the auth server may need to warm up or validate credentials on first contact.
+                            <strong>Note:</strong> {oauthAutoDiscover
+                              ? 'The initial 401 response is expected: its WWW-Authenticate challenge starts MCP OAuth discovery.'
+                              : 'Client credentials are server-to-server credentials and do not open a browser consent page.'}
                           </p>
                         </div>
                       </div>

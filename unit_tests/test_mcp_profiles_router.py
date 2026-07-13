@@ -130,3 +130,58 @@ class TestResolveSecret:
 
     def test_env_var_reference_passthrough(self):
         assert self._resolve("${MY_TOKEN}", "${MY_TOKEN}") == "${MY_TOKEN}"
+
+
+class TestRedactExportSecrets:
+    def test_redacts_nested_literal_credentials(self):
+        from testmcpy.server.routers.mcp_profiles import _redact_export_secrets
+
+        value = {
+            "mcps": [
+                {
+                    "auth": {
+                        "type": "oauth",
+                        "client_secret": "secret",
+                        "refresh_token": "refresh",
+                    }
+                }
+            ]
+        }
+
+        redacted = _redact_export_secrets(value)
+        assert redacted["mcps"][0]["auth"]["client_secret"] == "<redacted>"
+        assert redacted["mcps"][0]["auth"]["refresh_token"] == "<redacted>"
+
+    def test_preserves_environment_references(self):
+        from testmcpy.server.routers.mcp_profiles import _redact_export_secrets
+
+        value = {"auth": {"token": "${MCP_TOKEN}"}}
+        assert _redact_export_secrets(value) == value
+
+    def test_redacts_api_keys_and_custom_headers(self):
+        from testmcpy.server.routers.mcp_profiles import _redact_export_secrets
+
+        value = {
+            "auth": {
+                "api_key": "literal-api-key",
+                "headers": {
+                    "Authorization": "Bearer literal-token",
+                    "X-From-Env": "${CUSTOM_HEADER}",
+                },
+            }
+        }
+        assert _redact_export_secrets(value) == {
+            "auth": {
+                "api_key": "<redacted>",
+                "headers": {
+                    "Authorization": "<redacted>",
+                    "X-From-Env": "${CUSTOM_HEADER}",
+                },
+            }
+        }
+
+    def test_malformed_environment_reference_is_redacted(self):
+        from testmcpy.server.routers.mcp_profiles import _redact_export_secrets
+
+        value = {"auth": {"token": "${TOKEN}-suffix"}}
+        assert _redact_export_secrets(value)["auth"]["token"] == "<redacted>"

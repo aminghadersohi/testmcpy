@@ -369,8 +369,8 @@ async def _relogin_oauth_servers(server_keys: list[str]) -> dict[str, MCPClient]
     Drops cached clients WITHOUT recording back-off, clears any pre-existing
     back-off state, and re-initializes. MCPClient.initialize() with
     oauth_auto_discover opens the browser OAuth flow and caches the token via
-    fastmcp FileTokenStorage; duplicate popups are prevented by the per-key
-    init locks.
+    the shared FastMCP TokenStorageAdapter backend; duplicate popups are
+    prevented by the per-key init locks.
 
     Returns the fresh clients keyed by cache key so callers can replace any
     references to the old, now-closed client objects.

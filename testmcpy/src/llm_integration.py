@@ -9,6 +9,7 @@ import logging
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
 import tempfile
 import time
@@ -19,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+from key_value.shared.errors.base import BaseKeyValueError
 
 from testmcpy.scrubber import register_secrets_from_auth
 
@@ -1488,9 +1490,9 @@ class BaseSDKProvider(LLMProvider, ABC):
        defects (bad SDK kwargs, AttributeError, etc.) surface as a real
        failure instead of being recorded as a silent 0-score result.
     6. **Auth / token resolution** — Bearer/JWT/OAuth/oauth_auto_discover
-       is resolved here so a fix in one place covers every SDK provider
-       (the previous hand-rolled cache paths in Codex/Gemini never matched
-       what ``fastmcp.FileTokenStorage`` actually writes).
+       is resolved here so a fix in one place covers every SDK provider.
+       Interactive OAuth and SDK providers share FastMCP's persistent
+       ``TokenStorageAdapter`` cache.
     """
 
     # Subclasses override (optional) — used as the logger suffix.
@@ -1789,37 +1791,37 @@ class BaseSDKProvider(LLMProvider, ABC):
     async def _read_cached_oauth_token(self) -> str | None:
         """Reuse the access token that fastmcp's OAuth flow already cached.
 
-        Uses :class:`fastmcp.client.auth.oauth.FileTokenStorage` — the actual
-        public API. The previous hand-rolled cache paths in CodexSDKProvider
-        and GeminiSDKProvider (``~/.fastmcp/oauth-mcp-client-cache/{url-encoded
-        mcp_url}.json``) did NOT match what fastmcp actually writes (it keys
-        storage by server base URL via ``TokenStorageAdapter``). Centralising
-        here fixes that latent bug for both.
+        FastMCP 2.14 accepts an ``AsyncKeyValue`` backend and wraps it in its
+        own ``TokenStorageAdapter``. :class:`MCPOAuth` and this reader use the
+        same persistent backend and full, normalized MCP URL cache key, so
+        tokens for different endpoints on one host remain isolated.
 
         Returns ``None`` when there is no cached token or the cached payload
-        is malformed/expired — callers expecting auth then surface a clear
+        is malformed or expired — callers expecting auth then surface a clear
         re-authentication error instead of silently going un-authenticated.
         """
-        try:
-            from urllib.parse import urlparse  # noqa: PLC0415
+        from .oauth_storage import create_oauth_token_storage  # noqa: PLC0415
 
-            from fastmcp.client.auth.oauth import FileTokenStorage  # noqa: PLC0415
-        except ImportError as e:
-            self._logger.warning("fastmcp not available for cached-token lookup: %s", e)
-            return None
-        parsed = urlparse(self.mcp_url)
-        server_base_url = f"{parsed.scheme}://{parsed.netloc}"
+        server_url = self.mcp_url.rstrip("/")
         try:
-            storage = FileTokenStorage(server_url=server_base_url)
+            storage = create_oauth_token_storage(server_url)
             oauth_token = await storage.get_tokens()
-        except (OSError, ValueError) as e:
-            self._logger.warning("Failed to read cached OAuth token for %s: %s", server_base_url, e)
+            get_token_expiry = getattr(storage, "get_token_expiry", None)
+            token_expiry = await get_token_expiry() if get_token_expiry else None
+        except (OSError, ValueError, sqlite3.DatabaseError, BaseKeyValueError) as e:
+            self._logger.warning("Failed to read cached OAuth token for %s: %s", server_url, e)
             return None
         if oauth_token is None:
             self._logger.warning(
                 "No cached OAuth token for %s — authenticate the MCP profile "
                 "(MCP Profiles page or smoke test) and re-run.",
-                server_base_url,
+                server_url,
+            )
+            return None
+        if token_expiry is not None and time.time() >= token_expiry - 30:
+            self._logger.warning(
+                "Cached OAuth token for %s is expired — authenticate the MCP profile again.",
+                server_url,
             )
             return None
         access_token = getattr(oauth_token, "access_token", None)
@@ -1827,12 +1829,12 @@ class BaseSDKProvider(LLMProvider, ABC):
             self._logger.warning(
                 "Cached OAuth payload for %s is missing access_token — "
                 "authenticate the MCP profile again to refresh it.",
-                server_base_url,
+                server_url,
             )
             return None
         self._logger.info(
             "Reusing cached OAuth token for %s (length: %d)",
-            server_base_url,
+            server_url,
             len(access_token),
         )
         return access_token
@@ -3848,7 +3850,7 @@ class CodexSDKProvider(BaseSDKProvider):
 
     MCP server auth (bearer / jwt / oauth) is resolved by
     :class:`BaseSDKProvider` — including ``oauth_auto_discover`` via the
-    proper :class:`fastmcp.client.auth.oauth.FileTokenStorage` API.
+    shared FastMCP ``TokenStorageAdapter`` cache.
     """
 
     LOGGER_NAME = "CodexSDKProvider"
@@ -4273,7 +4275,7 @@ class GeminiSDKProvider(BaseSDKProvider):
 
     MCP server auth (bearer / jwt / oauth) is resolved by
     :class:`BaseSDKProvider` — including ``oauth_auto_discover`` via the
-    proper :class:`fastmcp.client.auth.oauth.FileTokenStorage` API.
+    shared FastMCP ``TokenStorageAdapter`` cache.
     """
 
     LOGGER_NAME = "GeminiSDKProvider"

@@ -6,9 +6,10 @@ import re
 from pathlib import Path
 
 import yaml
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, Field, field_validator
 
+from testmcpy.mcp_profiles import _ENV_REF, _SECRET_KEYS
 from testmcpy.server.helpers import (
     clean_config_for_yaml,
     generate_profile_id,
@@ -37,6 +38,29 @@ def _resolve_secret(incoming: str | None, existing: str | None) -> str | None:
     if existing and len(existing) > 12 and incoming == f"{existing[:8]}...":
         return existing
     return incoming
+
+
+_EXPORT_SECRET_KEYS = _SECRET_KEYS | {"refresh_token"}
+
+
+def _redact_export_secrets(value, *, redact_values: bool = False):
+    """Redact literal credentials while preserving environment references."""
+    if isinstance(value, dict):
+        redacted = {}
+        for key, item in value.items():
+            if redact_values and item:
+                redacted[key] = item if _ENV_REF.fullmatch(str(item)) else "<redacted>"
+            elif key.lower() in _EXPORT_SECRET_KEYS and item:
+                redacted[key] = item if _ENV_REF.fullmatch(str(item)) else "<redacted>"
+            else:
+                redacted[key] = _redact_export_secrets(
+                    item,
+                    redact_values=key.lower() == "headers",
+                )
+        return redacted
+    if isinstance(value, list):
+        return [_redact_export_secrets(item, redact_values=redact_values) for item in value]
+    return value
 
 
 # Pydantic models for MCP profile requests
@@ -308,12 +332,18 @@ async def list_mcp_profiles():
         }
 
 
-@router.get("/profiles/{profile_id}/auth")
-async def get_profile_auth(profile_id: str):
-    """Get unmasked auth config for a profile (for auth debugger)."""
+@router.post("/profiles/{profile_id}/auth")
+async def get_profile_auth(profile_id: str, request: Request, response: Response):
+    """Get unmasked auth config through the write-protected API path."""
     from testmcpy.mcp_profiles import get_profile_config
 
     try:
+        origin = request.headers.get("origin")
+        expected_origin = str(request.base_url).rstrip("/")
+        if origin and origin.rstrip("/") != expected_origin:
+            raise HTTPException(status_code=403, detail="Cross-origin credential access denied")
+        response.headers["Cache-Control"] = "no-store"
+
         profile_config = get_profile_config()
         profile = profile_config.get_profile(profile_id)
 
@@ -794,9 +824,8 @@ async def delete_mcp_from_profile(profile_id: str, mcp_index: int):
         )
 
 
-@router.get("/profiles/{profile_id}/export")
-async def export_profile(profile_id: str):
-    """Export a profile as YAML."""
+async def _export_profile(profile_id: str):
+    """Build a profile export with direct credentials redacted."""
     try:
         config_data = load_mcp_yaml()
 
@@ -804,6 +833,7 @@ async def export_profile(profile_id: str):
             raise HTTPException(status_code=404, detail=f"Profile '{profile_id}' not found")
 
         profile = config_data["profiles"][profile_id]
+        profile = _redact_export_secrets(profile)
 
         # Create export structure
         export_data = {"profiles": {profile_id: profile}}
@@ -828,6 +858,12 @@ async def export_profile(profile_id: str):
         raise HTTPException(
             status_code=500, detail=f"Failed to export profile '{profile_id}': {str(e)}"
         )
+
+
+@router.get("/profiles/{profile_id}/export")
+async def export_profile(profile_id: str):
+    """Export a profile as YAML with literal credentials redacted."""
+    return await _export_profile(profile_id)
 
 
 @router.post("/profiles/{profile_id}/test-connection/{mcp_index}")

@@ -6,6 +6,7 @@ specifically designed for testing LLM tool calling capabilities.
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -23,13 +24,17 @@ from mcp.types import Tool as MCPToolDef
 
 from testmcpy.auth_debugger import AuthDebugger
 from testmcpy.scrubber import register_secrets_from_auth
+from testmcpy.src.oauth_storage import (
+    create_oauth_key_value_store,
+    create_oauth_token_storage,
+)
 
 
 class MCPOAuth(_FastMCPOAuth):
     """fastmcp OAuth provider patched for MCP servers that validate the
     full resource URL.
 
-    Two fixes over the upstream ``fastmcp.client.auth.oauth.OAuth``:
+    Three fixes over the upstream ``fastmcp.client.auth.oauth.OAuth``:
 
     1. The RFC 8707 ``resource`` indicator is set to the **full** MCP URL
        instead of just scheme+host. Upstream ``OAuth.__init__`` strips
@@ -45,6 +50,9 @@ class MCPOAuth(_FastMCPOAuth):
        ``httpx.AsyncClient(verify=False)`` for the authorization-URL
        pre-flight so ``https://localhost`` with a self-signed cert
        doesn't fail before the browser opens.
+
+    3. Tokens and dynamic client registrations use an encrypted persistent
+       backend shared with the SDK-based LLM providers.
     """
 
     # Default scopes to request — matches what the PRM advertises and what
@@ -58,10 +66,31 @@ class MCPOAuth(_FastMCPOAuth):
         # Default to standard OIDC scopes if none provided.
         if "scopes" not in kwargs:
             kwargs["scopes"] = self.DEFAULT_SCOPES
+        if kwargs.get("token_storage") is None:
+            kwargs["token_storage"] = create_oauth_key_value_store()
+        key_value_store = kwargs["token_storage"]
+        if kwargs.get("callback_port") is None:
+            # Persisted DCR metadata includes the redirect URI. A deterministic
+            # loopback port keeps that registration valid across restarts.
+            digest = hashlib.sha256(mcp_url.rstrip("/").encode()).digest()
+            kwargs["callback_port"] = 49152 + int.from_bytes(digest[:2], byteorder="big") % 16384
         super().__init__(mcp_url, **kwargs)
+        persistent_storage = create_oauth_token_storage(
+            mcp_url,
+            key_value_store=key_value_store,
+        )
+        self.token_storage_adapter = persistent_storage
+        self.context.storage = persistent_storage
         # Preserve the path when computing the RFC 8707 resource indicator.
         self.context.server_url = mcp_url
         self._insecure = insecure
+
+    async def _initialize(self) -> None:
+        """Restore the original persisted expiry instead of extending it."""
+        await super()._initialize()
+        expiry = await self.token_storage_adapter.get_token_expiry()
+        if expiry is not None:
+            self.context.token_expiry_time = expiry
 
     async def redirect_handler(self, authorization_url: str) -> None:
         import webbrowser
@@ -94,13 +123,18 @@ def create_insecure_httpx_factory():
         headers: dict[str, str] | None = None,
         timeout: httpx.Timeout | None = None,
         auth: httpx.Auth | None = None,
+        **client_kwargs: Any,
     ) -> httpx.AsyncClient:
-        return httpx.AsyncClient(
+        # FastMCP may add httpx options (for example follow_redirects) as its
+        # transport evolves. Preserve them, but never allow an option passed by
+        # the caller to change this factory's TLS policy.
+        client_kwargs.update(
             headers=headers,
             timeout=timeout,
             auth=auth,
-            verify=False,  # Skip SSL verification
+            verify=False,
         )
+        return httpx.AsyncClient(**client_kwargs)
 
     return factory
 
@@ -128,13 +162,15 @@ def create_mtls_httpx_factory(
         headers: dict[str, str] | None = None,
         timeout: httpx.Timeout | None = None,
         auth: httpx.Auth | None = None,
+        **client_kwargs: Any,
     ) -> httpx.AsyncClient:
-        return httpx.AsyncClient(
+        client_kwargs.update(
             headers=headers,
             timeout=timeout,
             auth=auth,
             verify=ssl_context,
         )
+        return httpx.AsyncClient(**client_kwargs)
 
     return factory
 
@@ -296,6 +332,7 @@ class MCPClient:
         self.auth: BearerAuth | str | None = None  # Will be set in initialize()
         self._token_manager = None  # Optional TokenManager for auto-refresh
         self._extra_headers: dict[str, str] = {}  # For api_key / custom_headers auth
+        self._operation_lock = asyncio.Lock()
 
     async def _fetch_jwt_token(
         self,
@@ -701,7 +738,57 @@ class MCPClient:
         print("  [Auth] No authentication configured", file=sys.stderr)
         return None
 
+    def _create_transport(self, transport_auth: Any) -> StreamableHttpTransport:
+        """Build a transport for the supplied auth without fetching credentials."""
+        insecure = self.auth_config.get("insecure", False) if self.auth_config else False
+        client_cert = self.auth_config.get("client_cert") if self.auth_config else None
+        client_key = self.auth_config.get("client_key") if self.auth_config else None
+        ca_bundle = self.auth_config.get("ca_bundle") if self.auth_config else None
+
+        if transport_auth == "oauth":
+            transport_auth = MCPOAuth(self.base_url, insecure=insecure)
+
+        httpx_factory = None
+        if client_cert:
+            print("  [MCP] mTLS enabled (client certificate)", file=sys.stderr)
+            httpx_factory = create_mtls_httpx_factory(
+                client_cert=client_cert,
+                client_key=client_key,
+                ca_bundle=ca_bundle,
+            )
+        elif insecure:
+            print("  [MCP] SSL verification disabled (insecure mode)", file=sys.stderr)
+            httpx_factory = create_insecure_httpx_factory()
+
+        transport_kwargs: dict[str, Any] = {
+            "url": self.base_url,
+            "auth": transport_auth,
+        }
+        if httpx_factory:
+            transport_kwargs["httpx_client_factory"] = httpx_factory
+        if self._extra_headers:
+            transport_kwargs["headers"] = self._extra_headers
+        return StreamableHttpTransport(**transport_kwargs)
+
+    async def _connect_with_auth(self, transport_auth: Any, timeout: float) -> None:
+        """Connect a new FastMCP session using already-resolved auth."""
+        new_client = Client(self._create_transport(transport_auth))
+        try:
+            await asyncio.wait_for(new_client.__aenter__(), timeout=timeout)
+        except BaseException:
+            try:
+                await asyncio.wait_for(new_client.__aexit__(None, None, None), timeout=5.0)
+            except Exception:
+                pass
+            raise
+        self.client = new_client
+
     async def initialize(self, timeout: float = DEFAULT_TIMEOUT) -> dict[str, Any]:
+        """Initialize while excluding concurrent operations and shutdown."""
+        async with self._operation_lock:
+            return await self._initialize(timeout)
+
+    async def _initialize(self, timeout: float = DEFAULT_TIMEOUT) -> dict[str, Any]:
         """Initialize the MCP session using FastMCP client.
 
         Args:
@@ -726,49 +813,7 @@ class MCPClient:
             print(f"  [MCP] Connecting to MCP service at {self.base_url}", file=sys.stderr)
 
             try:
-                # Check if we need to skip SSL verification
-                insecure = self.auth_config.get("insecure", False) if self.auth_config else False
-
-                # Check for mTLS configuration
-                client_cert = self.auth_config.get("client_cert") if self.auth_config else None
-                client_key = self.auth_config.get("client_key") if self.auth_config else None
-                ca_bundle = self.auth_config.get("ca_bundle") if self.auth_config else None
-
-                # For OAuth auto-discovery, always use our MCPOAuth subclass
-                # (not fastmcp's upstream OAuth) so the RFC 8707 resource
-                # indicator includes the /mcp path. Otherwise some OAuth
-                # servers reject the authorize request.
-                transport_auth: Any = self.auth
-                if transport_auth == "oauth":
-                    transport_auth = MCPOAuth(self.base_url, insecure=insecure)
-
-                # Determine the httpx client factory based on SSL config
-                httpx_factory = None
-                if client_cert:
-                    print("  [MCP] mTLS enabled (client certificate)", file=sys.stderr)
-                    httpx_factory = create_mtls_httpx_factory(
-                        client_cert=client_cert,
-                        client_key=client_key,
-                        ca_bundle=ca_bundle,
-                    )
-                elif insecure:
-                    print("  [MCP] SSL verification disabled (insecure mode)", file=sys.stderr)
-                    httpx_factory = create_insecure_httpx_factory()
-
-                # Build transport kwargs
-                transport_kwargs: dict[str, Any] = {
-                    "url": self.base_url,
-                    "auth": transport_auth,
-                }
-                if httpx_factory:
-                    transport_kwargs["httpx_client_factory"] = httpx_factory
-                if self._extra_headers:
-                    transport_kwargs["headers"] = self._extra_headers
-
-                transport = StreamableHttpTransport(**transport_kwargs)
-                self.client = Client(transport)
-
-                await asyncio.wait_for(self.client.__aenter__(), timeout=timeout)
+                await self._connect_with_auth(self.auth, timeout)
             except asyncio.TimeoutError:
                 raise MCPTimeoutError(f"MCP client connection timed out after {timeout}s")
             except Exception as e:
@@ -791,18 +836,29 @@ class MCPClient:
                 return {"status": "connected_no_ping", "url": self.base_url, "warning": str(e)}
 
         except (MCPTimeoutError, MCPConnectionError):
-            raise  # Re-raise our specific errors
+            # A connection can be established before a later initialization
+            # step (notably ping) times out. Never retain that partial session.
+            if self.client:
+                await self._close_unlocked()
+            raise
         except Exception as e:
             print(f"  [MCP] Connection failed: {e}", file=sys.stderr)
             # Clean up partial connections
             if self.client:
                 try:
-                    await self.close()
+                    await self._close_unlocked()
                 except Exception:
                     pass  # Ignore cleanup errors during connection failure
             raise MCPConnectionError(f"Failed to initialize MCP client: {e}")
 
     async def list_tools(
+        self, force_refresh: bool = False, timeout: float = DEFAULT_TIMEOUT
+    ) -> list[MCPTool]:
+        """List tools without racing transport refresh or shutdown."""
+        async with self._operation_lock:
+            return await self._list_tools(force_refresh, timeout)
+
+    async def _list_tools(
         self, force_refresh: bool = False, timeout: float = DEFAULT_TIMEOUT
     ) -> list[MCPTool]:
         """List available MCP tools.
@@ -1037,6 +1093,46 @@ class MCPClient:
     async def call_tool(
         self, tool_call: MCPToolCall, timeout: float = DEFAULT_TIMEOUT
     ) -> MCPToolResult:
+        """Execute one tool call while protecting refresh/reconnect lifecycle."""
+        loop = asyncio.get_running_loop()
+        started_at = loop.time()
+        try:
+            await asyncio.wait_for(self._operation_lock.acquire(), timeout=timeout)
+        except asyncio.TimeoutError:
+            return self._tool_timeout_result(tool_call, timeout)
+
+        try:
+            remaining = timeout - (loop.time() - started_at)
+            if remaining <= 0:
+                return self._tool_timeout_result(tool_call, timeout)
+            try:
+                # Bound refresh and reconnect work as well as the MCP request.
+                return await asyncio.wait_for(
+                    self._call_tool(tool_call, remaining, allow_refresh=True),
+                    timeout=remaining,
+                )
+            except asyncio.TimeoutError:
+                return self._tool_timeout_result(tool_call, timeout)
+        finally:
+            self._operation_lock.release()
+
+    @staticmethod
+    def _tool_timeout_result(tool_call: MCPToolCall, timeout: float) -> MCPToolResult:
+        return MCPToolResult(
+            tool_call_id=tool_call.id or "unknown",
+            tool_name=tool_call.name,
+            content=None,
+            is_error=True,
+            error_message=f"Tool call '{tool_call.name}' timed out after {timeout}s",
+        )
+
+    async def _call_tool(
+        self,
+        tool_call: MCPToolCall,
+        timeout: float,
+        *,
+        allow_refresh: bool,
+    ) -> MCPToolResult:
         """Execute an MCP tool call.
 
         This method never raises exceptions - all errors are returned as MCPToolResult with is_error=True.
@@ -1115,25 +1211,21 @@ class MCPClient:
             # Check for 401 Unauthorized — attempt token refresh and retry once
             error_str = str(e)
             is_401 = "401" in error_str or "Unauthorized" in error_str
-            if is_401 and self._token_manager:
+            if is_401 and self._token_manager and allow_refresh:
                 try:
-                    from testmcpy.src.token_manager import TokenRefreshError
-
                     print(
                         f"  [Auth] Got 401 for '{tool_call.name}', refreshing token...",
                         file=sys.stderr,
                     )
-                    await self._token_manager.refresh()
-                    # Update the BearerAuth with new token
-                    self.auth = BearerAuth(token=self._token_manager.access_token)
-                    # Retry the call once (recursive with no further retry)
-                    saved_manager = self._token_manager
-                    self._token_manager = None  # Prevent infinite retry loop
-                    try:
-                        return await self.call_tool(tool_call, timeout)
-                    finally:
-                        self._token_manager = saved_manager
-                except (TokenRefreshError, httpx.HTTPError) as refresh_err:
+                    await self._token_manager.refresh(force=True)
+                    refreshed_auth = BearerAuth(token=self._token_manager.access_token)
+                    tools_cache = self._tools_cache
+                    await self._close_unlocked()
+                    self.auth = refreshed_auth
+                    await self._connect_with_auth(refreshed_auth, timeout)
+                    self._tools_cache = tools_cache
+                    return await self._call_tool(tool_call, timeout, allow_refresh=False)
+                except Exception as refresh_err:
                     return MCPToolResult(
                         tool_call_id=tool_call.id or "unknown",
                         tool_name=tool_call.name,
@@ -1141,7 +1233,7 @@ class MCPClient:
                         is_error=True,
                         error_message=(
                             f"Tool call '{tool_call.name}' got 401 and token "
-                            f"refresh failed: {refresh_err}"
+                            f"refresh/reconnect failed: {refresh_err}"
                         ),
                     )
 
@@ -1162,6 +1254,11 @@ class MCPClient:
         return results
 
     async def list_resources(self) -> list[dict[str, Any]]:
+        """List resources without racing transport refresh or shutdown."""
+        async with self._operation_lock:
+            return await self._list_resources()
+
+    async def _list_resources(self) -> list[dict[str, Any]]:
         """List available MCP resources."""
         if not self.client:
             raise MCPError("MCP client not initialized. Call initialize() first.")
@@ -1185,6 +1282,11 @@ class MCPClient:
             raise MCPError(f"Failed to list resources: {e}")
 
     async def read_resource(self, uri: str) -> dict[str, Any]:
+        """Read a resource without racing transport refresh or shutdown."""
+        async with self._operation_lock:
+            return await self._read_resource(uri)
+
+    async def _read_resource(self, uri: str) -> dict[str, Any]:
         """Read a specific MCP resource."""
         if not self.client:
             raise MCPError("MCP client not initialized. Call initialize() first.")
@@ -1196,6 +1298,11 @@ class MCPClient:
             raise MCPError(f"Failed to read resource {uri}: {e}")
 
     async def list_prompts(self) -> list[dict[str, Any]]:
+        """List prompts without racing transport refresh or shutdown."""
+        async with self._operation_lock:
+            return await self._list_prompts()
+
+    async def _list_prompts(self) -> list[dict[str, Any]]:
         """List available MCP prompts."""
         if not self.client:
             raise MCPError("MCP client not initialized. Call initialize() first.")
@@ -1218,6 +1325,11 @@ class MCPClient:
             raise MCPError(f"Failed to list prompts: {e}")
 
     async def get_prompt(self, name: str, arguments: dict[str, Any] | None = None) -> str:
+        """Get a prompt without racing transport refresh or shutdown."""
+        async with self._operation_lock:
+            return await self._get_prompt(name, arguments)
+
+    async def _get_prompt(self, name: str, arguments: dict[str, Any] | None = None) -> str:
         """Get a specific prompt."""
         if not self.client:
             raise MCPError("MCP client not initialized. Call initialize() first.")
@@ -1237,6 +1349,11 @@ class MCPClient:
             raise MCPError(f"Failed to get prompt {name}: {e}")
 
     async def close(self):
+        """Close the MCP session after any active operation finishes."""
+        async with self._operation_lock:
+            await self._close_unlocked()
+
+    async def _close_unlocked(self):
         """Close the MCP client connection.
 
         This method never raises exceptions to ensure clean shutdown.

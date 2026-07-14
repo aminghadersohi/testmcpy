@@ -8,7 +8,9 @@ import json
 import logging
 import os
 import re
+import secrets
 import shutil
+import socket
 import sqlite3
 import subprocess
 import tempfile
@@ -16,19 +18,34 @@ import time
 import uuid
 from abc import ABC, abstractmethod
 from collections import defaultdict, deque
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+from urllib.parse import urlsplit
 
+import aiohttp
 import httpx
+from aiohttp import web
 from key_value.shared.errors.base import BaseKeyValueError
+from multidict import CIMultiDict
 
 from testmcpy.scrubber import register_secret, register_secrets_from_auth, scrub_obj, scrub_text
+
+if TYPE_CHECKING:
+    from claude_agent_sdk import ClaudeAgentOptions
 
 # Import MCP components (we'll handle the import error gracefully)
 try:
     from ..config import get_config
-    from .mcp_client import MCPClient, MCPError, MCPTool, MCPToolCall, MCPToolResult
+    from .mcp_client import (
+        MCPClient,
+        MCPError,
+        MCPTool,
+        MCPToolCall,
+        MCPToolResult,
+        create_insecure_httpx_factory,
+    )
 except ImportError:
     # Fallback for when running as script
     import os
@@ -41,6 +58,7 @@ except ImportError:
         MCPTool,
         MCPToolCall,
         MCPToolResult,
+        create_insecure_httpx_factory,
     )
 
     # Config will fall back to environment variables
@@ -1475,6 +1493,192 @@ class SDKRunResult:
     logs: list[str] = field(default_factory=list)
 
 
+_HOP_BY_HOP_HEADERS = frozenset(
+    {
+        "connection",
+        "keep-alive",
+        "proxy-authenticate",
+        "proxy-authorization",
+        "proxy-connection",
+        "te",
+        "trailer",
+        "transfer-encoding",
+        "upgrade",
+    }
+)
+
+
+async def _close_async_iterator(iterator: Any) -> None:
+    """Close SDK async generators without relying on their narrow annotation."""
+    close = getattr(iterator, "aclose", None)
+    if close is not None:
+        await close()
+
+
+class _InsecureMCPProxy:
+    """Loopback streaming proxy that skips TLS only for one MCP upstream."""
+
+    def __init__(
+        self,
+        target_url: str,
+        upstream_headers: dict[str, str] | None = None,
+    ) -> None:
+        self._target_url = target_url
+        self._upstream_headers = CIMultiDict(upstream_headers or {})
+        parsed_target = urlsplit(target_url)
+        self._target_origin = f"{parsed_target.scheme}://{parsed_target.netloc}"
+        self._path = f"/mcp-{secrets.token_urlsafe(24)}"
+        self._runner: web.AppRunner | None = None
+        self._session: aiohttp.ClientSession | None = None
+        self._url: str | None = None
+        self._authority: str | None = None
+
+    @property
+    def url(self) -> str:
+        if self._url is None:
+            raise RuntimeError("MCP proxy has not been started")
+        return self._url
+
+    async def start(self) -> None:
+        if self._runner is not None:
+            return
+
+        session = aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=None, sock_connect=10.0, sock_read=None),
+            auto_decompress=False,
+            cookie_jar=aiohttp.DummyCookieJar(),
+        )
+        app = web.Application(client_max_size=100 * 1024 * 1024)
+        app.router.add_post(self._path, self._handle)
+        app.router.add_get(self._path, self._handle, allow_head=False)
+        app.router.add_delete(self._path, self._handle)
+        runner = web.AppRunner(app, access_log=None, shutdown_timeout=1.0)
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind(("127.0.0.1", 0))
+            sock.listen(128)
+            sock.setblocking(False)
+            port = sock.getsockname()[1]
+            await runner.setup()
+            site = web.SockSite(runner, sock)
+            await site.start()
+        except BaseException:
+            sock.close()
+            try:
+                await runner.cleanup()
+            finally:
+                await session.close()
+            raise
+
+        self._session = session
+        self._runner = runner
+        self._authority = f"127.0.0.1:{port}"
+        self._url = f"http://127.0.0.1:{port}{self._path}"
+
+    async def close(self) -> None:
+        runner, self._runner = self._runner, None
+        session, self._session = self._session, None
+        self._url = None
+        self._authority = None
+        try:
+            if runner is not None:
+                await runner.cleanup()
+        finally:
+            if session is not None:
+                await session.close()
+
+    async def _handle(self, request: web.Request) -> web.StreamResponse:
+        session = self._session
+        authority = self._authority
+        if session is None or authority is None:
+            return web.Response(status=503, text="MCP proxy is not running")
+
+        if request.host != authority:
+            return web.Response(status=421, text="Invalid MCP proxy host")
+        origin = request.headers.get("Origin")
+        proxy_origin = f"http://{authority}"
+        if origin is not None and origin != proxy_origin:
+            return web.Response(status=403, text="Invalid MCP proxy origin")
+
+        connection_headers = {
+            token.strip().lower()
+            for value in request.headers.getall("Connection", [])
+            for token in value.split(",")
+            if token.strip()
+        }
+        excluded_request_headers = (
+            _HOP_BY_HOP_HEADERS
+            | connection_headers
+            | {
+                "host",
+                "expect",
+            }
+        )
+
+        request_headers = CIMultiDict(
+            (name, value)
+            for name, value in request.headers.items()
+            if name.lower() not in excluded_request_headers
+        )
+        if origin is not None:
+            request_headers["Origin"] = self._target_origin
+        for name, value in self._upstream_headers.items():
+            request_headers[name] = value
+        body = request.content.iter_chunked(64 * 1024) if request.can_read_body else None
+
+        try:
+            async with session.request(
+                request.method,
+                self._target_url,
+                headers=request_headers,
+                data=body,
+                allow_redirects=False,
+                ssl=False,
+            ) as upstream:
+                if 300 <= upstream.status < 400:
+                    return web.Response(
+                        status=502,
+                        text=(
+                            "MCP upstream redirected the request; configure the profile "
+                            "with the canonical MCP URL"
+                        ),
+                    )
+                upstream_connection_headers = {
+                    token.strip().lower()
+                    for value in upstream.headers.getall("Connection", [])
+                    for token in value.split(",")
+                    if token.strip()
+                }
+                response_headers = CIMultiDict(
+                    (name, value)
+                    for name, value in upstream.headers.items()
+                    if name.lower() not in (_HOP_BY_HOP_HEADERS | upstream_connection_headers)
+                )
+                response = web.StreamResponse(
+                    status=upstream.status,
+                    reason=upstream.reason,
+                    headers=response_headers,
+                )
+                await response.prepare(request)
+                try:
+                    async for chunk in upstream.content.iter_any():
+                        await response.write(chunk)
+                    await response.write_eof()
+                except (ConnectionResetError, aiohttp.ClientError) as exc:
+                    logging.getLogger(__name__).debug(
+                        "Claude MCP TLS proxy stream ended early: %s",
+                        exc,
+                    )
+                return response
+        except (aiohttp.ClientError, TimeoutError) as exc:
+            logging.getLogger(__name__).warning(
+                "Claude MCP TLS proxy upstream request failed: %s",
+                exc,
+            )
+            return web.Response(status=502, text="MCP upstream connection failed")
+
+
 class BaseSDKProvider(LLMProvider, ABC):
     """Common base for SDK-backed providers (Claude, Codex, Gemini, ...).
 
@@ -1530,6 +1734,20 @@ class BaseSDKProvider(LLMProvider, ABC):
         register_secrets_from_auth(auth)
         self._mcp_headers: dict[str, str] = {}
         self._logger = logging.getLogger(__name__ + "." + (self.LOGGER_NAME or type(self).__name__))
+
+    @property
+    def _mcp_insecure(self) -> bool:
+        """Whether this profile explicitly disables MCP TLS verification."""
+        return bool(self.auth_config and self.auth_config.get("insecure", False))
+
+    def _build_mcp_transport_params(self) -> dict[str, Any]:
+        """Build native SDK transport parameters with consistent TLS policy."""
+        params: dict[str, Any] = {"url": self.mcp_url}
+        if self._mcp_headers:
+            params["headers"] = self._mcp_headers
+        if self._mcp_insecure:
+            params["httpx_client_factory"] = create_insecure_httpx_factory()
+        return params
 
     # ---- Hooks the subclass must implement --------------------------------
 
@@ -1745,7 +1963,7 @@ class BaseSDKProvider(LLMProvider, ABC):
             self._logger.warning("JWT auth config incomplete")
             return None
         try:
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(verify=not self._mcp_insecure) as client:
                 resp = await client.post(
                     api_url,
                     headers={
@@ -1789,7 +2007,7 @@ class BaseSDKProvider(LLMProvider, ABC):
         if scopes:
             data["scope"] = " ".join(scopes)
         try:
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(verify=not self._mcp_insecure) as client:
                 resp = await client.post(token_url, data=data, timeout=30.0)
                 resp.raise_for_status()
                 token = resp.json().get("access_token") or None
@@ -1975,6 +2193,23 @@ class ClaudeSDKProvider(BaseSDKProvider):
     """
 
     LOGGER_NAME = "ClaudeSDKProvider"
+    _MCP_ONLY_SYSTEM_PROMPT = (
+        "You are a test executor. Your ONLY job is to call the MCP tools provided "
+        "to fulfill the user's request, then report the results.\n\n"
+        "IMPORTANT RULES:\n"
+        "1. Use ONLY the MCP server tools provided to you. Do NOT use any Claude Code "
+        "built-in tools and do NOT call tools from any other MCP server.\n"
+        "2. Some MCP servers use a gateway pattern where tools are invoked via a meta-tool "
+        "(e.g., call_tool(name='tool_name', arguments={...})). Use whatever interface the "
+        "server provides.\n"
+        "3. Do NOT call any tool discovery or search tools - the tool name is always "
+        "specified in the request. Proceed directly to the requested tool without prior "
+        "discovery.\n"
+        "4. Do NOT call any authentication, login, or credential tool (e.g. 'authenticate'). "
+        "Skip it and proceed directly to the requested tool.\n"
+        "5. Always include the actual data from tool results in your response.\n"
+        "6. Be concise and factual - include key data points from the tool output."
+    )
 
     def __init__(
         self,
@@ -2084,6 +2319,10 @@ class ClaudeSDKProvider(BaseSDKProvider):
           testmcpy runs as root in a container. Recent Claude CLI versions
           refuse that flag under root/sudo without this opt-in. Harmless
           when not running as root.
+        - Explicitly discards Node's process-wide TLS opt-out. Insecure MCP
+          profiles use a loopback proxy so model/API HTTPS remains verified.
+        - Forces loopback traffic to bypass inherited HTTP proxy settings so
+          the temporary MCP URL and bearer header never leave this host.
         """
         if source_env is None:
             source_env = dict(os.environ)
@@ -2100,8 +2339,87 @@ class ClaudeSDKProvider(BaseSDKProvider):
             clean_env.update(auth_env)
         else:
             clean_env["ANTHROPIC_API_KEY"] = ""  # Force subscription usage, not API credits
+        clean_env.pop("NODE_TLS_REJECT_UNAUTHORIZED", None)
+        no_proxy_entries = [
+            entry.strip()
+            for key in ("NO_PROXY", "no_proxy")
+            for entry in clean_env.get(key, "").split(",")
+            if entry.strip()
+        ]
+        for loopback_host in ("127.0.0.1", "localhost"):
+            if loopback_host not in no_proxy_entries:
+                no_proxy_entries.append(loopback_host)
+        no_proxy = ",".join(no_proxy_entries)
+        clean_env["NO_PROXY"] = no_proxy
+        clean_env["no_proxy"] = no_proxy
         clean_env["IS_SANDBOX"] = "1"
         return clean_env
+
+    async def start_insecure_mcp_proxy(self) -> _InsecureMCPProxy | None:
+        """Start a per-query TLS proxy when Claude cannot skip MCP verification."""
+        if (
+            not self._mcp_insecure
+            or not self.mcp_url
+            or urlsplit(self.mcp_url).scheme.lower() != "https"
+        ):
+            return None
+
+        proxy = _InsecureMCPProxy(self.mcp_url, upstream_headers=self._mcp_headers)
+        await proxy.start()
+        self._logger.warning(
+            "Claude SDK MCP certificate verification disabled through a local "
+            "per-query proxy; model/API TLS verification remains enabled"
+        )
+        return proxy
+
+    def build_agent_options(
+        self,
+        *,
+        cwd: str | Path,
+        model: str | None = None,
+        max_turns: int = 25,
+        stderr: Callable[[str], None] | None = None,
+        allow_tool_search: bool = False,
+        mcp_url_override: str | None = None,
+    ) -> "ClaudeAgentOptions":
+        """Build isolated Claude options containing only the selected MCP server.
+
+        Every Claude entry point must use this builder. Otherwise the nested CLI
+        also loads project, user, and plugin MCP configuration, which can launch
+        OAuth for unrelated offline servers.
+        """
+        from claude_agent_sdk import ClaudeAgentOptions  # noqa: PLC0415
+
+        mcp_servers: dict[str, Any] = {}
+        if self._mcp_server_config:
+            server_config = dict(self._mcp_server_config)
+            if mcp_url_override is not None:
+                server_config["url"] = mcp_url_override
+                # The loopback proxy injects fixed upstream credentials so
+                # bearer tokens never traverse even the local plaintext hop.
+                server_config.pop("headers", None)
+            mcp_servers["mcp-service"] = server_config
+
+        return ClaudeAgentOptions(
+            model=model or self.model,
+            permission_mode="bypassPermissions",
+            # ``tools`` controls Claude's built-in set only; explicitly
+            # allowlisting avoids newly added CLI tools escaping a denylist.
+            # Configured MCP tools remain available separately.
+            tools=["ToolSearch"] if allow_tool_search else [],
+            mcp_servers=mcp_servers,
+            max_turns=max_turns,
+            env=self._build_clean_env(
+                cli_token=self._cli_token,
+            ),
+            cwd=cwd,
+            system_prompt=None if allow_tool_search else self._MCP_ONLY_SYSTEM_PROMPT,
+            debug_stderr=None,
+            stderr=stderr,
+            # setting_sources=[] is a no-op in the SDK; this CLI flag is what
+            # guarantees only the explicit mcp_servers mapping is honored.
+            extra_args={"strict-mcp-config": None},
+        )
 
     async def _run_agent(
         self,
@@ -2113,6 +2431,8 @@ class ClaudeSDKProvider(BaseSDKProvider):
         :class:`SDKRunResult` for :class:`BaseSDKProvider` to convert into
         :class:`LLMResult`."""
         logs: list[str] = []
+        _sdk_tmpdir: str | None = None
+        _mcp_proxy: _InsecureMCPProxy | None = None
 
         def log(msg: str):
             """Log to module logger, logs list, and optionally stream via callback."""
@@ -2132,7 +2452,6 @@ class ClaudeSDKProvider(BaseSDKProvider):
         try:
             from claude_agent_sdk import (
                 AssistantMessage,
-                ClaudeAgentOptions,
                 ClaudeSDKError,
                 CLIConnectionError,
                 CLINotFoundError,
@@ -2148,17 +2467,10 @@ class ClaudeSDKProvider(BaseSDKProvider):
             )
             from claude_agent_sdk.types import ToolResultBlock
 
-            # Build SDK options
-            mcp_servers = {}
             if self._mcp_server_config:
-                mcp_servers["mcp-service"] = self._mcp_server_config
                 log(f"[ClaudeSDK] MCP server configured: {self._mcp_server_config.get('url', '?')}")
             else:
                 log("[ClaudeSDK] No MCP server config — SDK will have no MCP tools")
-
-            # Build a clean env (see _build_clean_env for what gets stripped/added,
-            # including the IS_SANDBOX=1 opt-in required when running as root).
-            clean_env = self._build_clean_env(cli_token=self._cli_token)
 
             # Capture the CLI's stderr so failures (e.g. the root +
             # --dangerously-skip-permissions refusal) surface in the error
@@ -2172,75 +2484,17 @@ class ClaudeSDKProvider(BaseSDKProvider):
                 if len(stderr_capture) < _max_stderr_lines:
                     stderr_capture.append(line)
 
-            # Disable Claude Code's built-in tools (Bash, Read, Edit, Grep, etc.)
-            # so the LLM only uses the MCP server's tools.
-            # This prevents the LLM from calling ToolSearch or other internal tools
-            # instead of the MCP gateway tools.
-            _builtin_tools_to_block = [
-                "Bash",
-                "Read",
-                "Edit",
-                "Write",
-                "Grep",
-                "Glob",
-                "ToolSearch",
-                "Skill",
-                "TodoWrite",
-                "Agent",
-                "WebFetch",
-                "WebSearch",
-                "NotebookEdit",
-                "EnterWorktree",
-                "ExitWorktree",
-            ]
-
-            # System prompt to focus the LLM on MCP tools exclusively
-            system_prompt = (
-                "You are a test executor. Your ONLY job is to call the MCP tools provided "
-                "to fulfill the user's request, then report the results.\n\n"
-                "IMPORTANT RULES:\n"
-                "1. Use ONLY the MCP server tools provided to you. Do NOT use any Claude Code "
-                "built-in tools and do NOT call tools from any other MCP server.\n"
-                "2. Some MCP servers use a gateway pattern where tools are invoked via a meta-tool "
-                "(e.g., call_tool(name='tool_name', arguments={...})). Use whatever interface the server provides.\n"
-                "3. Do NOT call any tool discovery or search tools — the tool name is always specified "
-                "in the request. Proceed directly to the requested tool without prior discovery.\n"
-                "4. Do NOT call any authentication, login, or credential tool (e.g. 'authenticate'). "
-                "Skip it and proceed directly to the requested tool.\n"
-                "5. Always include the actual data from tool results in your response.\n"
-                "6. Be concise and factual — include key data points from the tool output."
-            )
-
             # Run the subprocess from a temp directory so it doesn't inherit
             # any project-level MCP config files from the working directory.
             # The only MCP server available to the subprocess is the one we
-            # pass explicitly via mcp_servers above.
+            # pass explicitly through build_agent_options.
             _sdk_tmpdir = tempfile.mkdtemp(prefix="testmcpy_sdk_")
+            _mcp_proxy = await self.start_insecure_mcp_proxy()
 
-            options = ClaudeAgentOptions(
-                model=self.model,
-                permission_mode="bypassPermissions",
-                mcp_servers=mcp_servers,
-                max_turns=25,
-                env=clean_env,
+            options = self.build_agent_options(
                 cwd=_sdk_tmpdir,
-                disallowed_tools=_builtin_tools_to_block,
-                system_prompt=system_prompt,
-                debug_stderr=None,  # Don't dump CLI debug to host stderr
-                stderr=_capture_stderr,  # Capture lines for failure diagnostics
-                # --strict-mcp-config tells the CLI to honour ONLY the MCP
-                # servers we pass explicitly via mcp_servers above, ignoring
-                # any servers in ~/.claude/settings.json, .mcp.json, or
-                # user-installed plugins (e.g. Playwright). Without this flag
-                # those global servers leak into the subprocess and the model
-                # reaches for them (e.g. browser_navigate to read a tool-result
-                # file) producing spurious tool-call errors in eval results.
-                #
-                # NOTE: setting_sources=[] looks like it should disable config
-                # loading but the SDK only passes --setting-sources when the
-                # list is truthy, so [] is silently a no-op. Use extra_args
-                # to pass the flag directly instead.
-                extra_args={"strict-mcp-config": None},
+                stderr=_capture_stderr,
+                mcp_url_override=_mcp_proxy.url if _mcp_proxy is not None else None,
             )
 
             # Execute query with timeout
@@ -2264,7 +2518,7 @@ class ClaudeSDKProvider(BaseSDKProvider):
 
             log(f"[ClaudeSDK] Starting query (model={self.model}, timeout={timeout}s)...")
 
-            async def execute_query():
+            async def execute_query() -> None:
                 nonlocal response_text, thinking_text, token_usage, cost
                 nonlocal retry_budget_aborted
                 message_count = 0
@@ -2272,8 +2526,9 @@ class ClaudeSDKProvider(BaseSDKProvider):
                 # identify the FINAL text response (after all tool calls)
                 all_text_segments: list[str] = []
                 current_turn_text = ""
+                sdk_messages = query(prompt=prompt, options=options)
                 try:
-                    async for message in query(prompt=prompt, options=options):
+                    async for message in sdk_messages:
                         message_count += 1
                         msg_type = type(message).__name__
 
@@ -2443,6 +2698,8 @@ class ClaudeSDKProvider(BaseSDKProvider):
                     log(f"[ClaudeSDK] SDK error during iteration: {e}")
                     if not all_text_segments and not tool_calls:
                         raise
+                finally:
+                    await _close_async_iterator(sdk_messages)
 
                 # Use the FINAL text segment as the response. In a multi-turn
                 # agentic loop (search → call → synthesize), intermediate text
@@ -2471,8 +2728,6 @@ class ClaudeSDKProvider(BaseSDKProvider):
                     response_text=f"Error: SDK query timed out after {timeout}s",
                     logs=logs,
                 )
-            finally:
-                shutil.rmtree(_sdk_tmpdir, ignore_errors=True)
 
             # Attach tool results to tool calls and build MCPToolResult objects
             mcp_tool_results = []
@@ -2565,6 +2820,14 @@ class ClaudeSDKProvider(BaseSDKProvider):
                 response_text=f"Error: {type(e).__name__}: {e}",
                 logs=logs,
             )
+        finally:
+            if _mcp_proxy is not None:
+                try:
+                    await _mcp_proxy.close()
+                except Exception as e:
+                    log(f"[ClaudeSDK] Failed to close MCP TLS proxy: {e}")
+            if _sdk_tmpdir is not None:
+                shutil.rmtree(_sdk_tmpdir, ignore_errors=True)
 
 
 _assistant_logger = logging.getLogger(__name__ + ".AssistantProvider")
@@ -3949,9 +4212,7 @@ class CodexSDKProvider(BaseSDKProvider):
         from agents.models.openai_provider import OpenAIProvider as OAIProvider  # noqa: PLC0415
         from agents.run_config import RunConfig  # noqa: PLC0415
 
-        params: dict[str, Any] = {"url": self.mcp_url}
-        if self._mcp_headers:
-            params["headers"] = self._mcp_headers
+        params = self._build_mcp_transport_params()
 
         async with MCPServerStreamableHttp(
             params=params,
@@ -4377,9 +4638,7 @@ class GeminiSDKProvider(BaseSDKProvider):
 
                 return Client(api_key=api_key_capture)
 
-        params: dict[str, Any] = {"url": self.mcp_url}
-        if self._mcp_headers:
-            params["headers"] = self._mcp_headers
+        params = self._build_mcp_transport_params()
 
         mcp_toolset = McpToolset(connection_params=StreamableHTTPConnectionParams(**params))
         try:

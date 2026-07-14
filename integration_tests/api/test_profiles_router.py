@@ -1,7 +1,7 @@
 """Tests for MCP profiles and LLM profiles CRUD endpoints."""
 
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 import yaml
@@ -57,6 +57,26 @@ class TestListMCPProfiles:
         mcp = test_profile["mcps"][0]
         assert "auth" in mcp
         assert mcp["auth"]["type"] == "none"
+
+    def test_list_profiles_round_trips_ssl_and_oauth_flags(self, client):
+        update = client.put(
+            "/api/mcp/profiles/test/mcps/0",
+            json={
+                "auth": {
+                    "type": "oauth",
+                    "oauth_auto_discover": True,
+                    "insecure": True,
+                }
+            },
+        )
+        assert update.status_code == 200
+
+        response = client.get("/api/mcp/profiles")
+        mcp = next(profile for profile in response.json()["profiles"] if profile["id"] == "test")[
+            "mcps"
+        ][0]
+        assert mcp["auth"]["insecure"] is True
+        assert mcp["auth"]["oauth_auto_discover"] is True
 
     def test_list_profiles_default_selection(self, client):
         resp = client.get("/api/mcp/profiles")
@@ -257,6 +277,64 @@ class TestAddMCPToProfile:
             },
         )
         assert resp.status_code == 404
+
+
+class TestMCPProfileConnection:
+    """Saved connection tests must retain transport-wide TLS settings."""
+
+    @pytest.mark.parametrize(
+        "auth",
+        [
+            {"type": "none", "insecure": True},
+            {"type": "bearer", "token": "test-token", "insecure": True},
+            {
+                "type": "jwt",
+                "api_url": "https://auth.example.test/token",
+                "api_token": "test-user",
+                "api_secret": "test-secret",
+                "insecure": True,
+            },
+            {
+                "type": "oauth",
+                "oauth_auto_discover": True,
+                "insecure": True,
+            },
+        ],
+        ids=["none", "bearer", "jwt", "oauth"],
+    )
+    def test_forwards_insecure_for_every_auth_type(self, client, auth):
+        update = client.put(
+            "/api/mcp/profiles/test/mcps/0",
+            json={"auth": auth},
+        )
+        assert update.status_code == 200
+
+        test_client = AsyncMock()
+        test_client.list_tools.return_value = []
+        with patch(
+            "testmcpy.server.routers.mcp_profiles.MCPClient",
+            return_value=test_client,
+        ) as client_class:
+            response = client.post("/api/mcp/profiles/test/test-connection/0")
+
+        assert response.status_code == 200
+        assert response.json()["success"] is True
+        assert client_class.call_args.kwargs["auth"]["type"] == auth["type"]
+        assert client_class.call_args.kwargs["auth"]["insecure"] is True
+
+    def test_closes_failed_connection_test_client(self, client):
+        test_client = AsyncMock()
+        test_client.list_tools.side_effect = RuntimeError("tool discovery failed")
+
+        with patch(
+            "testmcpy.server.routers.mcp_profiles.MCPClient",
+            return_value=test_client,
+        ):
+            response = client.post("/api/mcp/profiles/test/test-connection/0")
+
+        assert response.status_code == 200
+        assert response.json()["success"] is False
+        test_client.close.assert_awaited_once()
 
 
 class TestDeleteMCPFromProfile:

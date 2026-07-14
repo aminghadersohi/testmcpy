@@ -10,7 +10,7 @@ Tests cover:
   success_rate_above, latency_percentile, response_matches_pattern
 """
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -25,6 +25,7 @@ from testmcpy.src.llm_integration import (
     LLMResult,
     OpenAIProvider,
     OpenRouterProvider,
+    _InsecureMCPProxy,
     _SSEStreamState,
     create_llm_provider,
 )
@@ -231,6 +232,275 @@ class TestClaudeSDKBuildCleanEnv:
         monkeypatch.delenv("IS_SANDBOX", raising=False)
         env = ClaudeSDKProvider._build_clean_env()
         assert env["IS_SANDBOX"] == "1"
+
+    def test_does_not_inherit_process_wide_node_tls_opt_out(self):
+        env = ClaudeSDKProvider._build_clean_env({"NODE_TLS_REJECT_UNAUTHORIZED": "0"})
+
+        assert "NODE_TLS_REJECT_UNAUTHORIZED" not in env
+
+    def test_loopback_bypasses_inherited_proxy_settings(self):
+        env = ClaudeSDKProvider._build_clean_env(
+            {
+                "HTTPS_PROXY": "http://proxy.example.test:8080",
+                "NO_PROXY": "internal.example.test",
+                "no_proxy": "metadata.example.test",
+            }
+        )
+
+        assert env["HTTPS_PROXY"] == "http://proxy.example.test:8080"
+        for key in ("NO_PROXY", "no_proxy"):
+            entries = set(env[key].split(","))
+            assert {
+                "internal.example.test",
+                "metadata.example.test",
+                "127.0.0.1",
+                "localhost",
+            }.issubset(entries)
+
+    @pytest.mark.asyncio
+    async def test_agent_temp_dir_is_removed_when_option_building_fails(self, tmp_path):
+        sdk_tmpdir = tmp_path / "sdk-cwd"
+        sdk_tmpdir.mkdir()
+        provider = ClaudeSDKProvider(model="claude-sonnet-4-6")
+        proxy = AsyncMock()
+        proxy.url = "http://127.0.0.1:54321/mcp-secret"
+
+        with (
+            patch(
+                "testmcpy.src.llm_integration.tempfile.mkdtemp",
+                return_value=str(sdk_tmpdir),
+            ),
+            patch.object(
+                provider,
+                "build_agent_options",
+                side_effect=ValueError("invalid SDK options"),
+            ),
+            patch.object(
+                provider,
+                "start_insecure_mcp_proxy",
+                new=AsyncMock(return_value=proxy),
+            ),
+        ):
+            result = await provider._run_agent("hello", timeout=1.0, messages=None)
+
+        assert "invalid SDK options" in result.response_text
+        assert not sdk_tmpdir.exists()
+        proxy.close.assert_awaited_once()
+
+
+class TestClaudeMCPProxy:
+    @pytest.mark.asyncio
+    async def test_self_signed_tls_is_bypassed_only_through_loopback_proxy(self, tmp_path):
+        import asyncio
+        import datetime as dt
+        import ipaddress
+        import socket
+        import ssl
+
+        import httpx
+        from aiohttp import web
+        from cryptography import x509
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import rsa
+        from cryptography.x509.oid import NameOID
+        from multidict import CIMultiDict
+
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "127.0.0.1")])
+        now = dt.datetime.now(dt.UTC)
+        cert = (
+            x509.CertificateBuilder()
+            .subject_name(subject)
+            .issuer_name(subject)
+            .public_key(key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now - dt.timedelta(minutes=1))
+            .not_valid_after(now + dt.timedelta(hours=1))
+            .add_extension(
+                x509.SubjectAlternativeName([x509.IPAddress(ipaddress.ip_address("127.0.0.1"))]),
+                critical=False,
+            )
+            .sign(key, hashes.SHA256())
+        )
+        cert_path = tmp_path / "cert.pem"
+        key_path = tmp_path / "key.pem"
+        cert_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+        key_path.write_bytes(
+            key.private_bytes(
+                serialization.Encoding.PEM,
+                serialization.PrivateFormat.TraditionalOpenSSL,
+                serialization.NoEncryption(),
+            )
+        )
+        tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        tls.load_cert_chain(cert_path, key_path)
+
+        captured = {}
+
+        async def upstream_handler(request):
+            if request.headers.get("X-Test-Redirect"):
+                return web.Response(
+                    status=307,
+                    headers={"Location": f"https://127.0.0.1:{port}/canonical-mcp"},
+                )
+            captured["authorization"] = request.headers.get("Authorization")
+            captured["origin"] = request.headers.get("Origin")
+            captured["content_length"] = request.headers.get("Content-Length")
+            captured["transfer_encoding"] = request.headers.get("Transfer-Encoding")
+            captured["dynamic_hop_header"] = request.headers.get("X-Hop")
+            captured["body"] = await request.read()
+            return web.Response(
+                body=b'{"jsonrpc":"2.0","result":{}}',
+                content_type="application/json",
+                headers=CIMultiDict(
+                    [
+                        ("Mcp-Session-Id", "session-123"),
+                        ("WWW-Authenticate", 'Bearer realm="first"'),
+                        ("WWW-Authenticate", 'Bearer realm="second"'),
+                        ("Connection", "X-Internal"),
+                        ("X-Internal", "must-not-leak"),
+                        ("Set-Cookie", "proxy_cookie=must-not-replay"),
+                    ]
+                ),
+            )
+
+        async def upstream_stream(request):
+            captured["last_event_id"] = request.headers.get("Last-Event-ID")
+            captured["cookie"] = request.headers.get("Cookie")
+            response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+            await response.prepare(request)
+            await response.write(b"data: first\n\n")
+            await asyncio.sleep(0.01)
+            await response.write(b"data: second\n\n")
+            await response.write_eof()
+            return response
+
+        async def upstream_delete(request):
+            captured["deleted_session"] = request.headers.get("Mcp-Session-Id")
+            return web.Response(status=204)
+
+        app = web.Application()
+        app.router.add_post("/mcp", upstream_handler)
+        app.router.add_get("/mcp", upstream_stream)
+        app.router.add_delete("/mcp", upstream_delete)
+        runner = web.AppRunner(app)
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.bind(("127.0.0.1", 0))
+        sock.listen(128)
+        sock.setblocking(False)
+        port = sock.getsockname()[1]
+        await runner.setup()
+        site = web.SockSite(runner, sock, ssl_context=tls)
+        await site.start()
+
+        proxy = _InsecureMCPProxy(
+            f"https://127.0.0.1:{port}/mcp",
+            upstream_headers={"Authorization": "Bearer selected-token"},
+        )
+        try:
+            await proxy.start()
+            proxy_origin = proxy.url.rsplit("/", 1)[0]
+            payload = b'{"jsonrpc":"2.0","method":"initialize"}'
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    proxy.url,
+                    headers={
+                        "Origin": proxy_origin,
+                        "Connection": "X-Hop",
+                        "X-Hop": "must-not-leak",
+                    },
+                    content=payload,
+                )
+                client.cookies.clear()
+                async with client.stream(
+                    "GET",
+                    proxy.url,
+                    headers={"Last-Event-ID": "event-42"},
+                ) as stream_response:
+                    streamed_body = b"".join(
+                        [chunk async for chunk in stream_response.aiter_bytes()]
+                    )
+                deleted = await client.delete(
+                    proxy.url,
+                    headers={"Mcp-Session-Id": "session-123"},
+                )
+                redirected = await client.post(
+                    proxy.url,
+                    headers={"X-Test-Redirect": "1"},
+                )
+                unsupported = await client.put(proxy.url)
+                invalid_host = await client.post(
+                    proxy.url,
+                    headers={"Host": "attacker.example"},
+                )
+                invalid_origin = await client.post(
+                    proxy.url,
+                    headers={"Origin": "https://attacker.example"},
+                )
+                unknown_path = await client.post(f"{proxy_origin}/not-the-secret-path")
+
+            assert response.status_code == 200
+            assert response.headers["Mcp-Session-Id"] == "session-123"
+            assert response.headers.get_list("WWW-Authenticate") == [
+                'Bearer realm="first"',
+                'Bearer realm="second"',
+            ]
+            assert "X-Internal" not in response.headers
+            assert stream_response.headers["Content-Type"] == "text/event-stream"
+            assert streamed_body == b"data: first\n\ndata: second\n\n"
+            assert deleted.status_code == 204
+            assert redirected.status_code == 502
+            assert "canonical MCP URL" in redirected.text
+            assert unsupported.status_code == 405
+            assert invalid_host.status_code == 421
+            assert invalid_origin.status_code == 403
+            assert unknown_path.status_code == 404
+            assert captured == {
+                "authorization": "Bearer selected-token",
+                "origin": f"https://127.0.0.1:{port}",
+                "content_length": str(len(payload)),
+                "transfer_encoding": None,
+                "dynamic_hop_header": None,
+                "body": payload,
+                "last_event_id": "event-42",
+                "cookie": None,
+                "deleted_session": "session-123",
+            }
+        finally:
+            await proxy.close()
+            await runner.cleanup()
+
+        with pytest.raises(RuntimeError, match="has not been started"):
+            _ = proxy.url
+
+    @pytest.mark.asyncio
+    async def test_provider_overrides_only_mcp_url_and_never_node_tls(self):
+        provider = ClaudeSDKProvider(
+            model="claude-sonnet-4-6",
+            mcp_url="https://mcp.example.test/mcp",
+            auth={"type": "none", "insecure": True},
+        )
+        provider._mcp_server_config = {
+            "type": "http",
+            "url": provider.mcp_url,
+            "headers": {"Authorization": "Bearer selected-token"},
+        }
+        proxy = await provider.start_insecure_mcp_proxy()
+        assert proxy is not None
+        try:
+            options = provider.build_agent_options(
+                cwd="/tmp",
+                mcp_url_override=proxy.url,
+            )
+        finally:
+            await proxy.close()
+
+        config = options.mcp_servers["mcp-service"]
+        assert config["url"].startswith("http://127.0.0.1:")
+        assert "headers" not in config
+        assert options.tools == []
+        assert options.disallowed_tools == []
+        assert "NODE_TLS_REJECT_UNAUTHORIZED" not in options.env
 
 
 # ---------------------------------------------------------------------------
@@ -790,6 +1060,116 @@ class TestSDKProviderContract:
         if provider_cls is GeminiSDKProvider:
             return GeminiSDKProvider(model="gemini-sdk-flash", api_key="AIza-test")
         raise AssertionError(f"unknown provider class {provider_cls}")
+
+    @pytest.mark.parametrize(
+        "provider",
+        [
+            CodexSDKProvider(
+                model="codex-o3",
+                mcp_url="https://mcp.example.test/mcp",
+                auth={"type": "none", "insecure": True},
+                openai_api_key="sk-test",
+            ),
+            GeminiSDKProvider(
+                model="gemini-sdk-flash",
+                mcp_url="https://mcp.example.test/mcp",
+                auth={"type": "none", "insecure": True},
+                api_key="AIza-test",
+            ),
+        ],
+        ids=["codex", "gemini"],
+    )
+    def test_native_mcp_transport_uses_insecure_httpx_factory(self, provider) -> None:
+        params = provider._build_mcp_transport_params()
+
+        with patch("testmcpy.src.mcp_client.httpx.AsyncClient") as async_client:
+            params["httpx_client_factory"]()
+
+        assert async_client.call_args.kwargs["verify"] is False
+
+    def test_secure_native_mcp_transport_uses_sdk_default_factory(self) -> None:
+        provider = CodexSDKProvider(
+            model="codex-o3",
+            mcp_url="https://mcp.example.test/mcp",
+            auth={"type": "none"},
+            openai_api_key="sk-test",
+        )
+
+        assert "httpx_client_factory" not in provider._build_mcp_transport_params()
+
+    @pytest.mark.parametrize(
+        "auth,method_name,response_json,expected_token,expected_verify",
+        [
+            (
+                {
+                    "type": "jwt",
+                    "api_url": "https://auth.example.test/jwt",
+                    "api_token": "user",
+                    "api_secret": "secret",
+                    "insecure": True,
+                },
+                "_fetch_jwt_token",
+                {"payload": {"access_token": "jwt-token"}},
+                "jwt-token",
+                False,
+            ),
+            (
+                {
+                    "type": "oauth",
+                    "token_url": "https://auth.example.test/token",
+                    "client_id": "client",
+                    "client_secret": "secret",
+                    "insecure": True,
+                },
+                "_fetch_oauth_token",
+                {"access_token": "oauth-token"},
+                "oauth-token",
+                False,
+            ),
+            (
+                {
+                    "type": "oauth",
+                    "token_url": "https://auth.example.test/token",
+                    "client_id": "client",
+                    "client_secret": "secret",
+                },
+                "_fetch_oauth_token",
+                {"access_token": "secure-token"},
+                "secure-token",
+                True,
+            ),
+        ],
+        ids=["insecure-jwt", "insecure-oauth", "secure-oauth"],
+    )
+    @pytest.mark.asyncio
+    async def test_auth_token_fetch_honors_tls_verification_setting(
+        self,
+        auth,
+        method_name,
+        response_json,
+        expected_token,
+        expected_verify,
+    ) -> None:
+        provider = CodexSDKProvider(
+            model="codex-o3",
+            mcp_url="https://mcp.example.test/mcp",
+            auth=auth,
+            openai_api_key="sk-test",
+        )
+        response = MagicMock()
+        response.json.return_value = response_json
+        client = AsyncMock()
+        client.__aenter__.return_value = client
+        client.post.return_value = response
+
+        with patch(
+            "testmcpy.src.llm_integration.httpx.AsyncClient",
+            return_value=client,
+        ) as async_client:
+            token = await getattr(provider, method_name)()
+
+        assert token == expected_token
+        async_client.assert_called_once_with(verify=expected_verify)
 
     @pytest.mark.parametrize("provider_name", ["claude", "codex", "gemini"])
     @pytest.mark.asyncio

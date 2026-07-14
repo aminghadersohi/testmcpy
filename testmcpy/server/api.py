@@ -18,7 +18,8 @@ from contextlib import asynccontextmanager  # noqa: E402
 from datetime import datetime  # noqa: E402
 from enum import Enum  # noqa: E402
 from pathlib import Path  # noqa: E402
-from typing import Any  # noqa: E402
+from tempfile import TemporaryDirectory  # noqa: E402
+from typing import Any, cast  # noqa: E402
 from urllib.parse import urlsplit  # noqa: E402
 
 from fastapi import FastAPI, HTTPException, Query, WebSocket  # noqa: E402
@@ -59,6 +60,7 @@ from testmcpy.server.websocket import strip_mcp_prefix  # noqa: E402
 from testmcpy.src.llm_integration import (  # noqa: E402
     BaseSDKProvider,
     ClaudeSDKProvider,
+    _close_async_iterator,
     create_llm_provider,
 )
 from testmcpy.src.mcp_client import MCPClient, MCPConnectionError, MCPToolCall  # noqa: E402
@@ -1437,6 +1439,8 @@ async def chat_stream(request: ChatRequest):
     async def generate():
         start_time = time.time()
         llm_provider = None
+        sdk_tmpdir = None
+        mcp_proxy = None
 
         def send_event(event_type: str, data):
             payload = json.dumps(scrub_obj({"type": event_type, "data": data}))
@@ -1548,7 +1552,6 @@ async def chat_stream(request: ChatRequest):
 
                 from claude_agent_sdk import (
                     AssistantMessage,
-                    ClaudeAgentOptions,
                     ClaudeSDKError,
                     ResultMessage,
                     TextBlock,
@@ -1561,26 +1564,14 @@ async def chat_stream(request: ChatRequest):
                 )
                 from claude_agent_sdk.types import ToolResultBlock
 
-                # Build SDK options directly (bypass provider.generate_with_tools)
-                mcp_config = llm_provider._mcp_server_config
-                mcp_servers = {}
-                if mcp_config:
-                    mcp_servers["mcp-service"] = mcp_config
-
-                # Reuse the provider's env builder (single source of truth):
-                # strips CLAUDE_CODE* vars, injects the UI/profile auth token
-                # when set, and sets IS_SANDBOX=1 so the CLI honors
-                # --dangerously-skip-permissions when running as root in a
-                # container. Hand-rolling this here previously omitted
-                # IS_SANDBOX, which made the SDK fail under root.
-                clean_env = llm_provider._build_clean_env(cli_token=llm_provider._cli_token)
-
-                options = ClaudeAgentOptions(
+                claude_provider = cast(ClaudeSDKProvider, llm_provider)
+                sdk_tmpdir = TemporaryDirectory(prefix="testmcpy_chat_sdk_")
+                mcp_proxy = await claude_provider.start_insecure_mcp_proxy()
+                options = claude_provider.build_agent_options(
                     model=model,
-                    permission_mode="bypassPermissions",
-                    mcp_servers=mcp_servers,
-                    max_turns=25,
-                    env=clean_env,
+                    cwd=sdk_tmpdir.name,
+                    allow_tool_search=True,
+                    mcp_url_override=mcp_proxy.url if mcp_proxy is not None else None,
                 )
 
                 sdk_turn = 1
@@ -1592,26 +1583,11 @@ async def chat_stream(request: ChatRequest):
 
                 yield send_event("turn_start", {"turn": sdk_turn, "max_turns": MAX_TURNS})
 
-                # Patch SDK message parser to skip unknown message types
-                # (e.g. rate_limit_event) instead of throwing MessageParseError
-                import claude_agent_sdk._internal.message_parser as _sdk_parser
-
-                _original_parse = _sdk_parser.parse_message
-
-                def _patched_parse(data):
-                    try:
-                        return _original_parse(data)
-                    except ClaudeSDKError:
-                        msg_type = data.get("type", "?") if isinstance(data, dict) else "?"
-                        print(f"[SDK] Skipping unknown message type: {msg_type}")
-                        return None
-
-                _sdk_parser.parse_message = _patched_parse
-
                 pending_tool_calls = []  # Tool calls emitted but no result yet
 
+                sdk_messages = sdk_query(prompt=request.message, options=options)
                 try:
-                    async for message in sdk_query(prompt=request.message, options=options):
+                    async for message in sdk_messages:
                         if message is None:
                             continue
                         if isinstance(message, AssistantMessage):
@@ -1715,12 +1691,11 @@ async def chat_stream(request: ChatRequest):
                                 total_cost = message.total_cost_usd
 
                 except ClaudeSDKError:
-                    # Non-fatal: rate_limit_event or other unknown types.
                     # If there are pending tool calls without results,
                     # execute them ourselves via MCP.
                     pass
                 finally:
-                    _sdk_parser.parse_message = _original_parse
+                    await _close_async_iterator(sdk_messages)
 
                 # If SDK stream died with pending tool calls, execute them via MCP
                 if pending_tool_calls:
@@ -1980,6 +1955,12 @@ async def chat_stream(request: ChatRequest):
             traceback.print_exc()
             yield send_event("error", f"Internal error: {type(e).__name__}")
         finally:
+            if mcp_proxy is not None:
+                with contextlib.suppress(Exception):
+                    await mcp_proxy.close()
+            if sdk_tmpdir is not None:
+                with contextlib.suppress(Exception):
+                    sdk_tmpdir.cleanup()
             if llm_provider is not None:
                 with contextlib.suppress(Exception):
                     await llm_provider.close()

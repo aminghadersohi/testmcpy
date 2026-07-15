@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.9] - 2026-07-14
+
+### Added
+- Completed the LLM profile workflows across the UI and CLI, including CRUD,
+  provider testing, default-profile selection, and runtime profile isolation.
+- Added MCP Inspector-compatible OAuth discovery, dynamic client registration,
+  PKCE, callback handling, persistent token storage, and resource indicators.
+
+### Fixed
+- Persisted OAuth auto-discovery and insecure TLS settings across MCP clients
+  and SDK providers, including selected-server isolation for chat connections.
+- Hardened MCP OAuth aliases, authorization failures, proxy cleanup, credential
+  scrubbing, and insecure loopback/canonical-gateway connections.
+
 ## [0.11.8] - 2026-07-07
 
 ### Security

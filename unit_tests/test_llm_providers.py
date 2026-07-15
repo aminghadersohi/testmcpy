@@ -411,7 +411,6 @@ class TestClaudeMCPProxy:
                     },
                     content=payload,
                 )
-                client.cookies.clear()
                 async with client.stream(
                     "GET",
                     proxy.url,
@@ -446,6 +445,7 @@ class TestClaudeMCPProxy:
                 'Bearer realm="second"',
             ]
             assert "X-Internal" not in response.headers
+            assert "Set-Cookie" not in response.headers
             assert stream_response.headers["Content-Type"] == "text/event-stream"
             assert streamed_body == b"data: first\n\ndata: second\n\n"
             assert deleted.status_code == 204

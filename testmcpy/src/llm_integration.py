@@ -1653,7 +1653,8 @@ class _InsecureMCPProxy:
                 response_headers = CIMultiDict(
                     (name, value)
                     for name, value in upstream.headers.items()
-                    if name.lower() not in (_HOP_BY_HOP_HEADERS | upstream_connection_headers)
+                    if name.lower()
+                    not in (_HOP_BY_HOP_HEADERS | upstream_connection_headers | {"set-cookie"})
                 )
                 response = web.StreamResponse(
                     status=upstream.status,

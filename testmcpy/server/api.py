@@ -3,6 +3,7 @@ FastAPI server for testmcpy web UI.
 """
 
 import asyncio
+import json
 import os
 import time
 import warnings
@@ -61,6 +62,7 @@ from testmcpy.src.llm_integration import (  # noqa: E402
     BaseSDKProvider,
     ClaudeSDKProvider,
     _close_async_iterator,
+    _prepare_agent_chat_context,
     create_llm_provider,
 )
 from testmcpy.src.mcp_client import MCPClient, MCPConnectionError, MCPToolCall  # noqa: E402
@@ -1120,6 +1122,117 @@ def _native_tool_result_fields(native_result: Any) -> tuple[Any, bool, str | Non
     )
 
 
+def _llm_result_error(result: Any) -> str | None:
+    """Return an explicit provider failure without mistaking model text for one."""
+    error = getattr(result, "error", None)
+    return scrub_text(str(error)) if error else None
+
+
+def _estimate_chat_tokens(value: Any) -> int:
+    """Conservatively estimate tokens for provider-neutral JSON/text input."""
+    if value is None:
+        return 0
+    text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, default=str)
+    return max(1, (len(text) + 2) // 3)
+
+
+def _budget_chat_history(
+    history: list[dict[str, Any]] | None,
+    *,
+    model: str,
+    prompt: str,
+    tools: list[dict[str, Any]],
+) -> tuple[list[dict[str, str]] | None, dict[str, Any] | None]:
+    """Fit recent saved context to the selected model while retaining it in the browser."""
+    if not history:
+        return None, None
+
+    from testmcpy.src.model_registry import get_model
+
+    valid_history = [
+        {"role": message["role"], "content": message["content"]}
+        for message in history
+        if isinstance(message, dict)
+        and message.get("role") in {"system", "user", "assistant"}
+        and isinstance(message.get("content"), str)
+        and message["content"].strip()
+    ]
+    if not valid_history:
+        return None, None
+
+    model_info = get_model(str(model))
+    context_window = model_info.context_window if model_info else 128_000
+    output_reserve = model_info.max_output_tokens if model_info else 8_192
+    fixed_input_tokens = _estimate_chat_tokens(prompt) + _estimate_chat_tokens(tools) + 2_048
+    # Never let history consume more than 70% of the window: system/tool
+    # wrappers and provider tokenizers add overhead beyond this approximation.
+    history_budget = max(
+        0,
+        min(
+            int(context_window * 0.70),
+            context_window - output_reserve - fixed_input_tokens,
+        ),
+    )
+
+    system_messages = [message for message in valid_history if message["role"] == "system"]
+    dialogue = [message for message in valid_history if message["role"] != "system"]
+    selected_system: list[dict[str, str]] = []
+    remaining = history_budget
+    truncated_system = False
+
+    for message in system_messages:
+        cost = _estimate_chat_tokens(message["content"]) + 6
+        if cost <= remaining:
+            selected_system.append(message)
+            remaining -= cost
+            continue
+        if remaining > 32:
+            max_chars = max(0, (remaining - 32) * 3)
+            selected_system.append(
+                {
+                    **message,
+                    "content": message["content"][:max_chars]
+                    + "\n\n[System instruction truncated for this model's context window]",
+                }
+            )
+            remaining = 0
+        truncated_system = True
+        break
+
+    selected_reversed: list[dict[str, str]] = []
+    omitted_messages = 0
+    for message in reversed(dialogue):
+        cost = _estimate_chat_tokens(message["content"]) + 6
+        if cost <= remaining:
+            selected_reversed.append(message)
+            remaining -= cost
+        else:
+            omitted_messages += 1
+
+    selected_dialogue = list(reversed(selected_reversed))
+    # Stricter providers reject an assistant message without its preceding
+    # user turn. Drop it rather than silently reassigning its role.
+    while selected_dialogue and selected_dialogue[0]["role"] == "assistant":
+        selected_dialogue.pop(0)
+        omitted_messages += 1
+
+    trimmed_history = [*selected_system, *selected_dialogue]
+    omitted_messages += max(0, len(system_messages) - len(selected_system))
+    was_trimmed = omitted_messages > 0 or truncated_system
+    if not was_trimmed:
+        return trimmed_history, None
+
+    notice = {
+        "omitted_messages": omitted_messages,
+        "original_messages": len(valid_history),
+        "sent_messages": len(trimmed_history),
+        "context_window": context_window,
+        "model": str(model),
+        "system_truncated": truncated_system,
+    }
+    return trimmed_history or None, notice
+
+
 # Chat endpoint
 
 
@@ -1229,11 +1342,20 @@ async def chat(request: ChatRequest) -> ChatResponse:
             f"[Chat] LLM provider initialized. Generating response with {len(all_tools)} tools..."
         )
 
+        chat_history, _context_notice = _budget_chat_history(
+            request.history,
+            model=str(model),
+            prompt=request.message,
+            tools=all_tools,
+        )
+
         # Generate response with optional history
         # Use longer timeout (120s) for Claude CLI with MCP tools
         result = await llm_provider.generate_with_tools(
-            prompt=request.message, tools=all_tools, timeout=120.0, messages=request.history
+            prompt=request.message, tools=all_tools, timeout=120.0, messages=chat_history
         )
+        if provider_error := _llm_result_error(result):
+            raise RuntimeError(provider_error)
         print(f"[Chat] Response generated. Tool calls: {len(result.tool_calls)}")
 
         # Execute tool calls if any. SDK-backed providers may have already
@@ -1385,7 +1507,6 @@ async def chat_stream(request: ChatRequest):
     providers are looped by this endpoint.
     """
     import asyncio
-    import json
     import time
 
     MAX_TURNS = 10
@@ -1514,6 +1635,15 @@ async def chat_stream(request: ChatRequest):
                 "status", f"Loaded {len(all_tools)} tools. Initializing {provider_str}..."
             )
 
+            chat_history, context_notice = _budget_chat_history(
+                request.history,
+                model=str(model),
+                prompt=request.message,
+                tools=all_tools,
+            )
+            if context_notice:
+                yield send_event("context_trimmed", context_notice)
+
             # --- Initialize LLM provider ---
             provider_kwargs: dict = dict(profile_provider_config)
             provider_kwargs.update(_primary_mcp_provider_kwargs(clients_to_use))
@@ -1567,11 +1697,16 @@ async def chat_stream(request: ChatRequest):
                 claude_provider = cast(ClaudeSDKProvider, llm_provider)
                 sdk_tmpdir = TemporaryDirectory(prefix="testmcpy_chat_sdk_")
                 mcp_proxy = await claude_provider.start_insecure_mcp_proxy()
+                saved_system_prompt, agent_prompt = _prepare_agent_chat_context(
+                    request.message,
+                    chat_history,
+                )
                 options = claude_provider.build_agent_options(
                     model=model,
                     cwd=sdk_tmpdir.name,
                     allow_tool_search=True,
                     mcp_url_override=mcp_proxy.url if mcp_proxy is not None else None,
+                    saved_system_prompt=saved_system_prompt,
                 )
 
                 sdk_turn = 1
@@ -1584,8 +1719,12 @@ async def chat_stream(request: ChatRequest):
                 yield send_event("turn_start", {"turn": sdk_turn, "max_turns": MAX_TURNS})
 
                 pending_tool_calls = []  # Tool calls emitted but no result yet
+                sdk_error = None
 
-                sdk_messages = sdk_query(prompt=request.message, options=options)
+                sdk_messages = sdk_query(
+                    prompt=agent_prompt,
+                    options=options,
+                )
                 try:
                     async for message in sdk_messages:
                         if message is None:
@@ -1689,11 +1828,19 @@ async def chat_stream(request: ChatRequest):
                                 }
                             if message.total_cost_usd is not None:
                                 total_cost = message.total_cost_usd
+                            if getattr(message, "is_error", False):
+                                result_errors = getattr(message, "errors", None) or []
+                                sdk_error = (
+                                    "; ".join(str(error) for error in result_errors if error)
+                                    or getattr(message, "result", None)
+                                    or getattr(message, "subtype", None)
+                                    or "Claude SDK request failed"
+                                )
 
-                except ClaudeSDKError:
+                except ClaudeSDKError as exc:
                     # If there are pending tool calls without results,
                     # execute them ourselves via MCP.
-                    pass
+                    sdk_error = str(exc) or type(exc).__name__
                 finally:
                     await _close_async_iterator(sdk_messages)
 
@@ -1717,6 +1864,7 @@ async def chat_stream(request: ChatRequest):
                             yield send_event(
                                 "tool_result",
                                 {
+                                    "id": tc.get("id"),
                                     "name": tc["name"],
                                     "result": _serialize_tool_content(tr.content)
                                     if not tr.is_error
@@ -1730,6 +1878,7 @@ async def chat_stream(request: ChatRequest):
                             yield send_event(
                                 "tool_result",
                                 {
+                                    "id": tc.get("id"),
                                     "name": tc["name"],
                                     "result": None,
                                     "error": f"Tool '{tc['name']}' not found",
@@ -1737,6 +1886,10 @@ async def chat_stream(request: ChatRequest):
                                     "turn": sdk_turn,
                                 },
                             )
+
+                if sdk_error:
+                    yield send_event("error", sdk_error)
+                    return
 
                 # Close the final turn
                 yield send_event(
@@ -1764,11 +1917,12 @@ async def chat_stream(request: ChatRequest):
                 total_token_usage: dict[str, int] = {}
                 total_cost: float = 0.0
                 total_turns = 0
+                reached_terminal_answer = False
 
                 # Build conversation history for multi-turn
                 conversation: list[dict] = []
-                if request.history:
-                    conversation = list(request.history)
+                if chat_history:
+                    conversation = list(chat_history)
 
                 current_prompt = request.message
 
@@ -1786,6 +1940,9 @@ async def chat_stream(request: ChatRequest):
                         timeout=120.0,
                         messages=conversation if conversation else None,
                     )
+                    if provider_error := _llm_result_error(result):
+                        yield send_event("error", provider_error)
+                        return
 
                     # Accumulate token usage
                     if result.token_usage:
@@ -1816,6 +1973,7 @@ async def chat_stream(request: ChatRequest):
                     # If no tool calls, we're done
                     if not result.tool_calls:
                         yield send_event("turn_complete", {"turn": turn, "tool_count": 0})
+                        reached_terminal_answer = True
                         break
 
                     # Execute tool calls and stream results. SDK-backed providers
@@ -1917,6 +2075,7 @@ async def chat_stream(request: ChatRequest):
                     )
 
                     if provider_executes_tools:
+                        reached_terminal_answer = True
                         break
 
                     # Build continuation: update conversation and prompt
@@ -1924,6 +2083,13 @@ async def chat_stream(request: ChatRequest):
                     conversation.append({"role": "user", "content": current_prompt})
                     conversation.append({"role": "assistant", "content": result.response})
                     current_prompt = _build_continuation_prompt(turn_tool_calls, turn_tool_results)
+
+                if not reached_terminal_answer:
+                    yield send_event(
+                        "error",
+                        f"Stopped after {MAX_TURNS} tool turns before the model produced a final answer.",
+                    )
+                    return
 
                 duration = time.time() - start_time
                 yield send_event(

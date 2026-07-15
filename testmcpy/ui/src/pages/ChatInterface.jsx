@@ -1,13 +1,21 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react'
 import { useConfirm } from '../components/ConfirmDialog'
 import { useNotification } from '../components/NotificationProvider'
-import { Send, Loader, Wrench, DollarSign, ChevronDown, ChevronRight, CheckCircle, FileText, Plus, Server, Trash2, RefreshCw, Download, Edit3, Settings2 } from 'lucide-react'
+import { Send, Loader, Wrench, DollarSign, ChevronDown, ChevronRight, CheckCircle, FileText, Trash2, RefreshCw, Download, Edit3, Settings2, Square } from 'lucide-react'
 import ReactJson from '@microlink/react-json-view'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useKeyboardShortcuts, useAnnounce } from '../hooks/useKeyboardShortcuts'
 import { useEditorTheme } from '../hooks/useEditorTheme'
 import ToolCallTimeline from '../components/ToolCallTimeline'
+import {
+  CHAT_CLEAR_TOKEN_KEY,
+  buildChatHistory,
+  clearChatConversation,
+  createChatMessageId,
+  loadChatConversation,
+  saveChatConversation,
+} from '../utils/chatPersistence'
 
 // JSON viewer component with IDE-like collapsible tree
 function JSONViewer({ data }) {
@@ -81,59 +89,198 @@ function JSONViewer({ data }) {
   )
 }
 
+function contextTrimmedMessage(notice) {
+  const omitted = Number.isFinite(notice?.omitted_messages) ? notice.omitted_messages : 0
+  const details = []
+  if (omitted > 0) {
+    details.push(`${omitted} older context message${omitted === 1 ? ' was' : 's were'} omitted`)
+  }
+  if (notice?.system_truncated) {
+    details.push('the system prompt was shortened')
+  }
+  const summary = details.length > 0 ? details.join(' and ') : 'Some saved context was omitted'
+  const sentence = summary.charAt(0).toUpperCase() + summary.slice(1)
+  return `${sentence} to fit this model's context window. The full conversation remains saved in this browser.`
+}
+
 function ChatInterface({ selectedProfiles = [], selectedLlmProfile, llmProfiles = [] }) {
   const [confirmAction, confirmElement] = useConfirm()
-  const { success: notifySuccess, error: notifyError, warning: notifyWarning, info: notifyInfo } = useNotification()
-  const { jsonTheme } = useEditorTheme()
-  const [messages, setMessages] = useState([])
+  const { success: notifySuccess, error: notifyError, warning: notifyWarning } = useNotification()
+  const initialConversationRef = useRef(null)
+  if (initialConversationRef.current === null) {
+    initialConversationRef.current = loadChatConversation()
+  }
+  const [messages, setMessages] = useState(initialConversationRef.current.messages)
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
   const [streamingStatus, setStreamingStatus] = useState('')
   const messagesEndRef = useRef(null)
-  const [showEvalDialog, setShowEvalDialog] = useState(false)
-  const [selectedMessageIndex, setSelectedMessageIndex] = useState(null)
+  const messagesContainerRef = useRef(null)
+  const shouldAutoScrollRef = useRef(true)
   const [evalResults, setEvalResults] = useState({})
   const [runningEval, setRunningEval] = useState(null)
   const textareaRef = useRef(null)
-  const [historySize, setHistorySize] = useState(10)  // Number of messages to keep in history
   const abortControllerRef = useRef(null)
+  const activeRequestIdRef = useRef(0)
+  const activeEvalRequestIdRef = useRef(0)
+  const sendingRef = useRef(false)
   const [editingMessageIdx, setEditingMessageIdx] = useState(null)
   const [editingText, setEditingText] = useState('')
-  const [systemPrompt, setSystemPrompt] = useState('')
+  const [systemPrompt, setSystemPrompt] = useState(initialConversationRef.current.systemPrompt)
   const [showSystemPrompt, setShowSystemPrompt] = useState(false)
-  const [collapsedThinking, setCollapsedThinking] = useState({})
   const [expandedToolCalls, setExpandedToolCalls] = useState({})
+  const messagesRef = useRef(messages)
+  const systemPromptRef = useRef(systemPrompt)
+  const persistenceWarningShownRef = useRef(false)
+  const persistenceGenerationRef = useRef(0)
+  const persistenceClearTokenRef = useRef(initialConversationRef.current.clearToken)
+  const initialLastMessage = initialConversationRef.current.messages[
+    initialConversationRef.current.messages.length - 1
+  ]
+  const lastAnnouncedMessageIdRef = useRef(
+    initialLastMessage?.id || null,
+  )
 
   // For Chat, only use the first selected profile (single MCP at a time)
   const activeProfile = selectedProfiles.length > 0 ? selectedProfiles[0] : null
   const hasMultipleSelected = selectedProfiles.length > 1
+  const contextMessageCount = messages.reduce((count, message) => {
+    if (message.role === 'user' && message.content?.trim()) return count + 1
+    const hasCompletedToolCall = message.tool_calls?.some(call => call && (
+      call.completed === true
+      || call.result != null
+      || Boolean(call.error)
+      || call.is_error === true
+    ))
+    if (
+      message.role === 'assistant'
+      && !message.error
+      && !message.cancelled
+      && !message.interrupted
+      && !message.streaming
+      && (message.content?.trim() || hasCompletedToolCall)
+    ) return count + 1
+    return count
+  }, 0)
 
   // Get model and provider from LLM profile
   const getLlmConfig = () => {
     if (!selectedLlmProfile || llmProfiles.length === 0) {
-      return { model: 'claude-sonnet-4-5', provider: 'anthropic' }
+      return { model: null, provider: null }
     }
 
     const profile = llmProfiles.find(p => p.profile_id === selectedLlmProfile)
     if (!profile) {
-      return { model: 'claude-sonnet-4-5', provider: 'anthropic' }
+      return { model: null, provider: null }
     }
 
     const defaultProvider = profile.providers?.find(p => p.default) || profile.providers?.[0]
     return {
-      model: defaultProvider?.model || 'claude-sonnet-4-5',
-      provider: defaultProvider?.provider || 'anthropic'
+      model: defaultProvider?.model || null,
+      provider: defaultProvider?.provider || null
     }
   }
 
+  const persistConversation = useCallback((messagesToSave, promptToSave) => {
+    const result = saveChatConversation({
+      messages: messagesToSave,
+      systemPrompt: promptToSave,
+      clearToken: persistenceClearTokenRef.current,
+    })
+
+    if (!persistenceWarningShownRef.current && (!result.ok || result.compacted)) {
+      persistenceWarningShownRef.current = true
+      notifyWarning(
+        result.compacted
+          ? 'The conversation was saved without large tool traces because browser storage is full.'
+          : 'This browser could not save the conversation. Keep this tab open to avoid losing context.',
+      )
+    }
+    return result
+  }, [notifyWarning])
+
+  const saveChatHistory = useCallback((messagesToSave) => {
+    return persistConversation(messagesToSave, systemPromptRef.current)
+  }, [persistConversation])
+
   useEffect(() => {
-    loadChatHistory()
     checkForPrefillTool()
+
+    const initial = initialConversationRef.current
+    if (initial.error) {
+      const clearResult = clearChatConversation()
+      if (clearResult.ok) persistenceClearTokenRef.current = clearResult.clearToken
+      notifyWarning('Saved chat data was invalid and could not be restored. A new conversation was started.')
+    } else if (initial.migrated) {
+      persistConversation(initial.messages, initial.systemPrompt)
+    }
+  }, [notifyWarning, persistConversation])
+
+  // Keep the canonical conversation durable while streaming without writing
+  // localStorage for every token. Semantic changes are saved after a short
+  // debounce, and route changes/browser unloads synchronously flush the refs.
+  useEffect(() => {
+    messagesRef.current = messages
+    systemPromptRef.current = systemPrompt
+    const persistenceGeneration = persistenceGenerationRef.current
+    const timer = window.setTimeout(() => {
+      if (persistenceGenerationRef.current === persistenceGeneration) {
+        persistConversation(messages, systemPrompt)
+      }
+    }, 250)
+    return () => window.clearTimeout(timer)
+  }, [messages, systemPrompt, persistConversation])
+
+  useEffect(() => {
+    const flushConversation = () => {
+      persistConversation(messagesRef.current, systemPromptRef.current)
+    }
+    window.addEventListener('pagehide', flushConversation)
+    return () => {
+      window.removeEventListener('pagehide', flushConversation)
+      flushConversation()
+      abortControllerRef.current?.abort()
+    }
+  }, [persistConversation])
+
+  // A clear action in another tab must not be undone when this tab later
+  // unloads and flushes stale refs back into storage.
+  useEffect(() => {
+    const handleStorage = (event) => {
+      if (event.key !== CHAT_CLEAR_TOKEN_KEY || event.newValue === null) return
+
+      const stored = loadChatConversation()
+      if (stored.clearToken === persistenceClearTokenRef.current) return
+
+      activeRequestIdRef.current += 1
+      activeEvalRequestIdRef.current += 1
+      persistenceGenerationRef.current += 1
+      abortControllerRef.current?.abort()
+      abortControllerRef.current = null
+      sendingRef.current = false
+      messagesRef.current = []
+      systemPromptRef.current = ''
+      persistenceClearTokenRef.current = stored.clearToken
+      setLoading(false)
+      setStreamingStatus('')
+      setMessages([])
+      setSystemPrompt('')
+      setInput('')
+      setEditingMessageIdx(null)
+      setEditingText('')
+      setEvalResults({})
+      setRunningEval(null)
+      setExpandedToolCalls({})
+    }
+    window.addEventListener('storage', handleStorage)
+    return () => window.removeEventListener('storage', handleStorage)
   }, [])
 
   useEffect(() => {
-    scrollToBottom()
-  }, [messages])
+    if (shouldAutoScrollRef.current) {
+      scrollToBottom(loading ? 'auto' : 'smooth')
+    }
+  }, [messages, loading])
 
   // Reset textarea height when input is cleared
   useEffect(() => {
@@ -141,18 +288,6 @@ function ChatInterface({ selectedProfiles = [], selectedLlmProfile, llmProfiles 
       textareaRef.current.style.height = 'auto'
     }
   }, [input])
-
-
-  const loadChatHistory = () => {
-    try {
-      const saved = localStorage.getItem('chatHistory')
-      if (saved) {
-        setMessages(JSON.parse(saved))
-      }
-    } catch (error) {
-      console.error('Failed to load chat history:', error)
-    }
-  }
 
   const checkForPrefillTool = () => {
     try {
@@ -214,17 +349,32 @@ function ChatInterface({ selectedProfiles = [], selectedLlmProfile, llmProfiles 
     return prompt
   }
 
-  const saveChatHistory = (messagesToSave) => {
-    try {
-      localStorage.setItem('chatHistory', JSON.stringify(messagesToSave))
-    } catch (error) {
-      console.error('Failed to save chat history:', error)
-    }
-  }
-
   const clearChatHistory = () => {
+    // Invalidate before aborting so queued stream callbacks cannot repopulate
+    // the conversation after the user has explicitly cleared it.
+    activeRequestIdRef.current += 1
+    activeEvalRequestIdRef.current += 1
+    persistenceGenerationRef.current += 1
+    abortControllerRef.current?.abort()
+    abortControllerRef.current = null
+    sendingRef.current = false
+    setLoading(false)
+    setStreamingStatus('')
     setMessages([])
-    localStorage.removeItem('chatHistory')
+    messagesRef.current = []
+    setSystemPrompt('')
+    systemPromptRef.current = ''
+    setInput('')
+    setEditingMessageIdx(null)
+    setEditingText('')
+    setEvalResults({})
+    setRunningEval(null)
+    setExpandedToolCalls({})
+    const clearResult = clearChatConversation()
+    if (clearResult.ok) persistenceClearTokenRef.current = clearResult.clearToken
+    if (!clearResult.ok) {
+      notifyError('The conversation was cleared on screen, but browser storage could not be updated.')
+    }
   }
 
   // Regenerate: resend the last user message
@@ -240,24 +390,27 @@ function ChatInterface({ selectedProfiles = [], selectedLlmProfile, llmProfiles 
     // Remove messages from last user message onward
     const trimmed = messages.slice(0, lastUserIdx)
     setMessages(trimmed)
+    activeEvalRequestIdRef.current += 1
+    setEvalResults({})
+    setRunningEval(null)
     saveChatHistory(trimmed)
-    setInput(lastUserMsg)
-    // Auto-send after a tick
-    setTimeout(() => {
-      const fakeEvent = { target: { value: lastUserMsg } }
-      // We set input above, sendMessage will pick it up
-    }, 50)
+    void sendMessage({ text: lastUserMsg, baseMessages: trimmed })
   }
 
   // Edit a user message: trim conversation and re-send
   const editAndResend = (idx) => {
     if (loading) return
+    const editedMessage = editingText.trim()
+    if (!editedMessage) return
     const trimmed = messages.slice(0, idx)
     setMessages(trimmed)
+    activeEvalRequestIdRef.current += 1
+    setEvalResults({})
+    setRunningEval(null)
     saveChatHistory(trimmed)
-    setInput(editingText)
     setEditingMessageIdx(null)
     setEditingText('')
+    void sendMessage({ text: editedMessage, baseMessages: trimmed })
   }
 
   // Export conversation as markdown
@@ -283,22 +436,39 @@ function ChatInterface({ selectedProfiles = [], selectedLlmProfile, llmProfiles 
     URL.revokeObjectURL(url)
   }
 
-  const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+  const scrollToBottom = (behavior = 'smooth') => {
+    messagesEndRef.current?.scrollIntoView({ behavior })
   }
 
-  const sendMessage = async () => {
-    if (!input.trim() || loading) return
+  const handleMessagesScroll = () => {
+    const container = messagesContainerRef.current
+    if (!container) return
+    const distanceFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight
+    shouldAutoScrollRef.current = distanceFromBottom < 120
+  }
 
-    const userMessage = { role: 'user', content: input }
-    const updatedMessages = [...messages, userMessage]
+  const sendMessage = async ({ text = input, baseMessages = messages } = {}) => {
+    const messageText = text.trim()
+    if (!messageText || sendingRef.current) return
+    sendingRef.current = true
+    const requestId = activeRequestIdRef.current + 1
+    activeRequestIdRef.current = requestId
+
+    const userMessage = { id: createChatMessageId(), role: 'user', content: messageText }
+    const updatedMessages = [...baseMessages, userMessage]
     setMessages(updatedMessages)
+    messagesRef.current = updatedMessages
+    // Save the user's turn before starting network work so a route change or
+    // reload cannot lose the latest request.
+    saveChatHistory(updatedMessages)
     setInput('')
+    shouldAutoScrollRef.current = true
     setLoading(true)
     setStreamingStatus('Connecting...')
 
     // Create a placeholder assistant message
     const assistantMessage = {
+      id: createChatMessageId(),
       role: 'assistant',
       content: '',
       tool_calls: [],
@@ -314,33 +484,44 @@ function ChatInterface({ selectedProfiles = [], selectedLlmProfile, llmProfiles 
     }
     const messagesWithPlaceholder = [...updatedMessages, assistantMessage]
     setMessages(messagesWithPlaceholder)
+    messagesRef.current = messagesWithPlaceholder
 
     // Track the assistant message index for updates
     const assistantIdx = updatedMessages.length
 
-    // Expand thinking by default during streaming
-    setCollapsedThinking(prev => ({ ...prev, [assistantIdx]: false }))
+    const updateAssistantMessage = (patch, { persist = false } = {}) => {
+      if (activeRequestIdRef.current !== requestId) return
+      const currentMessages = messagesRef.current
+      const current = currentMessages[assistantIdx]
+      if (!current) return
+      const nextMessage = typeof patch === 'function' ? patch(current) : { ...current, ...patch }
+      const updated = [...currentMessages]
+      updated[assistantIdx] = nextMessage
+      messagesRef.current = updated
+      setMessages(updated)
+      if (persist) saveChatHistory(updated)
+    }
 
     const abortController = new AbortController()
     abortControllerRef.current = abortController
+    // Keep terminal state visible to both the stream loop and AbortError
+    // handling. Declaring these inside `try` would make Stop fail after a
+    // completed/error event because `catch` is a sibling block in JavaScript.
+    let sawComplete = false
+    let sawError = false
 
     try {
-      const historyForAPI = messages.slice(-historySize).map(msg => ({
-        role: msg.role,
-        content: msg.content
-      }))
-
-      // Prepend system prompt as first system message if set
-      if (systemPrompt.trim()) {
-        historyForAPI.unshift({ role: 'system', content: systemPrompt.trim() })
-      }
+      // Reconstruct the complete, successful transcript on every request.
+      // This is independent of the selected model, so switching profiles or
+      // restarting the server does not reset the conversation.
+      const historyForAPI = buildChatHistory(baseMessages, systemPrompt)
 
       const llmConfig = getLlmConfig()
       const res = await fetch('/api/chat/stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          message: input,
+          message: messageText,
           model: llmConfig.model,
           provider: llmConfig.provider,
           llm_profile: selectedLlmProfile,
@@ -352,7 +533,14 @@ function ChatInterface({ selectedProfiles = [], selectedLlmProfile, llmProfiles 
 
       if (!res.ok) {
         const errorText = await res.text()
-        throw new Error(`HTTP ${res.status}: ${errorText}`)
+        let detail = errorText
+        try {
+          const parsed = JSON.parse(errorText)
+          detail = parsed.detail || parsed.message || errorText
+        } catch {
+          // Keep the plain-text server response.
+        }
+        throw new Error(detail || `Request failed with HTTP ${res.status}`)
       }
 
       const reader = res.body.getReader()
@@ -377,6 +565,7 @@ function ChatInterface({ selectedProfiles = [], selectedLlmProfile, llmProfiles 
         buffer = lines.pop() || '' // keep incomplete line in buffer
 
         for (const line of lines) {
+          if (activeRequestIdRef.current !== requestId) break
           if (!line.startsWith('data: ')) continue
           const jsonStr = line.slice(6)
           if (!jsonStr.trim()) continue
@@ -393,28 +582,19 @@ function ChatInterface({ selectedProfiles = [], selectedLlmProfile, llmProfiles 
 
           if (type === 'status') {
             setStreamingStatus(data)
+          } else if (type === 'context_trimmed') {
+            updateAssistantMessage({ context_trimmed: data })
+            setStreamingStatus('Using the most recent context that fits this model...')
           } else if (type === 'turn_start') {
             currentTurn = data.turn
-            setMessages(prev => {
-              const updated = [...prev]
-              updated[assistantIdx] = { ...updated[assistantIdx], currentTurn: data.turn }
-              return updated
-            })
+            updateAssistantMessage({ currentTurn: data.turn })
             setStreamingStatus(`Turn ${data.turn}/${data.max_turns} — Thinking...`)
           } else if (type === 'thinking') {
             accThinking += data
-            setMessages(prev => {
-              const updated = [...prev]
-              updated[assistantIdx] = { ...updated[assistantIdx], thinking: accThinking }
-              return updated
-            })
+            updateAssistantMessage({ thinking: accThinking })
           } else if (type === 'token') {
             accContent += data
-            setMessages(prev => {
-              const updated = [...prev]
-              updated[assistantIdx] = { ...updated[assistantIdx], content: accContent }
-              return updated
-            })
+            updateAssistantMessage({ content: accContent })
             if (currentTurn > 1) {
               setStreamingStatus(`Turn ${currentTurn} — Streaming response...`)
             } else {
@@ -422,44 +602,31 @@ function ChatInterface({ selectedProfiles = [], selectedLlmProfile, llmProfiles 
             }
           } else if (type === 'tool_call') {
             const turn = data.turn || currentTurn || 1
-            accToolCalls = [...accToolCalls, { id: data.id, name: data.name, arguments: data.arguments, result: null, error: null, is_error: false, turn }]
-            setMessages(prev => {
-              const updated = [...prev]
-              updated[assistantIdx] = { ...updated[assistantIdx], tool_calls: accToolCalls }
-              return updated
-            })
+            accToolCalls = [...accToolCalls, { id: data.id, name: data.name, arguments: data.arguments, result: null, error: null, is_error: false, completed: false, turn }]
+            updateAssistantMessage({ tool_calls: accToolCalls })
             setStreamingStatus(`Turn ${turn} — Executing: ${data.name}...`)
           } else if (type === 'tool_result') {
             const turn = data.turn || currentTurn || 1
             // Update the matching tool call with its result (match by unique tool ID)
             accToolCalls = accToolCalls.map(tc =>
               tc.id && data.id && tc.id === data.id
-                ? { ...tc, result: data.result, error: data.error, is_error: data.is_error }
+                ? { ...tc, result: data.result, error: data.error, is_error: data.is_error, completed: true }
                 : (!tc.id && tc.name === data.name && tc.result === null && tc.turn === turn)
-                  ? { ...tc, result: data.result, error: data.error, is_error: data.is_error }
+                  ? { ...tc, result: data.result, error: data.error, is_error: data.is_error, completed: true }
                   : tc
             )
-            setMessages(prev => {
-              const updated = [...prev]
-              updated[assistantIdx] = { ...updated[assistantIdx], tool_calls: accToolCalls }
-              return updated
-            })
+            updateAssistantMessage({ tool_calls: accToolCalls })
             setStreamingStatus('')
           } else if (type === 'turn_complete') {
             totalTurns = data.turn
-            setMessages(prev => {
-              const updated = [...prev]
-              updated[assistantIdx] = { ...updated[assistantIdx], totalTurns: data.turn }
-              return updated
-            })
+            updateAssistantMessage({ totalTurns: data.turn })
             if (data.tool_count > 0) {
               setStreamingStatus(`Turn ${data.turn} complete (${data.tool_count} tool${data.tool_count !== 1 ? 's' : ''})`)
             }
           } else if (type === 'complete') {
-            setMessages(prev => {
-              const updated = [...prev]
-              updated[assistantIdx] = {
-                ...updated[assistantIdx],
+            sawComplete = true
+            updateAssistantMessage(current => ({
+                ...current,
                 token_usage: data.token_usage,
                 cost: data.cost || 0,
                 duration: data.duration || 0,
@@ -467,51 +634,65 @@ function ChatInterface({ selectedProfiles = [], selectedLlmProfile, llmProfiles 
                 provider: data.provider,
                 totalTurns: data.total_turns || totalTurns || 1,
                 streaming: false,
-              }
-              return updated
-            })
+              }))
           } else if (type === 'error') {
-            setMessages(prev => {
-              const updated = [...prev]
-              updated[assistantIdx] = {
-                ...updated[assistantIdx],
-                content: `Error: ${data}`,
+            sawError = true
+            const errorMessage = typeof data === 'string'
+              ? data
+              : data?.detail || data?.message || JSON.stringify(data)
+            updateAssistantMessage(current => ({
+                ...current,
+                content: `Error: ${errorMessage}`,
                 error: true,
                 streaming: false,
-              }
-              return updated
-            })
+              }))
           }
+        }
+
+        if (sawComplete || sawError) {
+          await reader.cancel?.()
+          break
         }
       }
 
-      // Save final state to localStorage
-      setMessages(prev => {
-        const final = prev.map((m, i) => i === assistantIdx ? { ...m, streaming: false } : m)
-        saveChatHistory(final)
-        return final
-      })
+      if (!sawComplete && !sawError) {
+        updateAssistantMessage(current => ({
+          ...current,
+          content: current.content
+            ? `${current.content}\n\n[Response interrupted]`
+            : 'Error: The response ended before completion.',
+          interrupted: true,
+          error: true,
+          streaming: false,
+        }), { persist: true })
+      } else {
+        updateAssistantMessage({ streaming: false }, { persist: true })
+      }
     } catch (error) {
       if (error.name === 'AbortError') {
-        setMessages(prev => {
-          const updated = [...prev]
-          updated[assistantIdx] = { ...updated[assistantIdx], content: updated[assistantIdx].content + '\n\n[Cancelled]', streaming: false }
-          saveChatHistory(updated)
-          return updated
-        })
+        if (!sawComplete && !sawError) {
+          updateAssistantMessage(current => ({
+            ...current,
+            content: `${current.content}\n\n[Cancelled]`.trim(),
+            cancelled: true,
+            streaming: false,
+          }), { persist: true })
+        }
       } else {
         console.error('Failed to send message:', error)
-        setMessages(prev => {
-          const updated = [...prev]
-          updated[assistantIdx] = { ...updated[assistantIdx], content: `Error: ${error.message}`, error: true, streaming: false }
-          saveChatHistory(updated)
-          return updated
-        })
+        updateAssistantMessage({
+          content: `Error: ${error.message}`,
+          error: true,
+          streaming: false,
+        }, { persist: true })
       }
     } finally {
-      setLoading(false)
-      setStreamingStatus('')
-      abortControllerRef.current = null
+      if (activeRequestIdRef.current === requestId) {
+        sendingRef.current = false
+        setLoading(false)
+        setStreamingStatus('')
+        abortControllerRef.current = null
+      }
     }
   }
 
@@ -522,44 +703,55 @@ function ChatInterface({ selectedProfiles = [], selectedLlmProfile, llmProfiles 
   useEffect(() => {
     if (messages.length > 0) {
       const lastMessage = messages[messages.length - 1]
-      if (lastMessage.role === 'assistant' && lastMessage.content) {
+      if (
+        lastMessage.role === 'assistant'
+        && lastMessage.content
+        && !lastMessage.streaming
+        && lastAnnouncedMessageIdRef.current !== lastMessage.id
+      ) {
         const preview = lastMessage.content.substring(0, 100)
         announce(`New response: ${preview}${lastMessage.content.length > 100 ? '...' : ''}`)
+        lastAnnouncedMessageIdRef.current = lastMessage.id
       }
     }
   }, [messages, announce])
 
-  // Keyboard shortcut handlers
-  const handleSendShortcut = useCallback((e) => {
-    e.preventDefault()
-    sendMessage()
-  }, [input, loading])
-
-  const handleClearShortcut = useCallback(async (e) => {
-    e.preventDefault()
-    if (messages.length > 0 && await confirmAction({ title: 'Clear chat', message: 'Clear chat history?', confirmLabel: 'Clear' })) {
+  const requestClearChat = useCallback(async () => {
+    if (messages.length === 0 && !systemPrompt.trim()) return
+    const confirmed = await confirmAction({
+      title: 'Clear conversation',
+      message: loading
+        ? 'Stop the current response and clear all messages and the saved system prompt? This cannot be undone.'
+        : 'Clear all messages and the saved system prompt? This cannot be undone.',
+      confirmLabel: 'Clear',
+    })
+    if (confirmed) {
       clearChatHistory()
-      announce('Chat history cleared')
+      announce('Conversation cleared')
     }
-  }, [messages, announce, confirmAction])
+  }, [messages, systemPrompt, loading, announce, confirmAction])
+
+  const handleClearShortcut = useCallback((e) => {
+    e.preventDefault()
+    void requestClearChat()
+  }, [requestClearChat])
 
   // Register keyboard shortcuts
   useKeyboardShortcuts({
-    'ctrl+enter': handleSendShortcut,
     'ctrl+shift+c': handleClearShortcut,
-  }, !loading)
+  })
 
-  const handleKeyPress = (e) => {
-    // Enter without shift sends message
+  const handleKeyDown = (e) => {
+    if (e.nativeEvent?.isComposing || e.isComposing) return
+    // Enter sends; Shift+Enter inserts a newline.
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
-      sendMessage()
+      void sendMessage()
     }
-    // Cmd/Ctrl + Enter also sends message
-    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
-      e.preventDefault()
-      sendMessage()
-    }
+  }
+
+  const stopGeneration = () => {
+    abortControllerRef.current?.abort()
   }
 
   // Auto-expand textarea as user types (max 6 rows)
@@ -589,7 +781,15 @@ function ChatInterface({ selectedProfiles = [], selectedLlmProfile, llmProfiles 
       return
     }
 
+    const evalRequestId = activeEvalRequestIdRef.current + 1
+    activeEvalRequestIdRef.current = evalRequestId
+    const assistantMessageId = assistantMessage.id
     setRunningEval(messageIndex)
+
+    const isCurrentEval = () => (
+      activeEvalRequestIdRef.current === evalRequestId
+      && messagesRef.current[messageIndex]?.id === assistantMessageId
+    )
 
     try {
       // Use model/provider from the message if available, otherwise get current config
@@ -610,6 +810,8 @@ function ChatInterface({ selectedProfiles = [], selectedLlmProfile, llmProfiles 
 
       const data = await res.json()
 
+      if (!isCurrentEval()) return
+
       if (!res.ok) {
         console.error('Eval API error:', data)
         setEvalResults((prev) => ({
@@ -626,6 +828,7 @@ function ChatInterface({ selectedProfiles = [], selectedLlmProfile, llmProfiles 
         setEvalResults((prev) => ({ ...prev, [messageIndex]: data }))
       }
     } catch (error) {
+      if (!isCurrentEval()) return
       console.error('Failed to run eval:', error)
       setEvalResults((prev) => ({
         ...prev,
@@ -637,7 +840,9 @@ function ChatInterface({ selectedProfiles = [], selectedLlmProfile, llmProfiles 
         }
       }))
     } finally {
-      setRunningEval(null)
+      if (activeEvalRequestIdRef.current === evalRequestId) {
+        setRunningEval(null)
+      }
     }
   }
 
@@ -769,9 +974,12 @@ ${evaluators}
               Interactive chat with LLM using MCP tools
               {messages.length > 0 && (
                 <span className="ml-2 text-xs bg-primary/10 text-primary px-2 py-0.5 rounded border border-primary/20">
-                  {messages.length} message{messages.length !== 1 ? 's' : ''} in history
+                  {contextMessageCount} context message{contextMessageCount !== 1 ? 's' : ''}
                 </span>
               )}
+            </p>
+            <p className="text-text-tertiary mt-1 text-xs">
+              Saved in this browser until you clear it; context continues across model changes and reloads.
             </p>
           </div>
           <div className="flex gap-2 flex-wrap">
@@ -779,6 +987,7 @@ ${evaluators}
               onClick={() => setShowSystemPrompt(!showSystemPrompt)}
               className={`btn ${showSystemPrompt ? 'btn-primary' : 'btn-secondary'} text-sm flex items-center gap-2`}
               title="System prompt"
+              aria-label="Configure system prompt"
             >
               <Settings2 size={16} />
               <span className="hidden sm:inline">System</span>
@@ -789,25 +998,28 @@ ${evaluators}
                 disabled={loading}
                 className="btn btn-secondary text-sm flex items-center gap-2"
                 title="Regenerate last response"
+                aria-label="Regenerate last response"
               >
                 <RefreshCw size={16} />
                 <span className="hidden sm:inline">Regenerate</span>
               </button>
             )}
-            {messages.length > 0 && (
+            {(messages.length > 0 || systemPrompt.trim()) && (
               <>
                 <button
                   onClick={exportAsMarkdown}
                   className="btn btn-secondary text-sm flex items-center gap-2"
                   title="Export as Markdown"
+                  aria-label="Export conversation as Markdown"
                 >
                   <Download size={16} />
                   <span className="hidden sm:inline">Export</span>
                 </button>
                 <button
-                  onClick={clearChatHistory}
+                  onClick={() => void requestClearChat()}
                   className="btn btn-secondary text-sm flex items-center gap-2"
-                  title="Clear chat history"
+                  title="Clear the saved conversation"
+                  aria-label="Clear saved conversation"
                 >
                   <Trash2 size={16} />
                   <span className="hidden sm:inline">Clear</span>
@@ -822,14 +1034,16 @@ ${evaluators}
       {/* System Prompt */}
       {showSystemPrompt && (
         <div className="px-4 py-3 border-b border-border bg-surface">
-          <label className="block text-xs font-semibold text-text-secondary mb-1">System Prompt</label>
+          <label htmlFor="chat-system-prompt" className="block text-xs font-semibold text-text-secondary mb-1">System Prompt</label>
           <textarea
+            id="chat-system-prompt"
             value={systemPrompt}
             onChange={(e) => setSystemPrompt(e.target.value)}
             placeholder="Enter a system prompt to guide the LLM's behavior..."
             className="input w-full text-sm"
             rows={3}
           />
+          <p className="mt-1 text-[11px] text-text-tertiary">Saved with this conversation and cleared with it.</p>
         </div>
       )}
 
@@ -859,7 +1073,14 @@ ${evaluators}
       )}
 
       {/* Messages */}
-      <div className="flex-1 overflow-auto p-4 bg-background-subtle" role="log" aria-live="polite" aria-label="Chat messages">
+      <div
+        ref={messagesContainerRef}
+        onScroll={handleMessagesScroll}
+        className="flex-1 overflow-auto p-4 bg-background-subtle"
+        role="log"
+        aria-live="off"
+        aria-label="Chat messages"
+      >
         {messages.length === 0 && !loading ? (
           <div className="flex flex-col items-center justify-center h-full gap-6 p-8">
             <div className="text-center">
@@ -882,7 +1103,7 @@ ${evaluators}
           <div className="space-y-4 max-w-3xl mx-auto pb-4">
             {messages.map((message, idx) => (
               <div
-                key={idx}
+                key={message.id || idx}
                 className={`flex ${
                   message.role === 'user' ? 'justify-end' : 'justify-start'
                 } animate-fade-in`}
@@ -961,6 +1182,12 @@ ${evaluators}
                         </div>
                       )}
 
+                      {message.context_trimmed && (
+                        <div className="mb-3 rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-text-secondary" role="note">
+                          {contextTrimmedMessage(message.context_trimmed)}
+                        </div>
+                      )}
+
                       {/* Tool Call & Thinking Timeline (compact, Agor-style) */}
                       {(message.thinking || (message.tool_calls && message.tool_calls.length > 0)) && (
                         <ToolCallTimeline
@@ -1030,8 +1257,9 @@ ${evaluators}
                         {message.content}
                         <button
                           onClick={(e) => { e.stopPropagation(); setEditingMessageIdx(idx); setEditingText(message.content) }}
-                          className="ml-2 inline-flex opacity-0 group-hover/msg:opacity-100 transition-opacity p-0.5 rounded hover:bg-white/20"
+                          className="ml-2 inline-flex opacity-0 group-hover/msg:opacity-100 focus:opacity-100 transition-opacity p-0.5 rounded hover:bg-white/20"
                           title="Edit message"
+                          aria-label="Edit this message and resend"
                         >
                           <Edit3 size={12} />
                         </button>
@@ -1221,7 +1449,7 @@ ${evaluators}
               ref={textareaRef}
               value={input}
               onChange={handleTextareaChange}
-              onKeyPress={handleKeyPress}
+              onKeyDown={handleKeyDown}
               placeholder="Type your message..."
               className="input w-full resize-none text-base overflow-y-auto pr-24"
               rows={1}
@@ -1230,17 +1458,17 @@ ${evaluators}
               aria-describedby="keyboard-hint"
             />
             <span id="keyboard-hint" className="hidden sm:block absolute right-3 bottom-2 text-xs text-text-disabled pointer-events-none">
-              {navigator.platform.includes('Mac') ? '⌘' : 'Ctrl'}+Enter
+              Enter to send · Shift+Enter for new line
             </span>
           </div>
           <button
-            onClick={sendMessage}
-            disabled={loading || !input.trim()}
-            className="btn btn-primary h-fit self-end px-6"
-            aria-label={loading ? 'Sending message...' : 'Send message'}
+            onClick={loading ? stopGeneration : () => void sendMessage()}
+            disabled={!loading && !input.trim()}
+            className={`btn h-fit self-end px-6 ${loading ? 'btn-secondary' : 'btn-primary'}`}
+            aria-label={loading ? 'Stop generating response' : 'Send message'}
           >
-            {loading ? <Loader size={20} className="animate-spin" /> : <Send size={20} />}
-            <span className="hidden sm:inline">{loading ? 'Sending...' : 'Send'}</span>
+            {loading ? <Square size={18} /> : <Send size={20} />}
+            <span className="hidden sm:inline">{loading ? 'Stop' : 'Send'}</span>
           </button>
         </div>
       </div>

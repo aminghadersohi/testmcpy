@@ -6,24 +6,30 @@ specifically designed for testing LLM tool calling capabilities.
 """
 
 import asyncio
+import ipaddress
 import json
 import logging
 import os
+import socket
 import sys
 import threading
 import time
 import warnings
 import weakref
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 from fastmcp import Client
 from fastmcp.client.auth.oauth import OAuth as _FastMCPOAuth
 from fastmcp.client.transports import StreamableHttpTransport
 from fastmcp.utilities.http import find_available_port as _find_available_port
+from mcp.client.auth.exceptions import OAuthFlowError
+from mcp.client.auth.oauth2 import OAuthContext
+from mcp.shared.auth import ProtectedResourceMetadata
 from mcp.types import Tool as MCPToolDef
 
 from testmcpy.auth_debugger import AuthDebugger
@@ -56,11 +62,21 @@ def _lease_callback_port() -> tuple[int, _CallbackPortLease]:
     raise RuntimeError("Unable to allocate a unique OAuth callback port")
 
 
+@dataclass
+class _MCPOAuthContext(OAuthContext):
+    """OAuth context that can use a separately validated resource indicator."""
+
+    resource_alias: str | None = None
+
+    def get_resource_url(self) -> str:
+        return self.resource_alias or super().get_resource_url()
+
+
 class MCPOAuth(_FastMCPOAuth):
     """fastmcp OAuth provider patched for MCP servers that validate the
     full resource URL.
 
-    Three fixes over the upstream ``fastmcp.client.auth.oauth.OAuth``:
+    Four fixes over the upstream ``fastmcp.client.auth.oauth.OAuth``:
 
     1. The RFC 8707 ``resource`` indicator is set to the **full** MCP URL
        instead of just scheme+host. Upstream ``OAuth.__init__`` strips
@@ -72,12 +88,16 @@ class MCPOAuth(_FastMCPOAuth):
        ``get_authorization_base_url()`` which strips the path, so this
        only affects the resource indicator.
 
-    2. When ``insecure=True``, ``redirect_handler`` uses
+    2. A loopback transport may use the public HTTPS resource advertised by
+       its protected-resource metadata when that resource and its OAuth
+       servers also resolve exclusively to loopback.
+
+    3. When ``insecure=True``, ``redirect_handler`` uses
        ``httpx.AsyncClient(verify=False)`` for the authorization-URL
        pre-flight so ``https://localhost`` with a self-signed cert
        doesn't fail before the browser opens.
 
-    3. Tokens and dynamic client registrations use an encrypted persistent
+    4. Tokens and dynamic client registrations use an encrypted persistent
        backend shared with the SDK-based LLM providers.
     """
 
@@ -100,6 +120,10 @@ class MCPOAuth(_FastMCPOAuth):
             callback_port, callback_port_lease = _lease_callback_port()
             kwargs["callback_port"] = callback_port
         super().__init__(mcp_url, **kwargs)
+        base_context = self.context
+        self.context = _MCPOAuthContext(
+            **{field.name: getattr(base_context, field.name) for field in fields(base_context)}
+        )
         self._callback_port_lease = callback_port_lease
         redirect_uris = self.context.client_metadata.redirect_uris or []
         redirect_uri = str(redirect_uris[0]) if redirect_uris else None
@@ -134,6 +158,87 @@ class MCPOAuth(_FastMCPOAuth):
         if expiry is not None:
             self.context.token_expiry_time = expiry
 
+    async def _validate_resource_match(self, prm: ProtectedResourceMetadata) -> None:
+        """Accept a public resource alias only when the transport is loopback.
+
+        Local gateways commonly expose ``http://localhost:<port>/mcp`` while
+        advertising the public HTTPS resource used for OAuth. The upstream SDK
+        rejects that origin mismatch. Keep its validation everywhere else and
+        require the alias to preserve the exact MCP path and query.
+        """
+        context = self.context
+        if not isinstance(context, _MCPOAuthContext):  # pragma: no cover - constructor invariant
+            raise RuntimeError("Unexpected OAuth context type")
+        context.resource_alias = None
+
+        try:
+            await super()._validate_resource_match(prm)
+            return
+        except OAuthFlowError:
+            pass
+
+        advertised_resource = str(prm.resource) if prm.resource else ""
+        transport = urlsplit(str(self.context.server_url))
+        advertised = urlsplit(advertised_resource)
+        hostname = transport.hostname or ""
+        try:
+            is_loopback = (
+                hostname.lower() == "localhost" or ipaddress.ip_address(hostname).is_loopback
+            )
+        except ValueError:
+            is_loopback = hostname.lower().endswith(".localhost")
+
+        same_endpoint = (
+            transport.path.removesuffix("/") == advertised.path.removesuffix("/")
+            and transport.query == advertised.query
+        )
+        safe_https_alias = (
+            advertised.scheme.lower() == "https"
+            and advertised.hostname is not None
+            and advertised.username is None
+            and advertised.password is None
+            and not advertised.fragment
+        )
+        if not (is_loopback and same_endpoint and safe_https_alias):
+            # Re-run the upstream validator to retain its precise error.
+            await super()._validate_resource_match(prm)
+            return
+
+        oauth_urls = [advertised_resource, *(str(url) for url in prm.authorization_servers)]
+        if not all([await self._is_loopback_https_url(url) for url in oauth_urls]):
+            await super()._validate_resource_match(prm)
+            return
+
+        context.resource_alias = advertised_resource
+        logging.getLogger(__name__).info(
+            "Using MCP server-advertised OAuth resource for loopback transport: %s",
+            advertised_resource,
+        )
+
+    @staticmethod
+    async def _is_loopback_https_url(url: str) -> bool:
+        """Return whether a credential-free HTTPS URL resolves only to loopback."""
+        parsed = urlsplit(url)
+        if (
+            parsed.scheme.lower() != "https"
+            or parsed.hostname is None
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.fragment
+        ):
+            return False
+        try:
+            addresses = await asyncio.get_running_loop().getaddrinfo(
+                parsed.hostname,
+                parsed.port or 443,
+                type=socket.SOCK_STREAM,
+            )
+        except (OSError, UnicodeError, ValueError):
+            return False
+        return bool(addresses) and all(
+            ipaddress.ip_address(address[4][0]).is_loopback for address in addresses
+        )
+
     async def redirect_handler(self, authorization_url: str) -> None:
         import webbrowser
 
@@ -147,7 +252,18 @@ class MCPOAuth(_FastMCPOAuth):
                     "OAuth client not found - cached credentials may be stale"
                 )
             if response.status_code not in (200, 302, 303, 307, 308):
-                raise RuntimeError(f"Unexpected authorization response: {response.status_code}")
+                parsed_url = urlsplit(authorization_url)
+                hostname = parsed_url.hostname or ""
+                if ":" in hostname:
+                    hostname = f"[{hostname}]"
+                authority = hostname
+                if parsed_url.port is not None:
+                    authority = f"{authority}:{parsed_url.port}"
+                endpoint = f"{parsed_url.scheme}://{authority}{parsed_url.path}"
+                raise RuntimeError(
+                    f"OAuth authorization endpoint returned HTTP {response.status_code}: "
+                    f"{endpoint}. Check the MCP URL and the server's OAuth configuration."
+                )
 
         logger.info(f"OAuth authorization URL: {authorization_url}")
         webbrowser.open(authorization_url)
@@ -158,7 +274,7 @@ PresetOAuth = MCPOAuth
 InsecureOAuth = MCPOAuth
 
 
-def create_insecure_httpx_factory():
+def create_insecure_httpx_factory() -> Callable[..., httpx.AsyncClient]:
     """Create an httpx client factory that skips SSL verification."""
 
     def factory(
@@ -170,6 +286,7 @@ def create_insecure_httpx_factory():
         # FastMCP may add httpx options (for example follow_redirects) as its
         # transport evolves. Preserve them, but never allow an option passed by
         # the caller to change this factory's TLS policy.
+        client_kwargs.setdefault("follow_redirects", True)
         client_kwargs.update(
             headers=headers,
             timeout=timeout,
@@ -625,7 +742,8 @@ class MCPClient:
                 },
             )
 
-            async with httpx.AsyncClient() as client:
+            verify_ssl = not bool(self.auth_config and self.auth_config.get("insecure", False))
+            async with httpx.AsyncClient(verify=verify_ssl) as client:
                 try:
                     response = await asyncio.wait_for(
                         client.post(

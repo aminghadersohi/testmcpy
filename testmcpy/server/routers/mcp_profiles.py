@@ -242,6 +242,8 @@ async def list_mcp_profiles():
             for mcp_server in profile.mcps:
                 auth_info = {
                     "type": mcp_server.auth.auth_type,
+                    "insecure": mcp_server.auth.insecure,
+                    "oauth_auto_discover": mcp_server.auth.oauth_auto_discover,
                 }
 
                 # Bearer token
@@ -907,37 +909,50 @@ async def test_mcp_connection(profile_id: str, mcp_index: int):
                     "token_url": auth_data.get("token_url"),
                     "scopes": auth_data.get("scopes", []),
                     "oauth_auto_discover": auth_data.get("oauth_auto_discover", False),
-                    "insecure": auth_data.get("insecure", False),
                 }
             elif auth_type == "none":
                 auth_dict = {"type": "none"}
+
+            # TLS verification is a transport setting, not an auth-mode
+            # setting. Preserve it for none, bearer, JWT, and OAuth alike.
+            if auth_dict is not None:
+                auth_dict["insecure"] = auth_data.get("insecure", False)
 
             # Create client with auth — on success we promote it into the
             # global mcp_clients cache so the Explorer can reuse the
             # authenticated session (avoids a second OAuth popup).
             test_client = MCPClient(mcp_config["mcp_url"], auth=auth_dict)
-            await test_client.initialize()
+            promoted = False
+            try:
+                await test_client.initialize()
 
-            # Try to list tools as a connection test
-            tools = await test_client.list_tools()
+                # Try to list tools as a connection test
+                tools = await test_client.list_tools()
 
-            # Promote into the global cache, replacing any stale client.
-            mcp_clients = get_mcp_clients()
-            cache_key = f"{profile_id}:{mcp_config['name']}"
-            old_client = mcp_clients.pop(cache_key, None)
-            if old_client:
-                try:
-                    await old_client.close()
-                except Exception as e:
-                    print(f"Warning: Failed to close old cached client '{cache_key}': {e}")
-            mcp_clients[cache_key] = test_client
+                # Promote into the global cache, replacing any stale client.
+                mcp_clients = get_mcp_clients()
+                cache_key = f"{profile_id}:{mcp_config['name']}"
+                old_client = mcp_clients.pop(cache_key, None)
+                if old_client:
+                    try:
+                        await old_client.close()
+                    except Exception as e:
+                        print(f"Warning: Failed to close old cached client '{cache_key}': {e}")
+                mcp_clients[cache_key] = test_client
+                promoted = True
 
-            return {
-                "success": True,
-                "status": "connected",
-                "message": f"Successfully connected to {mcp_config['name']}",
-                "tool_count": len(tools),
-            }
+                return {
+                    "success": True,
+                    "status": "connected",
+                    "message": f"Successfully connected to {mcp_config['name']}",
+                    "tool_count": len(tools),
+                }
+            finally:
+                if not promoted:
+                    try:
+                        await test_client.close()
+                    except Exception as e:
+                        logger.warning("Failed to close MCP connection test client: %s", e)
 
         except Exception as e:
             return {"success": False, "status": "error", "message": f"Connection failed: {str(e)}"}

@@ -42,6 +42,7 @@ def test_insecure_factory_does_not_allow_verify_override():
         factory(verify=True)
 
     assert async_client.call_args.kwargs["verify"] is False
+    assert async_client.call_args.kwargs["follow_redirects"] is True
 
 
 def test_mtls_factory_accepts_fastmcp_and_future_client_options(tmp_path):

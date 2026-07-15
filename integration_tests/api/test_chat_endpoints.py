@@ -342,6 +342,128 @@ class TestChatSelectedProfileAuth:
         assert kwargs["mcp_url"] == mock_mcp_client.base_url
         assert kwargs["auth"] == {"type": "oauth", "oauth_auto_discover": True}
 
+    def test_chat_stream_isolates_claude_from_unselected_mcp_configs(self, client):
+        from testmcpy.src.llm_integration import ClaudeSDKProvider
+
+        # This project server must never leak into the Claude subprocess.
+        Path(".mcp.json").write_text(
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "offline": {
+                            "type": "http",
+                            "url": "https://localhost/mcp",
+                        }
+                    }
+                }
+            )
+        )
+
+        selected_server = {
+            "type": "http",
+            "url": "https://mock-mcp:3000/mcp",
+            "headers": {"Authorization": "Bearer selected-token"},
+        }
+        provider = ClaudeSDKProvider(
+            model="claude-sonnet-4-6",
+            mcp_url=selected_server["url"],
+            auth={"type": "none", "insecure": True},
+        )
+        provider._mcp_server_config = selected_server
+        provider.initialize = AsyncMock()
+        provider.close = AsyncMock()
+        captured = {}
+        original_start_proxy = provider.start_insecure_mcp_proxy
+
+        async def capture_proxy():
+            proxy = await original_start_proxy()
+            captured["proxy"] = proxy
+            original_close_proxy = proxy.close
+
+            async def close_proxy():
+                captured["iterator_closed_before_proxy"] = captured.get("iterator_closed", False)
+                await original_close_proxy()
+
+            proxy.close = close_proxy
+            return proxy
+
+        provider.start_insecure_mcp_proxy = capture_proxy
+
+        async def fake_sdk_query(*, prompt, options):
+            try:
+                captured["prompt"] = prompt
+                captured["options"] = options
+                captured["cwd_exists_during_query"] = Path(options.cwd).is_dir()
+                if False:
+                    yield None
+            finally:
+                captured["iterator_closed"] = True
+
+        with (
+            patch("claude_agent_sdk.query", new=fake_sdk_query),
+            patch("testmcpy.server.api.create_llm_provider", return_value=provider),
+        ):
+            response = client.post("/api/chat/stream", json=CHAT_BODY)
+
+        assert response.status_code == 200
+        assert '"type": "complete"' in response.text
+        options = captured["options"]
+        assert captured["prompt"] == CHAT_BODY["message"]
+        selected_config = options.mcp_servers["mcp-service"]
+        assert selected_config["url"].startswith("http://127.0.0.1:")
+        assert "headers" not in selected_config
+        assert options.extra_args == {"strict-mcp-config": None}
+        assert options.tools == ["ToolSearch"]
+        assert options.disallowed_tools == []
+        assert options.system_prompt is None
+        assert "NODE_TLS_REJECT_UNAUTHORIZED" not in options.env
+        assert captured["cwd_exists_during_query"] is True
+        assert Path(options.cwd) != Path.cwd()
+        assert not Path(options.cwd).exists()
+        assert captured["proxy"]._runner is None
+        assert captured["proxy"]._session is None
+        assert captured["iterator_closed_before_proxy"] is True
+
+    def test_chat_stream_cleans_isolated_cwd_when_option_building_fails(self, client):
+        from testmcpy.src.llm_integration import ClaudeSDKProvider
+
+        provider = ClaudeSDKProvider(
+            model="claude-sonnet-4-6",
+            mcp_url="https://mcp.example.test/mcp",
+            auth={"type": "none", "insecure": True},
+        )
+        provider._mcp_server_config = {
+            "type": "http",
+            "url": provider.mcp_url,
+        }
+        provider.initialize = AsyncMock()
+        provider.close = AsyncMock()
+        captured = {}
+        original_start_proxy = provider.start_insecure_mcp_proxy
+
+        async def capture_proxy():
+            proxy = await original_start_proxy()
+            captured["proxy"] = proxy
+            return proxy
+
+        provider.start_insecure_mcp_proxy = capture_proxy
+
+        def fail_build(**kwargs):
+            captured["cwd"] = Path(kwargs["cwd"])
+            assert captured["cwd"].is_dir()
+            raise RuntimeError("SDK options failed")
+
+        provider.build_agent_options = MagicMock(side_effect=fail_build)
+        with patch("testmcpy.server.api.create_llm_provider", return_value=provider):
+            response = client.post("/api/chat/stream", json=CHAT_BODY)
+
+        assert response.status_code == 200
+        assert "Internal error: RuntimeError" in response.text
+        assert not captured["cwd"].exists()
+        assert captured["proxy"]._runner is None
+        assert captured["proxy"]._session is None
+        provider.close.assert_awaited_once()
+
     def test_chat_resolves_profile_api_key_env(self, client, monkeypatch):
         monkeypatch.setenv("ANTHROPIC_API_KEY", "runtime-profile-key")
         Path(".llm_providers.yaml").write_text(

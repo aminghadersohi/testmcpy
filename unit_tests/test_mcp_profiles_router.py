@@ -73,6 +73,30 @@ def test_test_connection_failure_returns_error_payload(client):
     instance.close.assert_awaited()
 
 
+def test_test_connection_forwards_insecure_transport_setting(client):
+    instance = _mock_mcp_client()
+    with patch("testmcpy.server.routers.mcp_profiles.MCPClient", return_value=instance) as mock_cls:
+        res = client.post(
+            "/api/mcp/test-connection",
+            json={
+                "mcp_url": "https://self-signed.example.test/mcp",
+                "auth": {"type": "none", "insecure": True},
+            },
+        )
+
+    assert res.status_code == 200
+    assert res.json()["success"] is True
+    mock_cls.assert_called_once_with(
+        "https://self-signed.example.test/mcp",
+        auth={
+            "type": "none",
+            "insecure": True,
+            "oauth_auto_discover": False,
+        },
+    )
+    instance.close.assert_awaited()
+
+
 def test_test_connection_stdio_uses_stdio_client(client):
     tools = [SimpleNamespace(name="echo")]
     instance = _mock_mcp_client(tools=tools)

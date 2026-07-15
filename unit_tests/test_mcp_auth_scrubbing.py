@@ -48,6 +48,39 @@ async def test_dynamic_mcp_token_fetch_registers_access_token(method_name, args,
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(("insecure", "expected_verify"), [(False, True), (True, False)])
+async def test_oauth_client_credentials_honors_insecure_tls_flag(
+    insecure,
+    expected_verify,
+):
+    response = Mock(status_code=200, headers={})
+    response.json.return_value = {"access_token": "oauth-access-token"}
+    response.raise_for_status.return_value = None
+    http_client = AsyncMock()
+    http_client.post.return_value = response
+    client_context = MagicMock()
+    client_context.__aenter__ = AsyncMock(return_value=http_client)
+    client_context.__aexit__ = AsyncMock(return_value=None)
+    client = MCPClient(
+        "https://mcp.example.com/mcp",
+        auth={"type": "oauth", "insecure": insecure},
+    )
+
+    with patch(
+        "testmcpy.src.mcp_client.httpx.AsyncClient",
+        return_value=client_context,
+    ) as async_client:
+        token = await client._fetch_oauth_token(
+            "client-id",
+            "client-secret",
+            "https://auth.example.com/token",
+        )
+
+    assert token == "oauth-access-token"
+    async_client.assert_called_once_with(verify=expected_verify)
+
+
+@pytest.mark.asyncio
 async def test_mcp_401_refresh_registers_rotated_access_and_refresh_tokens():
     access_token = "rotated-mcp-access-token-12345"
     refresh_token = "rotated-mcp-refresh-token-12345"

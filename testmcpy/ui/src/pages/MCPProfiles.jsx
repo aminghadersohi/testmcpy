@@ -25,6 +25,32 @@ function getAuthIcon(authType) {
   }
 }
 
+export function buildMCPTestAuth(data) {
+  const authData = {
+    type: data.auth_type,
+    insecure: Boolean(data.insecure),
+  }
+  if (data.auth_type === 'bearer') authData.token = data.token
+  if (data.auth_type === 'jwt') {
+    authData.api_url = data.api_url
+    authData.api_token = data.api_token
+    authData.api_secret = data.api_secret
+  }
+  if (data.auth_type === 'oauth') {
+    if (data.oauth_auto_discover) {
+      authData.oauth_auto_discover = true
+    } else {
+      authData.client_id = data.client_id
+      authData.client_secret = data.client_secret
+      authData.token_url = data.token_url
+      authData.scopes = data.scopes
+        ? data.scopes.split(',').map(scope => scope.trim()).filter(Boolean)
+        : []
+    }
+  }
+  return authData
+}
+
 // Profile editor modal
 function ProfileEditorModal({ profile, onSave, onCancel }) {
   const [name, setName] = useState(profile?.name || '')
@@ -95,7 +121,7 @@ function ProfileEditorModal({ profile, onSave, onCancel }) {
 }
 
 // MCP editor modal
-function MCPEditorModal({ mcp, onSave, onCancel }) {
+export function MCPEditorModal({ mcp, onSave, onCancel }) {
   const [formData, setFormData] = useState({
     name: mcp?.name || '',
     transport: mcp?.transport || 'sse',
@@ -103,7 +129,8 @@ function MCPEditorModal({ mcp, onSave, onCancel }) {
     command: mcp?.command || '',
     args: mcp?.args?.join(' ') || '',
     auth_type: mcp?.auth?.type || 'none',
-    oauth_auto_discover: mcp?.auth?.type === 'oauth' && !mcp?.auth?.client_id,
+    oauth_auto_discover: mcp?.auth?.oauth_auto_discover
+      ?? (mcp?.auth?.type === 'oauth' && !mcp?.auth?.client_id),
     token: mcp?.auth?.token || '',
     api_url: mcp?.auth?.api_url || '',
     api_token: mcp?.auth?.api_token || '',
@@ -505,22 +532,7 @@ function MCPWizard({ profiles, onComplete, onCancel }) {
         ? `stdio://${wizardData.command}`
         : wizardData.mcp_url
 
-      const authData = { type: wizardData.auth_type }
-      if (wizardData.auth_type === 'bearer') authData.token = wizardData.token
-      if (wizardData.auth_type === 'jwt') {
-        authData.api_url = wizardData.api_url
-        authData.api_token = wizardData.api_token
-        authData.api_secret = wizardData.api_secret
-      }
-      if (wizardData.auth_type === 'oauth') {
-        if (wizardData.oauth_auto_discover) {
-          authData.oauth_auto_discover = true
-        } else {
-          authData.client_id = wizardData.client_id
-          authData.client_secret = wizardData.client_secret
-          authData.token_url = wizardData.token_url
-        }
-      }
+      const authData = buildMCPTestAuth(wizardData)
 
       const res = await fetch('/api/mcp/test-connection', {
         method: 'POST',

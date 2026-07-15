@@ -4,13 +4,19 @@ import stat
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from cryptography.fernet import Fernet
 from fastmcp.client.auth.oauth import TokenStorageAdapter
 from key_value.aio.stores.memory import MemoryStore
-from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
+from mcp.client.auth.exceptions import OAuthFlowError
+from mcp.shared.auth import (
+    OAuthClientInformationFull,
+    OAuthToken,
+    ProtectedResourceMetadata,
+)
 
 from testmcpy.scrubber import REDACTED, reset_cache, scrub_text
 from testmcpy.src.llm_integration import ClaudeSDKProvider
@@ -20,6 +26,107 @@ from testmcpy.src.oauth_storage import (
     create_oauth_token_storage,
     oauth_cache_dir,
 )
+
+
+def protected_resource_metadata(
+    resource: str,
+    authorization_server: str = "https://auth.localhost",
+) -> ProtectedResourceMetadata:
+    return ProtectedResourceMetadata(
+        resource=resource,
+        authorization_servers=[authorization_server],
+    )
+
+
+@pytest.mark.asyncio
+async def test_mcp_oauth_accepts_public_resource_alias_for_loopback_transport(
+    tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    oauth = MCPOAuth("http://localhost:8084/mcp", callback_port=51001)
+    metadata = protected_resource_metadata("https://mcp-gateway.localhost/mcp")
+
+    await oauth._validate_resource_match(metadata)
+    oauth.context.protected_resource_metadata = metadata
+
+    assert oauth.context.server_url == "http://localhost:8084/mcp"
+    assert oauth.context.get_resource_url() == "https://mcp-gateway.localhost/mcp"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("transport_url", "advertised_resource"),
+    [
+        (
+            "https://mcp.internal.example.com/mcp",
+            "https://mcp-gateway.localhost/mcp",
+        ),
+        ("http://localhost:8084/mcp", "https://mcp-gateway.localhost/other"),
+        ("http://localhost:8084/mcp", "http://mcp-gateway.localhost/mcp"),
+        (
+            "http://localhost:8084/mcp",
+            "https://user:password@mcp-gateway.localhost/mcp",
+        ),
+        ("http://localhost:8084/mcp", "https://mcp-gateway.localhost/mcp#fragment"),
+        ("http://localhost:8084/mcp", "https://mcp-gateway.localhost/mcp//"),
+        ("http://localhost:8084/mcp", "https://192.0.2.1/mcp"),
+    ],
+)
+async def test_mcp_oauth_rejects_unsafe_resource_aliases(
+    tmp_path,
+    monkeypatch,
+    transport_url,
+    advertised_resource,
+):
+    monkeypatch.chdir(tmp_path)
+    oauth = MCPOAuth(transport_url, callback_port=51001)
+    metadata = protected_resource_metadata(advertised_resource)
+
+    with pytest.raises(OAuthFlowError, match="Protected resource"):
+        await oauth._validate_resource_match(metadata)
+
+
+@pytest.mark.asyncio
+async def test_mcp_oauth_rejects_non_loopback_authorization_server(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    oauth = MCPOAuth("http://localhost:8084/mcp", callback_port=51001)
+    metadata = protected_resource_metadata(
+        "https://mcp-gateway.localhost/mcp",
+        authorization_server="https://192.0.2.1",
+    )
+
+    with pytest.raises(OAuthFlowError, match="Protected resource"):
+        await oauth._validate_resource_match(metadata)
+
+
+@pytest.mark.asyncio
+async def test_oauth_authorization_error_identifies_endpoint_without_query(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    oauth = MCPOAuth("https://mcp.local.preset.zone/mcp", callback_port=51001)
+    client = AsyncMock()
+    client.get.return_value = SimpleNamespace(status_code=500)
+    client_context = MagicMock()
+    client_context.__aenter__ = AsyncMock(return_value=client)
+    client_context.__aexit__ = AsyncMock(return_value=None)
+    authorization_url = (
+        "https://sensitive-user:sensitive-password@mcp.local.preset.zone/mcp/authorize?"
+        "client_id=sensitive-client-id&state=sensitive-state"
+    )
+
+    with (
+        patch("testmcpy.src.mcp_client.httpx.AsyncClient", return_value=client_context),
+        pytest.raises(RuntimeError) as exc_info,
+    ):
+        await oauth.redirect_handler(authorization_url)
+
+    message = str(exc_info.value)
+    assert "HTTP 500" in message
+    assert "https://mcp.local.preset.zone/mcp/authorize" in message
+    assert "server's OAuth configuration" in message
+    assert "sensitive-client-id" not in message
+    assert "sensitive-state" not in message
+    assert "sensitive-user" not in message
+    assert "sensitive-password" not in message
 
 
 @pytest.mark.asyncio

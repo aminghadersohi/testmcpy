@@ -113,6 +113,10 @@ async def test_per_call_wall_clock_fires_against_chatty_stream():
     # The abort fires AFTER the budget; logs carry the abort marker.
     # NB: `result.response` may already contain real tokens (since the
     # stream WAS making progress). Check the abort signal in logs.
+    assert result.response
+    assert result.error is not None
+    assert "wall-clock budget" in result.error
+    assert result.error != result.response
     assert any("wall-clock abort" in line for line in result.logs), result.logs
     assert any("[SSE wall-clock aborted]" in line for line in result.logs)
 

@@ -98,6 +98,9 @@ async def test_idle_abort_after_no_events():
     # Should abort in well under a second, not hang for the full timeout.
     assert elapsed < 2.0, f"Provider hung for {elapsed:.2f}s instead of aborting"
     assert "SSE stream went idle" in result.response
+    assert result.error is not None
+    assert "SSE stream went idle" in result.error
+    assert result.response == f"Error: {result.error}"
     assert any("SSE idle abort" in line for line in result.logs)
     # Sub-second thresholds must NOT round to "0s" in the diagnostic.
     assert "0s" not in result.response.split("for ")[1].split(" ")[0]
@@ -118,7 +121,7 @@ async def test_idle_abort_after_partial_stream():
     """Stream sends one event, then stalls → idle-abort still fires."""
     lines = [
         "event: token",
-        'data: {"token": "hello"}',
+        'data: {"chunk": "hello"}',
         "",  # blank separator
     ]
     provider = _make_provider(idle_seconds=0.3, lines=lines)
@@ -128,8 +131,12 @@ async def test_idle_abort_after_partial_stream():
     elapsed = time.monotonic() - start
 
     assert elapsed < 2.0, f"Provider hung for {elapsed:.2f}s instead of aborting"
-    # Partial response was captured before the stall.
-    assert "hello" in result.response or "SSE stream went idle" in result.response
+    # Preserve useful partial output, but report the real abort reason as the
+    # error. Never copy the model's partial answer into ``error``.
+    assert result.response == "hello"
+    assert result.error is not None
+    assert "SSE stream went idle" in result.error
+    assert result.error != result.response
     assert any("SSE idle abort" in line for line in result.logs)
     assert any("[SSE idle aborted]" in line for line in result.logs)
 

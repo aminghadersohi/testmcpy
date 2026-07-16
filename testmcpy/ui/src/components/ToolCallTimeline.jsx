@@ -238,15 +238,16 @@ export default function ToolCallTimeline({ toolCalls = [], thinking, streaming }
           }
 
           const call = item.call
-          const isComplete = call.result !== undefined || call.error
+          const isComplete = call.completed === true || call.result != null || Boolean(call.error)
           const isInProgress = !isComplete && streaming
+          const isIncomplete = !isComplete && !streaming
           const preview = getArgPreview(call.name, call.arguments)
 
           return (
             <TimelineRow
               key={item.key}
               icon={
-                call.is_error || call.error
+                call.is_error || call.error || isIncomplete
                   ? <AlertCircle size={14} />
                   : isInProgress
                     ? <Loader2 size={14} className="animate-spin" />
@@ -255,6 +256,8 @@ export default function ToolCallTimeline({ toolCalls = [], thinking, streaming }
               iconColor={
                 call.is_error || call.error
                   ? 'text-error'
+                  : isIncomplete
+                    ? 'text-warning'
                   : isInProgress
                     ? 'text-primary-light'
                     : 'text-success'

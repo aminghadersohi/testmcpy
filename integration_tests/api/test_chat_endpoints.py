@@ -57,6 +57,164 @@ class TestChatSelectedProfileAuth:
         assert kwargs["mcp_url"] == mock_mcp_client.base_url
         assert kwargs["auth"] == {"type": "oauth", "oauth_auto_discover": True}
 
+    def test_chat_and_generic_stream_forward_saved_history(self, client):
+        history = [
+            {"role": "system", "content": "Answer concisely."},
+            {"role": "user", "content": "My project is Atlas."},
+            {"role": "assistant", "content": "Understood."},
+        ]
+        body = {**CHAT_BODY, "history": history, "message": "What is my project?"}
+
+        regular_provider = make_fake_provider()
+        with patch("testmcpy.server.api.create_llm_provider", return_value=regular_provider):
+            regular_response = client.post("/api/chat", json=body)
+
+        stream_provider = make_fake_provider()
+        with patch("testmcpy.server.api.create_llm_provider", return_value=stream_provider):
+            stream_response = client.post("/api/chat/stream", json=body)
+
+        assert regular_response.status_code == 200
+        assert stream_response.status_code == 200
+        assert regular_provider.generate_with_tools.await_args.kwargs["messages"] == history
+        assert stream_provider.generate_with_tools.await_args.kwargs["messages"] == history
+
+    def test_chat_provider_failures_are_errors_not_successful_assistant_turns(self, client):
+        regular_provider = make_fake_provider()
+        regular_provider.generate_with_tools.return_value.error = "provider unavailable"
+        stream_provider = make_fake_provider()
+        stream_provider.generate_with_tools.return_value.error = "provider unavailable"
+
+        with patch(
+            "testmcpy.server.api.create_llm_provider",
+            side_effect=[regular_provider, stream_provider],
+        ):
+            regular_response = client.post("/api/chat", json=CHAT_BODY)
+            stream_response = client.post("/api/chat/stream", json=CHAT_BODY)
+
+        assert regular_response.status_code == 500
+        assert regular_response.json()["detail"] == "provider unavailable"
+        events = [
+            json.loads(line.removeprefix("data: "))
+            for line in stream_response.text.splitlines()
+            if line.startswith("data: ")
+        ]
+        assert {event["type"] for event in events} >= {"status", "error"}
+        assert [event["data"] for event in events if event["type"] == "error"] == [
+            "provider unavailable"
+        ]
+        assert not any(event["type"] == "complete" for event in events)
+
+    def test_chat_stream_errors_when_tool_loop_exhausts_without_final_answer(
+        self, client, mock_mcp_client
+    ):
+        provider = make_fake_provider()
+        provider.generate_with_tools.return_value = SimpleNamespace(
+            response="",
+            tool_calls=[{"name": "health_check", "arguments": {}, "id": "repeat-call"}],
+            tool_results=[],
+            thinking=None,
+            token_usage=None,
+            cost=0.0,
+            duration=0.1,
+            error=None,
+        )
+
+        with patch("testmcpy.server.api.create_llm_provider", return_value=provider):
+            response = client.post("/api/chat/stream", json=CHAT_BODY)
+
+        events = [
+            json.loads(line.removeprefix("data: "))
+            for line in response.text.splitlines()
+            if line.startswith("data: ")
+        ]
+        assert provider.generate_with_tools.await_count == 10
+        assert mock_mcp_client.call_tool.await_count == 10
+        assert [event["data"] for event in events if event["type"] == "error"] == [
+            "Stopped after 10 tool turns before the model produced a final answer."
+        ]
+        assert not any(event["type"] == "complete" for event in events)
+
+    def test_chat_stream_budgets_outbound_history_but_reports_what_stays_saved(self, client):
+        provider = make_fake_provider()
+        oversized_answer = "x" * 300_000
+        history = [
+            {"role": "system", "content": "Keep project facts."},
+            {"role": "user", "content": "Old question"},
+            {"role": "assistant", "content": oversized_answer},
+            {"role": "user", "content": "My project is Atlas."},
+            {"role": "assistant", "content": "Understood."},
+        ]
+        body = {
+            **CHAT_BODY,
+            "model": "gpt-4o",
+            "provider": "openai",
+            "history": history,
+            "message": "What is my project?",
+        }
+
+        with patch("testmcpy.server.api.create_llm_provider", return_value=provider):
+            response = client.post("/api/chat/stream", json=body)
+
+        events = [
+            json.loads(line.removeprefix("data: "))
+            for line in response.text.splitlines()
+            if line.startswith("data: ")
+        ]
+        notices = [event["data"] for event in events if event["type"] == "context_trimmed"]
+        assert notices == [
+            {
+                "omitted_messages": 1,
+                "original_messages": 5,
+                "sent_messages": 4,
+                "context_window": 128000,
+                "model": "gpt-4o",
+                "system_truncated": False,
+            }
+        ]
+        sent_history = provider.generate_with_tools.await_args.kwargs["messages"]
+        assert {message["content"] for message in sent_history} == {
+            "Keep project facts.",
+            "Old question",
+            "My project is Atlas.",
+            "Understood.",
+        }
+        assert oversized_answer not in {message["content"] for message in sent_history}
+        assert any(event["type"] == "complete" for event in events)
+
+    def test_chat_response_reports_budgeted_history(self, client):
+        provider = make_fake_provider()
+        oversized_answer = "x" * 300_000
+        body = {
+            **CHAT_BODY,
+            "model": "gpt-4o",
+            "provider": "openai",
+            "history": [
+                {"role": "system", "content": "Keep project facts."},
+                {"role": "user", "content": "Old question"},
+                {"role": "assistant", "content": oversized_answer},
+                {"role": "user", "content": "My project is Atlas."},
+                {"role": "assistant", "content": "Understood."},
+            ],
+            "message": "What is my project?",
+        }
+
+        with patch("testmcpy.server.api.create_llm_provider", return_value=provider):
+            response = client.post("/api/chat", json=body)
+
+        assert response.status_code == 200
+        assert response.json()["context_trimmed"] == {
+            "omitted_messages": 1,
+            "original_messages": 5,
+            "sent_messages": 4,
+            "context_window": 128000,
+            "model": "gpt-4o",
+            "system_truncated": False,
+        }
+        assert oversized_answer not in {
+            message["content"]
+            for message in provider.generate_with_tools.await_args.kwargs["messages"]
+        }
+
     def test_chat_uses_native_results_without_replaying_tool_calls(self, client, mock_mcp_client):
         native_provider = make_fake_provider()
         native_provider.generate_with_tools.return_value = SimpleNamespace(
@@ -342,6 +500,141 @@ class TestChatSelectedProfileAuth:
         assert kwargs["mcp_url"] == mock_mcp_client.base_url
         assert kwargs["auth"] == {"type": "oauth", "oauth_auto_discover": True}
 
+    def test_chat_stream_replays_history_in_dedicated_claude_sdk_prompt(self, client):
+        from testmcpy.src.llm_integration import ClaudeSDKProvider
+
+        provider = ClaudeSDKProvider(
+            model="claude-sonnet-4-6",
+            mcp_url="https://mock-mcp:3000/mcp",
+            auth={"type": "none"},
+        )
+        provider.initialize = AsyncMock()
+        provider.close = AsyncMock()
+        provider.start_insecure_mcp_proxy = AsyncMock(return_value=None)
+        provider.build_agent_options = MagicMock(return_value=SimpleNamespace())
+        captured = {}
+
+        async def fake_sdk_query(*, prompt, options):
+            captured["prompt"] = prompt
+            captured["options"] = options
+            if False:
+                yield None
+
+        body = {
+            **CHAT_BODY,
+            "history": [
+                {"role": "system", "content": "Answer concisely."},
+                {"role": "user", "content": "My project is Atlas."},
+                {"role": "assistant", "content": "Understood."},
+            ],
+            "message": "What is my project?",
+        }
+        with (
+            patch("claude_agent_sdk.query", new=fake_sdk_query),
+            patch("testmcpy.server.api.create_llm_provider", return_value=provider),
+        ):
+            response = client.post("/api/chat/stream", json=body)
+
+        assert response.status_code == 200
+        assert '"type": "complete"' in response.text
+        instruction, encoded_transcript = captured["prompt"].split("\n\n", 1)
+        assert "answer only current_user" in instruction
+        assert json.loads(encoded_transcript) == {
+            "system": None,
+            "messages": [
+                {"role": "user", "content": "My project is Atlas."},
+                {"role": "assistant", "content": "Understood."},
+            ],
+            "current_user": "What is my project?",
+        }
+        assert provider.build_agent_options.call_args.kwargs["saved_system_prompt"] == (
+            "Answer concisely."
+        )
+        provider.start_insecure_mcp_proxy.assert_awaited_once()
+        provider.close.assert_awaited_once()
+
+    def test_chat_stream_does_not_complete_after_claude_sdk_stream_error(self, client):
+        from claude_agent_sdk import ClaudeSDKError
+
+        from testmcpy.src.llm_integration import ClaudeSDKProvider
+
+        provider = ClaudeSDKProvider(
+            model="claude-sonnet-4-6",
+            mcp_url="https://mock-mcp:3000/mcp",
+            auth={"type": "none"},
+        )
+        provider.initialize = AsyncMock()
+        provider.close = AsyncMock()
+        provider.start_insecure_mcp_proxy = AsyncMock(return_value=None)
+        provider.build_agent_options = MagicMock(return_value=SimpleNamespace())
+
+        async def failing_sdk_query(*, prompt, options):
+            del prompt, options
+            raise ClaudeSDKError("SDK stream failed")
+            yield  # pragma: no cover - makes this an async generator
+
+        with (
+            patch("claude_agent_sdk.query", new=failing_sdk_query),
+            patch("testmcpy.server.api.create_llm_provider", return_value=provider),
+        ):
+            response = client.post("/api/chat/stream", json=CHAT_BODY)
+
+        events = [
+            json.loads(line.removeprefix("data: "))
+            for line in response.text.splitlines()
+            if line.startswith("data: ")
+        ]
+        assert [event["data"] for event in events if event["type"] == "error"] == [
+            "SDK stream failed"
+        ]
+        assert not any(event["type"] == "complete" for event in events)
+        provider.close.assert_awaited_once()
+
+    def test_chat_stream_treats_claude_error_result_as_terminal_error(self, client):
+        from claude_agent_sdk import ResultMessage
+
+        from testmcpy.src.llm_integration import ClaudeSDKProvider
+
+        provider = ClaudeSDKProvider(
+            model="claude-sonnet-4-6",
+            mcp_url="https://mock-mcp:3000/mcp",
+            auth={"type": "none"},
+        )
+        provider.initialize = AsyncMock()
+        provider.close = AsyncMock()
+        provider.start_insecure_mcp_proxy = AsyncMock(return_value=None)
+        provider.build_agent_options = MagicMock(return_value=SimpleNamespace())
+
+        async def error_result_sdk_query(*, prompt, options):
+            del prompt, options
+            yield ResultMessage(
+                subtype="error_during_execution",
+                duration_ms=1,
+                duration_api_ms=1,
+                is_error=False,
+                num_turns=1,
+                session_id="test-session",
+                result="Request failed",
+                errors=["rate limit exceeded"],
+            )
+
+        with (
+            patch("claude_agent_sdk.query", new=error_result_sdk_query),
+            patch("testmcpy.server.api.create_llm_provider", return_value=provider),
+        ):
+            response = client.post("/api/chat/stream", json=CHAT_BODY)
+
+        events = [
+            json.loads(line.removeprefix("data: "))
+            for line in response.text.splitlines()
+            if line.startswith("data: ")
+        ]
+        assert [event["data"] for event in events if event["type"] == "error"] == [
+            "rate limit exceeded"
+        ]
+        assert not any(event["type"] == "complete" for event in events)
+        provider.close.assert_awaited_once()
+
     def test_chat_stream_isolates_claude_from_unselected_mcp_configs(self, client):
         from testmcpy.src.llm_integration import ClaudeSDKProvider
 
@@ -415,7 +708,7 @@ class TestChatSelectedProfileAuth:
         assert options.extra_args == {"strict-mcp-config": None}
         assert options.tools == ["ToolSearch"]
         assert options.disallowed_tools == []
-        assert options.system_prompt is None
+        assert options.system_prompt == provider._MCP_TOOL_SEARCH_SYSTEM_PROMPT
         assert "NODE_TLS_REJECT_UNAUTHORIZED" not in options.env
         assert captured["cwd_exists_during_query"] is True
         assert Path(options.cwd) != Path.cwd()

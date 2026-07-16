@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.10] - 2026-07-15
+
+### Added
+- Persisted Inspect/Chat conversations and saved system context across page
+  reloads, browser sessions, model changes, and profile changes until the user
+  explicitly clears the conversation.
+- Added provider-neutral history replay for Claude, Codex, Gemini, and regular
+  chat providers, including context-budget trimming metadata.
+- Added durable cross-tab clear synchronization so stale or in-flight requests
+  cannot restore a conversation after it has been cleared.
+
+### Fixed
+- Hardened Claude ToolSearch safety instructions and unified SDK error handling.
+- Preserved partial Assistant responses while reporting idle and wall-clock
+  stream aborts with the correct diagnostic.
+- Limited browser-storage compaction retries to genuine quota errors and
+  avoided misleading warnings for expected cross-tab synchronization.
+
 ## [0.11.9] - 2026-07-14
 
 ### Added

@@ -154,6 +154,22 @@ def test_claude_chat_tool_search_keeps_saved_native_system_instruction():
     )
 
 
+def test_claude_chat_tool_search_always_applies_required_system_policy():
+    provider = ClaudeSDKProvider(model="claude-test")
+
+    with patch(
+        "claude_agent_sdk.ClaudeAgentOptions",
+        side_effect=lambda **kwargs: SimpleNamespace(**kwargs),
+    ):
+        options = provider.build_agent_options(
+            cwd="/tmp",
+            allow_tool_search=True,
+        )
+
+    assert options.tools == ["ToolSearch"]
+    assert options.system_prompt == provider._MCP_TOOL_SEARCH_SYSTEM_PROMPT
+
+
 @pytest.mark.asyncio
 async def test_codex_sdk_uses_native_saved_instruction_and_replays_dialogue():
     provider = CodexSDKProvider(

@@ -1628,6 +1628,33 @@ class SDKRunResult:
     error: str | None = None
 
 
+def _claude_result_message_error(message: Any) -> str | None:
+    """Extract an in-band Claude SDK failure from a ``ResultMessage``.
+
+    Claude can report a failed run without raising ``ClaudeSDKError``.  Treat
+    either ``is_error`` or a non-empty ``errors`` list as the failure signal,
+    then use the most specific available diagnostic in SDK preference order.
+    Keeping this duck-typed avoids importing the optional Claude SDK here and
+    lets both provider and API streaming paths share exactly the same rules.
+    """
+    raw_errors = getattr(message, "errors", None) or []
+    if isinstance(raw_errors, str):
+        raw_errors = [raw_errors]
+    errors = [str(error).strip() for error in raw_errors if str(error).strip()]
+    if not getattr(message, "is_error", False) and not errors:
+        return None
+
+    if errors:
+        return "; ".join(errors)
+
+    result = str(getattr(message, "result", None) or "").strip()
+    if result:
+        return result
+
+    subtype = str(getattr(message, "subtype", None) or "").strip()
+    return subtype or "Claude SDK run failed"
+
+
 _HOP_BY_HOP_HEADERS = frozenset(
     {
         "connection",
@@ -2564,13 +2591,9 @@ class ClaudeSDKProvider(BaseSDKProvider):
             ),
             cwd=cwd,
             system_prompt=(
-                (
-                    _compose_agent_system_prompt(
-                        self._MCP_TOOL_SEARCH_SYSTEM_PROMPT,
-                        saved_system_prompt,
-                    )
-                    if saved_system_prompt
-                    else None
+                _compose_agent_system_prompt(
+                    self._MCP_TOOL_SEARCH_SYSTEM_PROMPT,
+                    saved_system_prompt,
                 )
                 if allow_tool_search
                 else _compose_agent_system_prompt(
@@ -2862,20 +2885,8 @@ class ClaudeSDKProvider(BaseSDKProvider):
                                 f"[ClaudeSDK] Result: {message.num_turns} turns, "
                                 f"{duration_ms}ms, ${cost:.4f}"
                             )
-                            result_errors = [
-                                str(error).strip()
-                                for error in (getattr(message, "errors", None) or [])
-                                if str(error).strip()
-                            ]
-                            if getattr(message, "is_error", False) or result_errors:
-                                result_text = str(getattr(message, "result", None) or "").strip()
-                                error_parts = list(result_errors)
-                                if result_text and result_text not in error_parts:
-                                    error_parts.append(result_text)
-                                if not error_parts:
-                                    subtype = str(getattr(message, "subtype", "") or "").strip()
-                                    error_parts.append(subtype or "Claude SDK run failed")
-                                sdk_error = "; ".join(error_parts)
+                            if result_error := _claude_result_message_error(message):
+                                sdk_error = result_error
                                 log(f"[ClaudeSDK] Result error: {sdk_error}")
                 except ClaudeSDKError as e:
                     # SDK may throw on unknown message types (e.g. rate_limit_event).
@@ -3616,32 +3627,34 @@ class AssistantProvider(LLMProvider):
         # Final per-call wall clock for the abort message uses the LAST
         # turn's stream_start_time (set at the top of every turn).
         duration = time.time() - start_time
-        if state.got_error and not state.response_text:
-            state.response_text = f"Error: {state.error_message}"
-        elif wall_clock_aborted and not state.response_text:
-            # Surface the wall-clock abort with the same shape as the
-            # idle abort so evaluators see a clean error string. Uses
-            # stream_elapsed (NOT total duration) so the reported time
-            # matches the actual budget — total `duration` would
-            # include semaphore-wait time which by design isn't
-            # charged against the wall-clock budget.
+        abort_error: str | None = None
+        if wall_clock_aborted:
+            # stream_elapsed (not total duration) matches the actual budget;
+            # semaphore wait time is intentionally not charged to the stream.
             stream_elapsed = time.time() - stream_start_time
-            state.response_text = (
-                f"Error: SSE stream exceeded the per-call wall-clock budget of "
+            abort_error = (
+                f"SSE stream exceeded the per-call wall-clock budget of "
                 f"{_format_seconds(per_call_wall_clock_seconds)} "
                 f"({stream_elapsed:.0f}s elapsed, {event_count} events). "
                 "The stream was making progress but too slowly. Aborted to "
                 "free the runner (SC-106138)."
             )
-        elif idle_aborted and not state.response_text:
-            # Surface the idle abort cleanly so evaluators don't see an
-            # empty response with no explanation.
-            state.response_text = (
-                f"Error: SSE stream went idle for "
+        elif idle_aborted:
+            abort_error = (
+                f"SSE stream went idle for "
                 f"{_format_seconds(sse_idle_abort_seconds)} without sending a "
                 "final / error event. The chatbot backend kept the connection "
                 "open but stopped emitting progress. Aborted to free the runner."
             )
+
+        if state.got_error and not state.response_text:
+            state.response_text = f"Error: {state.error_message}"
+        elif abort_error and not state.response_text:
+            # With no partial model output, keep the existing user-facing
+            # ``Error: ...`` response shape.  When partial output exists it is
+            # retained in ``response`` while ``error`` below carries this real
+            # abort diagnostic instead of incorrectly copying the model text.
+            state.response_text = f"Error: {abort_error}"
 
         abort_marker = ""
         if idle_aborted:
@@ -3655,7 +3668,7 @@ class AssistantProvider(LLMProvider):
             f"{state.token_event_count} tokens, "
             f"turns={turn_idx + 1}/{max_turns}, "
             f"final={'yes' if state.got_final else 'no'}, "
-            f"error={'yes' if state.got_error else 'no'}, "
+            f"error={'yes' if state.got_error or abort_error else 'no'}, "
             f"{duration:.2f}s" + abort_marker
         )
 
@@ -3667,13 +3680,7 @@ class AssistantProvider(LLMProvider):
             cost=self._estimate_cost(state.token_usage),
             duration=duration,
             tti_ms=state.tti_ms,
-            error=(
-                state.error_message
-                if state.got_error
-                else state.response_text.removeprefix("Error: ")
-                if idle_aborted or wall_clock_aborted
-                else None
-            ),
+            error=state.error_message if state.got_error else abort_error,
             logs=logs,
         )
 

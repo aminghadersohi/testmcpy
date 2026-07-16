@@ -188,6 +188,11 @@ function ChatInterface({ selectedProfiles = [], selectedLlmProfile, llmProfiles 
       clearToken: persistenceClearTokenRef.current,
     })
 
+    // A newer clear token is an expected cross-tab synchronization event, not
+    // a browser storage failure. The storage listener below owns resetting
+    // this tab and aborting any in-flight work.
+    if (result.stale) return result
+
     if (!persistenceWarningShownRef.current && (!result.ok || result.compacted)) {
       persistenceWarningShownRef.current = true
       notifyWarning(

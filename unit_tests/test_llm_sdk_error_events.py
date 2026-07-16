@@ -6,7 +6,11 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from testmcpy.src.llm_integration import ClaudeSDKProvider, GeminiSDKProvider
+from testmcpy.src.llm_integration import (
+    ClaudeSDKProvider,
+    GeminiSDKProvider,
+    _claude_result_message_error,
+)
 
 
 def _install_fake_claude_sdk(monkeypatch):
@@ -97,6 +101,60 @@ def _claude_provider(monkeypatch):
     return provider
 
 
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        (
+            types.SimpleNamespace(
+                is_error=False,
+                errors=None,
+                result="ordinary answer",
+                subtype="success",
+            ),
+            None,
+        ),
+        (
+            types.SimpleNamespace(
+                is_error=False,
+                errors=["rate limit exceeded", " request rejected "],
+                result="ignored fallback",
+                subtype="error",
+            ),
+            "rate limit exceeded; request rejected",
+        ),
+        (
+            types.SimpleNamespace(
+                is_error=True,
+                errors=[],
+                result="request could not be completed",
+                subtype="error",
+            ),
+            "request could not be completed",
+        ),
+        (
+            types.SimpleNamespace(
+                is_error=True,
+                errors=None,
+                result=None,
+                subtype="error_max_turns",
+            ),
+            "error_max_turns",
+        ),
+        (
+            types.SimpleNamespace(
+                is_error=True,
+                errors=None,
+                result=None,
+                subtype=None,
+            ),
+            "Claude SDK run failed",
+        ),
+    ],
+)
+def test_claude_result_message_error_extraction(message, expected):
+    assert _claude_result_message_error(message) == expected
+
+
 @pytest.mark.asyncio
 async def test_claude_result_message_failure_becomes_sdk_error(monkeypatch):
     sdk = _install_fake_claude_sdk(monkeypatch)
@@ -113,7 +171,7 @@ async def test_claude_result_message_failure_becomes_sdk_error(monkeypatch):
 
     result = await _claude_provider(monkeypatch)._run_agent("hello", 30.0, None)
 
-    assert result.error == "rate limit exceeded; request could not be completed"
+    assert result.error == "rate limit exceeded"
     assert result.response_text == f"Error: {result.error}"
 
 

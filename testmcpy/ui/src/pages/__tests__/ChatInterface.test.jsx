@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { BrowserRouter } from 'react-router-dom'
 import { NotificationProvider } from '../../components/NotificationProvider'
 import {
+  CHAT_CLEAR_TOKEN_KEY,
   CHAT_STORAGE_KEY,
   LEGACY_CHAT_STORAGE_KEY,
   loadChatConversation,
@@ -308,6 +309,56 @@ describe('ChatInterface conversation persistence', () => {
     await waitFor(() => {
       expect(window.localStorage.getItem(CHAT_STORAGE_KEY)).toBeNull()
     })
+  })
+
+  it('honors a real cross-tab clear event during streaming without resurrecting context', async () => {
+    global.fetch = vi
+      .fn()
+      .mockImplementationOnce(async (_url, options) => abortableSseResponse(options.signal))
+      .mockImplementationOnce(async () => sseResponse({ content: 'fresh cross-tab answer' }))
+
+    renderChat({ selectedLlmProfile: 'profile-b' })
+    const user = userEvent.setup()
+    const input = screen.getByLabelText('Message input')
+    await user.type(input, 'clear this from another tab')
+    await user.click(screen.getByRole('button', { name: 'Send message' }))
+    expect(await screen.findByText('partial answer')).toBeInTheDocument()
+
+    const requestSignal = chatRequests()[0][1].signal
+    const crossTabClearToken = 'clear-from-another-tab'
+    window.localStorage.setItem(CHAT_CLEAR_TOKEN_KEY, crossTabClearToken)
+    window.localStorage.removeItem(CHAT_STORAGE_KEY)
+
+    // Force a synchronous stale flush before the storage event arrives. It is
+    // expected synchronization and must not be presented as a save failure.
+    fireEvent(window, new Event('pagehide'))
+    expect(screen.queryByText(
+      'This browser could not save the conversation. Keep this tab open to avoid losing context.',
+    )).not.toBeInTheDocument()
+
+    fireEvent(window, new StorageEvent('storage', {
+      key: CHAT_CLEAR_TOKEN_KEY,
+      oldValue: null,
+      newValue: crossTabClearToken,
+      url: window.location.href,
+    }))
+
+    expect(requestSignal.aborted).toBe(true)
+    expect(screen.getByText('Chat with your MCP tools')).toBeInTheDocument()
+    await waitFor(() => {
+      expect(screen.queryByText('partial answer')).not.toBeInTheDocument()
+      expect(screen.queryByText(/\[Cancelled\]/)).not.toBeInTheDocument()
+      expect(loadChatConversation()).toMatchObject({
+        messages: [],
+        systemPrompt: '',
+        clearToken: crossTabClearToken,
+      })
+    })
+
+    await user.type(input, 'start after the other tab cleared')
+    await user.click(screen.getByRole('button', { name: 'Send message' }))
+    expect(await screen.findByText('fresh cross-tab answer')).toBeInTheDocument()
+    expect(requestBody(1).history).toBeNull()
   })
 
   it('marks a stream without a complete event as interrupted and filters it from follow-up history', async () => {

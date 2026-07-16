@@ -107,6 +107,30 @@ describe('chat persistence', () => {
     })
   })
 
+  it('does not retry or report compaction for a non-quota storage failure', () => {
+    const failedStorage = memoryStorage()
+    const storageError = new DOMException('Storage access denied', 'SecurityError')
+    let setItemCalls = 0
+    failedStorage.setItem = () => {
+      setItemCalls += 1
+      throw storageError
+    }
+
+    const result = saveChatConversation({
+      messages: [{ role: 'user', content: 'do not mislabel this failure' }],
+      systemPrompt: '',
+    }, failedStorage)
+
+    expect(result).toMatchObject({
+      ok: false,
+      compacted: false,
+      stale: false,
+      error: storageError,
+    })
+    expect(setItemCalls).toBe(1)
+    expect(failedStorage.getItem(CHAT_STORAGE_KEY)).toBeNull()
+  })
+
   it('uses a durable clear token to reject stale saves and ignore raced pre-clear payloads', () => {
     const beforeClear = loadChatConversation(storage)
     expect(beforeClear.clearToken).toBeNull()
@@ -144,6 +168,7 @@ describe('chat persistence', () => {
       ok: false,
       stale: true,
       clearToken: cleared.clearToken,
+      error: null,
     })
 
     expect(saveChatConversation({

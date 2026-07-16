@@ -181,6 +181,40 @@ class TestChatSelectedProfileAuth:
         assert oversized_answer not in {message["content"] for message in sent_history}
         assert any(event["type"] == "complete" for event in events)
 
+    def test_chat_response_reports_budgeted_history(self, client):
+        provider = make_fake_provider()
+        oversized_answer = "x" * 300_000
+        body = {
+            **CHAT_BODY,
+            "model": "gpt-4o",
+            "provider": "openai",
+            "history": [
+                {"role": "system", "content": "Keep project facts."},
+                {"role": "user", "content": "Old question"},
+                {"role": "assistant", "content": oversized_answer},
+                {"role": "user", "content": "My project is Atlas."},
+                {"role": "assistant", "content": "Understood."},
+            ],
+            "message": "What is my project?",
+        }
+
+        with patch("testmcpy.server.api.create_llm_provider", return_value=provider):
+            response = client.post("/api/chat", json=body)
+
+        assert response.status_code == 200
+        assert response.json()["context_trimmed"] == {
+            "omitted_messages": 1,
+            "original_messages": 5,
+            "sent_messages": 4,
+            "context_window": 128000,
+            "model": "gpt-4o",
+            "system_truncated": False,
+        }
+        assert oversized_answer not in {
+            message["content"]
+            for message in provider.generate_with_tools.await_args.kwargs["messages"]
+        }
+
     def test_chat_uses_native_results_without_replaying_tool_calls(self, client, mock_mcp_client):
         native_provider = make_fake_provider()
         native_provider.generate_with_tools.return_value = SimpleNamespace(
@@ -577,7 +611,7 @@ class TestChatSelectedProfileAuth:
                 subtype="error_during_execution",
                 duration_ms=1,
                 duration_api_ms=1,
-                is_error=True,
+                is_error=False,
                 num_turns=1,
                 session_id="test-session",
                 result="Request failed",
@@ -674,7 +708,7 @@ class TestChatSelectedProfileAuth:
         assert options.extra_args == {"strict-mcp-config": None}
         assert options.tools == ["ToolSearch"]
         assert options.disallowed_tools == []
-        assert options.system_prompt is None
+        assert options.system_prompt == provider._MCP_TOOL_SEARCH_SYSTEM_PROMPT
         assert "NODE_TLS_REJECT_UNAUTHORIZED" not in options.env
         assert captured["cwd_exists_during_query"] is True
         assert Path(options.cwd) != Path.cwd()

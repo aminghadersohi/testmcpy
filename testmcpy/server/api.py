@@ -61,6 +61,7 @@ from testmcpy.server.websocket import strip_mcp_prefix  # noqa: E402
 from testmcpy.src.llm_integration import (  # noqa: E402
     BaseSDKProvider,
     ClaudeSDKProvider,
+    _claude_result_message_error,
     _close_async_iterator,
     _prepare_agent_chat_context,
     create_llm_provider,
@@ -133,6 +134,7 @@ class ChatResponse(BaseModel):
     duration: float = 0.0
     model: str | None = None  # Model used for this response
     provider: str | None = None  # Provider used (anthropic, openai, etc.)
+    context_trimmed: dict[str, Any] | None = None
 
 
 # Global state
@@ -1342,7 +1344,7 @@ async def chat(request: ChatRequest) -> ChatResponse:
             f"[Chat] LLM provider initialized. Generating response with {len(all_tools)} tools..."
         )
 
-        chat_history, _context_notice = _budget_chat_history(
+        chat_history, context_notice = _budget_chat_history(
             request.history,
             model=str(model),
             prompt=request.message,
@@ -1475,6 +1477,7 @@ async def chat(request: ChatRequest) -> ChatResponse:
                 "duration": result.duration,
                 "model": model,
                 "provider": str(provider.value) if hasattr(provider, "value") else str(provider),
+                "context_trimmed": context_notice,
             }
         )
         return ChatResponse(**public_result)
@@ -1828,14 +1831,8 @@ async def chat_stream(request: ChatRequest):
                                 }
                             if message.total_cost_usd is not None:
                                 total_cost = message.total_cost_usd
-                            if getattr(message, "is_error", False):
-                                result_errors = getattr(message, "errors", None) or []
-                                sdk_error = (
-                                    "; ".join(str(error) for error in result_errors if error)
-                                    or getattr(message, "result", None)
-                                    or getattr(message, "subtype", None)
-                                    or "Claude SDK request failed"
-                                )
+                            if result_error := _claude_result_message_error(message):
+                                sdk_error = result_error
 
                 except ClaudeSDKError as exc:
                     # If there are pending tool calls without results,

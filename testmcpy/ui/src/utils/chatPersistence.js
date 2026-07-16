@@ -50,6 +50,23 @@ function readClearToken(storage) {
   return typeof value === 'string' && value ? value : null
 }
 
+function isStorageQuotaError(error) {
+  if (
+    !error
+    || typeof DOMException === 'undefined'
+    || !(error instanceof DOMException)
+  ) return false
+
+  // Browser engines do not agree on one quota exception shape. Modern
+  // Chromium/Safari use QuotaExceededError, while Firefox historically used
+  // NS_ERROR_DOM_QUOTA_REACHED. The numeric codes cover older DOMException
+  // implementations without treating an ordinary setItem failure as quota.
+  return error.name === 'QuotaExceededError'
+    || error.name === 'NS_ERROR_DOM_QUOTA_REACHED'
+    || error.code === 22
+    || error.code === 1014
+}
+
 function isRecord(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
 }
@@ -299,7 +316,7 @@ export function saveChatConversation(
     compacted: false,
     stale: true,
     clearToken: currentClearToken,
-    error: new Error('Conversation was cleared in another tab'),
+    error: null,
   })
 
   let currentClearToken
@@ -337,6 +354,16 @@ export function saveChatConversation(
     if (latestClearToken !== expectedClearToken) return staleResult(latestClearToken)
     return { ok: true, compacted: false, stale: false, clearToken: expectedClearToken, error: null }
   } catch (error) {
+    if (!isStorageQuotaError(error)) {
+      return {
+        ok: false,
+        compacted: false,
+        stale: false,
+        clearToken: expectedClearToken,
+        error,
+      }
+    }
+
     // Tool results and thinking traces can be large. If the browser quota is
     // reached, retain the actual conversation text so context still resumes.
     try {

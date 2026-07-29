@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Reasoning-**effort** benchmark dimension. `testmcpy run --effort <level>` and
+  `testmcpy bench --efforts low,medium,high` sweep reasoning effort for the
+  providers that support it (claude-sdk → `ClaudeAgentOptions.effort`;
+  codex-sdk → `ModelSettings.reasoning`; openai → `reasoning_effort`); other
+  providers ignore it. Effort is persisted per run (new nullable `effort`
+  column on `test_runs` + Alembic migration; SQLite auto-migrates).
+- New performance leaderboard charts on `/performance` (new **Charts** tab,
+  existing tables kept): a DeepSWE-style ranked bar chart with score-variance
+  error bars and cost/tokens/steps, a FrontierCode-style accuracy-vs-cost log
+  scatter with per-model reasoning-effort curves, and per-suite faceted bars.
+- Analytics gained effort/suite grouping (`include_effort` / `include_suite`)
+  and new per-config metrics — score standard deviation (error bars),
+  average output tokens, and average tool "steps" — on `/api/analytics`
+  matrix + leaderboard and the `leaderboard` CLI (`--by-effort` / `--by-suite`).
+
+### Fixed
+- Chat progress no longer shows a misleading "Turn n/10" for SDK-backed
+  (Claude) conversations. That denominator only ever bounded the non-SDK
+  manual loop; SDK runs loop internally and routinely ran past 10 turns, so
+  the counter appeared to exceed its own limit. SDK-backed chats now show an
+  open-ended "Turn n", while the non-SDK manual loop keeps its "Turn n/10".
+- Restored the docs-site build (broken since June). Earlier dependency bumps
+  pushed it to Nextra 4 / Next 16 while the site is still a Nextra 3 `pages/`
+  app, so `next build` failed on the now-unrecognized `theme`/`themeConfig`
+  config keys. Pinned `nextra`/`nextra-theme-docs` back to `^3.3.1` (Next 15
+  is compatible); this also unblocks the docs-site Dependabot PRs, which were
+  all failing the same build check.
+
 ## [0.11.10] - 2026-07-15
 
 ### Added

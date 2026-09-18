@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.21] - 2026-09-17
+
 ### Added
 - A typed, vendor-neutral headless OAuth/MCP interoperability probe with
   versioned manifests and reports, RFC 8414/RFC 9728 discovery, optional OIDC,
